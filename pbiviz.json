@@ -1,0 +1,26 @@
+{
+  "visual": {
+    "name": "barChart",
+    "displayName": "棒グラフ",
+    "guid": "BarChart4F4E941466594051B76D00069D246B4A",
+    "visualClassName": "Visual",
+    "version": "1.4.4.0",
+    "description": "日本の資料づくりに合わせた棒グラフ",
+    "supportUrl": "https://github.com/itoken-lab-jp/bar-chart/issues",
+    "gitHubUrl": "https://github.com/itoken-lab-jp/bar-chart"
+  },
+  "apiVersion": "5.11.1",
+  "author": {
+    "name": "itoken_lab",
+    "email": "itoken.lab.jp@gmail.com"
+  },
+  "assets": {
+    "icon": "assets/icon.png"
+  },
+  "externalJS": null,
+  "style": "style/visual.less",
+  "capabilities": "capabilities.json",
+  "dependencies": null,
+  "stringResources": [],
+  "version": "1.4.4.0"
+}
