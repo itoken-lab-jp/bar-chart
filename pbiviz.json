@@ -4,7 +4,7 @@
     "displayName": "棒グラフ",
     "guid": "BarChart4F4E941466594051B76D00069D246B4A",
     "visualClassName": "Visual",
-    "version": "1.4.5.0",
+    "version": "1.10.0.0",
     "description": "標準では届かないグラフ表現を足していく棒グラフ",
     "supportUrl": "https://github.com/itoken-lab-jp/bar-chart/issues",
     "gitHubUrl": "https://github.com/itoken-lab-jp/bar-chart"
@@ -22,5 +22,5 @@
   "capabilities": "capabilities.json",
   "dependencies": null,
   "stringResources": [],
-  "version": "1.4.5.0"
+  "version": "1.10.0.0"
 }

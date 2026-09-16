@@ -12,7 +12,7 @@ import { FormattingSettingsService } from "powerbi-visuals-utils-formattingmodel
 import "./../style/visual.less";
 import { App } from "./App";
 import { VisualFormattingSettingsModel } from "./settings";
-import { transform, ViewModel, DataPoint } from "./viewModel";
+import { transform, tooltipStackOf, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint } from "./viewModel";
 import { tooltipItemsOf, toRootCoordinates } from "./tooltip";
 
 import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructorOptions;
@@ -65,7 +65,11 @@ export class Visual implements IVisual {
             );
 
             const viewModel: ViewModel = transform(options.dataViews?.[0], this.host, this.formattingSettings);
-            this.formattingSettings.applyTargets(viewModel.columnTargets);
+            this.formattingSettings.applyTargets(viewModel.columnTargets, {
+                seriesMode: viewModel.seriesMode,
+                labelTargets: viewModel.labelTargets,
+                lineTargets: viewModel.lineTargets,
+            });
             this.selectedIds = this.selectionManager.getSelectionIds() as ISelectionId[];
 
             const render = () =>
@@ -94,6 +98,10 @@ export class Visual implements IVisual {
                         onTooltipShow: (d, x, y) => this.showTooltip(viewModel, d, x, y, false),
                         onTooltipMove: (d, x, y) => this.showTooltip(viewModel, d, x, y, true),
                         onTooltipHide: () => this.tooltipService.hide({ isTouchEvent: false, immediately: false }),
+                        onLineTooltipShow: (j, i, x, y) => this.showLineTooltip(viewModel, j, i, x, y, false),
+                        onLineTooltipMove: (j, i, x, y) => this.showLineTooltip(viewModel, j, i, x, y, true),
+                        onRibbonTooltipShow: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, false),
+                        onRibbonTooltipMove: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, true),
                     })
                 );
             this.renderLatest = render;
@@ -107,7 +115,7 @@ export class Visual implements IVisual {
     }
 
     /**
-     * 棒のツールヒント。標準と同じく カテゴリ・値・追加フィールド を出し、棒の selectionId を渡す
+     * 棒のツールヒント。標準と同じく カテゴリ・凡例（あれば）・値・追加フィールド を出し、棒の selectionId を渡す
      * （ドリルスルーやレポート ページのツールヒントが対象の行を知るため）
      */
     private showTooltip(viewModel: ViewModel, d: DataPoint, clientX: number, clientY: number, move: boolean): void {
@@ -115,8 +123,43 @@ export class Visual implements IVisual {
         const options = {
             coordinates: toRootCoordinates(clientX, clientY, this.element),
             isTouchEvent: false,
-            dataItems: tooltipItemsOf(viewModel.tooltip, d.rowIndex, d.category),
+            dataItems: tooltipItemsOf(viewModel.tooltip, d.rowIndex, d.category, d.seriesIndex, tooltipStackOf(viewModel, d)),
             identities: [d.selectionId],
+        };
+        if (move) {
+            this.tooltipService.move(options);
+        } else {
+            this.tooltipService.show(options);
+        }
+    }
+
+    /** 折れ線の点のツールヒント。カテゴリ と 折れ線の値。点の selectionId（カテゴリ＋メジャー）を渡す */
+    private showLineTooltip(viewModel: ViewModel, lineIndex: number, pointIndex: number, clientX: number, clientY: number, move: boolean): void {
+        const point = viewModel.lines[lineIndex]?.points[pointIndex];
+        if (!point || !this.tooltipService.enabled()) return;
+        const options = {
+            coordinates: toRootCoordinates(clientX, clientY, this.element),
+            isTouchEvent: false,
+            dataItems: lineTooltipItems(viewModel, lineIndex, pointIndex),
+            identities: [point.selectionId],
+        };
+        if (move) {
+            this.tooltipService.move(options);
+        } else {
+            this.tooltipService.show(options);
+        }
+    }
+
+    /** リボンの帯のツールヒント。前後の値・変化・順位。帯の両端の棒の selectionId を渡す */
+    private showRibbonTooltip(viewModel: ViewModel, seriesIndex: number, fromIndex: number, clientX: number, clientY: number, move: boolean): void {
+        const a = viewModel.categoryGroups[fromIndex]?.points[seriesIndex];
+        const b = viewModel.categoryGroups[fromIndex + 1]?.points[seriesIndex];
+        if (!a || !b || !this.tooltipService.enabled()) return;
+        const options = {
+            coordinates: toRootCoordinates(clientX, clientY, this.element),
+            isTouchEvent: false,
+            dataItems: ribbonTooltipItems(viewModel, seriesIndex, fromIndex),
+            identities: [a.selectionId, b.selectionId],
         };
         if (move) {
             this.tooltipService.move(options);

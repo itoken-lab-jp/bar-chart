@@ -14,6 +14,16 @@ export interface TooltipColumn {
     values: PrimitiveValue[];
 }
 
+/** 複数系列のときの、系列 1 本ぶんのツールヒントの中身 */
+export interface TooltipSeries {
+    /** 凡例のフィールド名。凡例を使わない（値が複数の）ときは null */
+    legendName: string | null;
+    /** 系列の名前（凡例の値） */
+    seriesName: string;
+    measure: TooltipColumn;
+    extras: TooltipColumn[];
+}
+
 export interface TooltipSource {
     /** カテゴリのフィールド名 */
     categoryName: string;
@@ -21,6 +31,8 @@ export interface TooltipSource {
     measure: TooltipColumn;
     /** 「ツールヒント」に追加されたフィールド */
     extras: TooltipColumn[];
+    /** 複数系列のときの系列ごとの中身。無ければ measure と extras を使う（系列 1 本） */
+    series?: TooltipSeries[];
 }
 
 export function tooltipColumnOf(column: DataViewValueColumn): TooltipColumn {
@@ -45,14 +57,46 @@ export function formatTooltipValue(value: PrimitiveValue | undefined, format: st
     return valueFormatter.format(value, format);
 }
 
+/** 積み上げのときにツールヒントへ足すもの */
+export interface TooltipStack {
+    /** 積み上げ: カテゴリの合計（正と負を足した値）。「合計」の行を足す */
+    total?: number | null;
+    /** 100% 積み上げ: カテゴリの中の割合（-1〜1）。値の後ろにかっこで付ける */
+    share?: number | null;
+}
+
+/** 100% 積み上げの割合。標準と同じく小数 2 桁（900 (69.23%)） */
+export function formatShare(share: number): string {
+    return `${(share * 100).toFixed(2)}%`;
+}
+
+/** 積み上げの「合計」の行の名前 */
+export const TOTAL_TEXT = "合計";
+
 /**
- * 棒 1 本ぶんのツールヒント。標準と同じ並び: カテゴリ → 値 → 追加したフィールド。
+ * 棒 1 本ぶんのツールヒント。標準と同じ並び: カテゴリ → 凡例（あれば）→ 値 → 合計（積み上げ）→ 追加したフィールド。
  * 表示のたびに作る（全カテゴリぶんを update ごとに書式化しない）
  */
-export function tooltipItemsOf(source: TooltipSource, rowIndex: number, category: string): VisualTooltipDataItem[] {
+export function tooltipItemsOf(
+    source: TooltipSource,
+    rowIndex: number,
+    category: string,
+    seriesIndex = 0,
+    stack: TooltipStack = {}
+): VisualTooltipDataItem[] {
+    const series = source.series?.[seriesIndex];
+    const measure = series?.measure ?? source.measure;
+    const extras = series?.extras ?? source.extras;
+    const measureText = formatTooltipValue(measure.values[rowIndex], measure.format);
+    const hasShare = stack.share !== null && stack.share !== undefined && measure.values[rowIndex] !== null && measure.values[rowIndex] !== undefined;
     return [
         { displayName: source.categoryName, value: category },
-        ...[source.measure, ...source.extras].map((column) => ({
+        ...(series?.legendName ? [{ displayName: series.legendName, value: series.seriesName }] : []),
+        { displayName: measure.displayName, value: hasShare ? `${measureText} (${formatShare(stack.share!)})` : measureText },
+        ...(stack.total !== null && stack.total !== undefined
+            ? [{ displayName: TOTAL_TEXT, value: formatTooltipValue(stack.total, measure.format) }]
+            : []),
+        ...extras.map((column) => ({
             displayName: column.displayName,
             value: formatTooltipValue(column.values[rowIndex], column.format),
         })),

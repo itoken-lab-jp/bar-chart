@@ -11,6 +11,18 @@
             "kind": "Measure"
         },
         {
+            "displayName": "凡例",
+            "name": "series",
+            "kind": "Grouping",
+            "description": "系列ごとに分ける。入れると値は 1 つに絞られる"
+        },
+        {
+            "displayName": "折れ線の値",
+            "name": "lineMeasure",
+            "kind": "Measure",
+            "description": "折れ線で描く値。棒と尺度が違えば右の第 2 Y 軸に出す"
+        },
+        {
             "displayName": "ツールヒント",
             "name": "tooltips",
             "kind": "Measure"
@@ -20,6 +32,18 @@
         "columns": {
             "displayName": "列",
             "properties": {
+                "chartType": {
+                    "displayName": "グラフの種類",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "orientation": {
+                    "displayName": "向き",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "fill": {
                     "displayName": "カラー",
                     "type": {
@@ -94,6 +118,12 @@
                         "numeric": true
                     }
                 },
+                "seriesSpacing": {
+                    "displayName": "系列間のスペース (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
                 "maxBarWidth": {
                     "displayName": "最大幅 (px)",
                     "type": {
@@ -104,6 +134,391 @@
                     "displayName": "角丸 (px)",
                     "type": {
                         "numeric": true
+                    }
+                }
+            }
+        },
+        "valueAxis2": {
+            "displayName": "第 2 Y 軸",
+            "properties": {
+                "show": {
+                    "displayName": "表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "start": {
+                    "displayName": "最小値",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "end": {
+                    "displayName": "最大値",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "valueShow": {
+                    "displayName": "値",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "fontFamily": {
+                    "displayName": "フォント",
+                    "type": {
+                        "formatting": {
+                            "fontFamily": true
+                        }
+                    }
+                },
+                "fontSize": {
+                    "displayName": "文字サイズ",
+                    "type": {
+                        "formatting": {
+                            "fontSize": true
+                        }
+                    }
+                },
+                "bold": {
+                    "displayName": "太字",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "italic": {
+                    "displayName": "斜体",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "underline": {
+                    "displayName": "下線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "labelColor": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "precision": {
+                    "displayName": "小数点以下の桁数",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "titleShow": {
+                    "displayName": "タイトル",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleText": {
+                    "displayName": "タイトル テキスト",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "titleFontFamily": {
+                    "displayName": "フォント",
+                    "type": {
+                        "formatting": {
+                            "fontFamily": true
+                        }
+                    }
+                },
+                "titleFontSize": {
+                    "displayName": "文字サイズ",
+                    "type": {
+                        "formatting": {
+                            "fontSize": true
+                        }
+                    }
+                },
+                "titleBold": {
+                    "displayName": "太字",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleItalic": {
+                    "displayName": "斜体",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleUnderline": {
+                    "displayName": "下線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleColor": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "unitType": {
+                    "displayName": "表示単位",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "unitNotation": {
+                    "displayName": "単位の表記",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "showUnitOnAxis": {
+                    "displayName": "軸ラベルに単位を表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleStyle": {
+                    "displayName": "スタイル",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "unitShow": {
+                    "displayName": "単位ラベルの表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "unitText": {
+                    "displayName": "単位の追加文字",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "unitStyle": {
+                    "displayName": "スタイル",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "unitIncludeDisplayUnit": {
+                    "displayName": "表示単位（百万など）を付ける",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "unitFontSize": {
+                    "displayName": "単位文字サイズ",
+                    "type": {
+                        "formatting": {
+                            "fontSize": true
+                        }
+                    }
+                },
+                "unitColor": {
+                    "displayName": "単位カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "lines": {
+            "displayName": "線",
+            "properties": {
+                "fill": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "width": {
+                    "displayName": "幅 (px)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "lineStyle": {
+                    "displayName": "線のスタイル",
+                    "type": {
+                        "enumeration": []
+                    }
+                }
+            }
+        },
+        "ribbons": {
+            "displayName": "リボン",
+            "properties": {
+                "matchSeriesColor": {
+                    "displayName": "データ系列の色を一致させる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "fill": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "transparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "borderShow": {
+                    "displayName": "罫線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "borderMatchRibbon": {
+                    "displayName": "リボンの色を合わせる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "borderFill": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "borderTransparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "borderWidth": {
+                    "displayName": "幅 (px)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "spacing": {
+                    "displayName": "リボンと列の間のスペース (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                }
+            }
+        },
+        "markers": {
+            "displayName": "マーカー",
+            "properties": {
+                "show": {
+                    "displayName": "表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "size": {
+                    "displayName": "サイズ (px)",
+                    "type": {
+                        "numeric": true
+                    }
+                }
+            }
+        },
+        "legend": {
+            "displayName": "凡例",
+            "properties": {
+                "show": {
+                    "displayName": "表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "position": {
+                    "displayName": "位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "fontFamily": {
+                    "displayName": "フォント",
+                    "type": {
+                        "formatting": {
+                            "fontFamily": true
+                        }
+                    }
+                },
+                "fontSize": {
+                    "displayName": "文字サイズ",
+                    "type": {
+                        "formatting": {
+                            "fontSize": true
+                        }
+                    }
+                },
+                "bold": {
+                    "displayName": "太字",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "italic": {
+                    "displayName": "斜体",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "underline": {
+                    "displayName": "下線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "labelColor": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "titleShow": {
+                    "displayName": "タイトル",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleText": {
+                    "displayName": "タイトル テキスト",
+                    "type": {
+                        "text": true
                     }
                 }
             }
@@ -199,6 +614,95 @@
                     "displayName": "小数点以下の桁数",
                     "type": {
                         "enumeration": []
+                    }
+                }
+            }
+        },
+        "totalLabels": {
+            "displayName": "合計ラベル",
+            "properties": {
+                "show": {
+                    "displayName": "表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "fontFamily": {
+                    "displayName": "フォント",
+                    "type": {
+                        "formatting": {
+                            "fontFamily": true
+                        }
+                    }
+                },
+                "fontSize": {
+                    "displayName": "文字サイズ",
+                    "type": {
+                        "formatting": {
+                            "fontSize": true
+                        }
+                    }
+                },
+                "bold": {
+                    "displayName": "太字",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "italic": {
+                    "displayName": "斜体",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "underline": {
+                    "displayName": "下線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "color": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "precision": {
+                    "displayName": "小数点以下の桁数",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "splitPositiveNegative": {
+                    "displayName": "正と負の分割",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "backgroundShow": {
+                    "displayName": "背景",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "backgroundColor": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "backgroundTransparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
                     }
                 }
             }
@@ -627,6 +1131,21 @@
     },
     "dataViewMappings": [
         {
+            "conditions": [
+                {
+                    "series": {
+                        "max": 0
+                    }
+                },
+                {
+                    "series": {
+                        "max": 1
+                    },
+                    "measure": {
+                        "max": 1
+                    }
+                }
+            ],
             "categorical": {
                 "categories": {
                     "for": {
@@ -639,18 +1158,31 @@
                     }
                 },
                 "values": {
-                    "select": [
-                        {
-                            "bind": {
-                                "to": "measure"
+                    "group": {
+                        "by": "series",
+                        "select": [
+                            {
+                                "for": {
+                                    "in": "measure"
+                                }
+                            },
+                            {
+                                "for": {
+                                    "in": "lineMeasure"
+                                }
+                            },
+                            {
+                                "for": {
+                                    "in": "tooltips"
+                                }
                             }
-                        },
-                        {
-                            "for": {
-                                "in": "tooltips"
+                        ],
+                        "dataReductionAlgorithm": {
+                            "top": {
+                                "count": 60
                             }
                         }
-                    ]
+                    }
                 }
             }
         }
