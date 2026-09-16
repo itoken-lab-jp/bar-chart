@@ -18,6 +18,7 @@ import {
     LineTarget,
     CHART_TYPES,
     ChartType,
+    RIBBON_ORDERS,
     DETAIL_CONTENTS,
     LINE_STYLES,
     LINE_SHAPE_DEFAULTS,
@@ -134,8 +135,12 @@ export interface LineSeriesInfo {
     tension: number;
     /** ステップの位置（"before" | "center" | "after"） */
     stepPosition: string;
+    /** ステップの段と段をつなぐ線を出すか */
+    stepConnect: boolean;
     /** 網掛け領域を出すか（カードの表示と、線ごとの「このシリーズに表示」） */
     areaShow: boolean;
+    /** 線（点をつなぐ線）を出すか。線ごとの「このシリーズに表示」、無ければ「すべての系列に表示」。マーカーは別 */
+    lineShow: boolean;
     /** 網掛け領域の下の辺（値 0 の高さ。軸の範囲の外なら端）の軸の比率 */
     baselineRatio: number;
     /** 凡例のクリックで選ぶ ID（メジャー） */
@@ -179,6 +184,8 @@ export interface LegendItemInfo {
     color: string;
     /** クリックで選ぶ ID。系列 1 本の棒は null（選ばない） */
     selectionId: ISelectionId | null;
+    /** 棒の見た目（凡例の四角を棒に合わせる）。折れ線の見た目は lines[index] とマーカーを見る */
+    barStyle?: { transparency: number; borderShow: boolean; borderColor: string; borderWidth: number };
 }
 
 /** 折れ線のマーカー */
@@ -893,16 +900,15 @@ export function transform(
     };
 
     const orientation: Orientation =
-        String(settings.columns.orientation?.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal
+        String(settings.chart.orientation?.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal
             ? ORIENTATIONS.horizontal
             : ORIENTATIONS.vertical;
     const horizontal = orientation === ORIENTATIONS.horizontal;
-    const ribbonSelected = String(settings.columns.chartType?.value?.value ?? "") === CHART_TYPES.ribbon;
 
     // 折れ線の値。凡例があると、系列ごとに同じメジャーの列が複製されて届くので queryName でまとめる。
-    // 横棒とリボンでは折れ線を描かない（標準の複合は縦棒だけで、リボン グラフに折れ線は無い）
+    // 標準の複合は縦棒だけだが、どの種類・向きでも描く（リボンは #101、横棒は #103。横棒は既定でマーカーだけ）
     const lineColumns = new Map<string, DataViewValueColumn[]>();
-    for (const group of horizontal || ribbonSelected ? [] : groups) {
+    for (const group of groups) {
         for (const column of group.values) {
             if (!column.source?.roles?.lineMeasure) continue;
             const key = column.source.queryName ?? column.source.displayName;
@@ -954,15 +960,20 @@ export function transform(
         return String(sliceVal);
     };
 
-    const chartTypeValue = getDropdownValue(settings.columns.chartType?.value, CHART_TYPES.clustered);
+    const chartTypeValue = getDropdownValue(settings.chart.chartType?.value, CHART_TYPES.clustered);
+    // 1.18 までの「リボン」は、書式の読み込み（applyChartTypeDefaults）で積み上げ＋リボンに読み替える。ここでは積み上げとして扱う
     const chartType: ChartType =
-        chartTypeValue === CHART_TYPES.stacked || chartTypeValue === CHART_TYPES.stacked100 || chartTypeValue === CHART_TYPES.ribbon
-            ? chartTypeValue
-            : CHART_TYPES.clustered;
+        chartTypeValue === CHART_TYPES.stacked || chartTypeValue === CHART_TYPES.ribbon
+            ? CHART_TYPES.stacked
+            : chartTypeValue === CHART_TYPES.stacked100
+                ? CHART_TYPES.stacked100
+                : CHART_TYPES.clustered;
     const stacked = chartType !== CHART_TYPES.clustered;
     const percent = chartType === CHART_TYPES.stacked100;
-    // リボンは積み上げと同じく 1 本に積むが、カテゴリごとに値の大きい順に上から並べる（標準と同じ）
-    const ribbon = chartType === CHART_TYPES.ribbon;
+    // リボン（帯）は積み上げ・100% 積み上げで出せる。積む順が「値の大きい順」なら、カテゴリごとに値の大きい系列を外側に積み替える
+    // （標準のリボン グラフと同じ。凡例の順なら標準の積み上げ＋リボンと同じ、#108）
+    const ribbonsOn = stacked && (settings.ribbons.show.value ?? false);
+    const rankOrder = ribbonsOn && getDropdownValue(settings.ribbons.order.value, RIBBON_ORDERS.legend) === RIBBON_ORDERS.value;
 
     // 複数系列の空白は棒を描かないので数えない（系列 1 本の空白は 1.4 までと同じく 0 として数える）
     const isSkipped = (column: DataViewValueColumn, i: number) => seriesMode && isBlankAt(column, i);
@@ -1388,10 +1399,10 @@ export function transform(
         backgroundTransparency: Math.max(0, Math.min(100, tl.backgroundTransparency.value ?? 0)),
     };
 
-    // リボンの帯（グラフの種類がリボンで縦棒のとき。標準のリボン グラフは縦棒だけ）
+    // リボンの帯（積み上げ・100% 積み上げで、リボンがオンのとき。縦棒・横棒とも）
     const rb = settings.ribbons;
     const ribbonSettings: RibbonSettings = {
-        show: ribbon && !horizontal,
+        show: ribbonsOn,
         matchSeriesColor: rb.matchSeriesColor.value ?? true,
         fill: rb.fill.value?.value || "#C8C6C4",
         transparency: clampPercent(rb.transparency.value ?? 30),
@@ -1481,25 +1492,29 @@ export function transform(
         let positiveEnd = 0;
         let negativeEnd = 0;
 
-        // リボン：カテゴリの中で値の小さい順に 0 から積む（いちばん大きい系列が上に来る）。
-        // 負の値は 0 に近い順に下へ積む。順位は値の大きい順（1 が最大）
+        // リボン：順位は値の大きい順（1 が最大、帯のツールヒント用）。
+        // 積む順が値の大きい順なら、カテゴリの中で値の小さい順に 0 から積む（いちばん大きい系列が外側に来る）。
+        // 負の値は 0 に近い順に外へ積む。100% 積み上げは割合で積む
         const ribbonStarts = new Map<number, number>();
         const ribbonRanks = new Map<number, number>();
-        if (ribbon) {
+        if (ribbonsOn) {
             const present = slots
                 .map((slot, s) => ({ s, v: isSkipped(slot.column, i) ? null : numberAt(slot.column, i) }))
                 .filter((e): e is { s: number; v: number } => e.v !== null);
-            let up = 0;
-            let down = 0;
-            present.filter((e) => e.v >= 0).sort((a, b) => a.v - b.v).forEach((e) => {
-                ribbonStarts.set(e.s, up);
-                up += e.v;
-            });
-            present.filter((e) => e.v < 0).sort((a, b) => b.v - a.v).forEach((e) => {
-                ribbonStarts.set(e.s, down);
-                down += e.v;
-            });
             [...present].sort((a, b) => b.v - a.v).forEach((e, k) => ribbonRanks.set(e.s, k + 1));
+            if (rankOrder) {
+                const amountOf = (v: number) => (percent ? (absoluteSum > 0 ? v / absoluteSum : 0) : v);
+                let up = 0;
+                let down = 0;
+                present.filter((e) => e.v >= 0).sort((a, b) => a.v - b.v).forEach((e) => {
+                    ribbonStarts.set(e.s, up);
+                    up += amountOf(e.v);
+                });
+                present.filter((e) => e.v < 0).sort((a, b) => b.v - a.v).forEach((e) => {
+                    ribbonStarts.set(e.s, down);
+                    down += amountOf(e.v);
+                });
+            }
         }
 
         const points: DataPoint[] = slots.map((slot, s) => {
@@ -1509,7 +1524,7 @@ export function transform(
             // 積む量（100% なら割合）と、この棒の始まり・終わり
             const amount = skipped ? 0 : percent ? share! : val;
             let start = 0;
-            if (ribbon) {
+            if (rankOrder) {
                 start = ribbonStarts.get(s) ?? 0;
             } else if (stacked) {
                 start = amount >= 0 ? positiveEnd : negativeEnd;
@@ -1546,7 +1561,7 @@ export function transform(
                 valRatio: calcRatio(end),
                 share,
                 outermost: true,
-                rank: ribbon ? ribbonRanks.get(s) ?? null : null,
+                rank: ribbonsOn ? ribbonRanks.get(s) ?? null : null,
                 ...formatted(val),
                 detailText: detailTextOf(slot, i, val, skipped),
                 selectionId,
@@ -1563,14 +1578,14 @@ export function transform(
             };
         });
 
-        // 積み上げでは、角丸は正と負それぞれいちばん外側の棒だけに付ける（リボンは値の大きい順に積むので、最大と最小）
+        // 積み上げでは、角丸は正と負それぞれいちばん外側の棒だけに付ける（値の大きい順に積むときは、最大と最小）
         if (stacked) {
             const pick = (want: (d: DataPoint) => boolean, better: (a: DataPoint, b: DataPoint) => boolean) =>
                 points.reduce((best, d, k) => (want(d) && (best < 0 || better(d, points[best])) ? k : best), -1);
-            const lastPositive = ribbon
+            const lastPositive = rankOrder
                 ? pick((d) => !d.blank && d.value > 0, (a, b) => a.value >= b.value)
                 : points.map((d) => !d.blank && d.value > 0).lastIndexOf(true);
-            const lastNegative = ribbon
+            const lastNegative = rankOrder
                 ? pick((d) => !d.blank && d.value < 0, (a, b) => a.value <= b.value)
                 : points.map((d) => !d.blank && d.value < 0).lastIndexOf(true);
             points.forEach((d, k) => (d.outermost = k === lastPositive || k === lastNegative));
@@ -1759,6 +1774,7 @@ export function transform(
             return raw !== undefined && raw !== null ? String(raw) : fallback;
         };
         const ownAreaShow = def.objects?.areas?.show;
+        const ownLineShow = own?.show;
         const measureBuilder = () => host.createSelectionIdBuilder();
         // 棒の系列と同じく、テーマの色は色の指定があっても取る（後ろの線の色がずれないように）
         const themeColor = host.colorPalette.getColor(def.key).value;
@@ -1772,7 +1788,9 @@ export function transform(
             smoothing: ownText("smoothing", defaultShape.smoothing),
             tension: clampPercent(typeof own?.tension === "number" ? own.tension : defaultShape.tension),
             stepPosition: ownText("stepPosition", defaultShape.stepPosition),
+            stepConnect: typeof own?.stepConnect === "boolean" ? own.stepConnect : defaultShape.stepConnect,
             areaShow: areasOn && (typeof ownAreaShow === "boolean" ? ownAreaShow : true),
+            lineShow: typeof ownLineShow === "boolean" ? ownLineShow : lineCard.show.value ?? true,
             baselineRatio,
             selectionId: measureBuilder().withMeasure(def.key).createSelectionId(),
             points: categoryGroups.map((g) => {
@@ -1798,7 +1816,9 @@ export function transform(
         smoothing: line.smoothing,
         tension: line.tension,
         stepPosition: line.stepPosition,
+        stepConnect: line.stepConnect,
         areaShow: typeof lineDefs[j].objects?.areas?.show === "boolean" ? Boolean(lineDefs[j].objects?.areas?.show) : true,
+        lineShow: line.lineShow,
     }));
 
     const valueAxis2Settings: ValueAxis2Settings = {
@@ -1841,9 +1861,33 @@ export function transform(
     // 凡例：棒の系列のあとに折れ線。系列 1 本の棒も、折れ線があれば凡例に出す（標準と同じ）
     const legendEntries: LegendItemInfo[] = [
         ...(seriesMode
-            ? series.map((s, index) => ({ kind: "bar" as const, index, name: s.name, color: s.color, selectionId: s.selectionId }))
+            ? series.map((s, index) => ({
+                kind: "bar" as const,
+                index,
+                name: s.name,
+                color: s.color,
+                selectionId: s.selectionId,
+                barStyle: {
+                    transparency: seriesStyles[index].transparency,
+                    borderShow: seriesStyles[index].borderShow,
+                    borderColor: seriesStyles[index].borderColor,
+                    borderWidth: seriesStyles[index].borderWidth,
+                },
+            }))
             : lines.length
-                ? [{ kind: "bar" as const, index: 0, name: slots[0].name, color: columnsSettings.fill, selectionId: null }]
+                ? [{
+                    kind: "bar" as const,
+                    index: 0,
+                    name: slots[0].name,
+                    color: columnsSettings.fill,
+                    selectionId: null,
+                    barStyle: {
+                        transparency: columnsSettings.transparency,
+                        borderShow: columnsSettings.showBorder,
+                        borderColor: columnsSettings.borderMatchColumn ? columnsSettings.fill : columnsSettings.borderFill,
+                        borderWidth: columnsSettings.borderWidth,
+                    },
+                }]
                 : []),
         ...lines.map((l, index) => ({ kind: "line" as const, index, name: l.name, color: l.color, selectionId: l.selectionId })),
     ];

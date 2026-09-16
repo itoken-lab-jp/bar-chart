@@ -9,7 +9,7 @@ import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, Da
 import { VisualFormattingSettingsModel } from "./settings";
 import { contrastingText, placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
 import { clusterLayout } from "./layout";
-import { layoutLegend, LegendLayout, LEGEND_MARKER_GAP } from "./legend";
+import { layoutLegend, LegendLayout, LegendItemBox, LEGEND_MARKER_GAP } from "./legend";
 import { linePath, areaPath, markerPath, XY } from "./linePath";
 
 /** 長ければ末尾を省略した文字（軸のタイトル用）。省略したときは、マウスを乗せると全体が出る */
@@ -222,12 +222,13 @@ export const App: React.FC<AppProps> = ({
     // 凡例（複数系列のときだけ）。グラフの外側に置き、その分だけグラフの領域を縮める
     const legend: LegendLayout | null = lg.show
         ? layoutLegend({
-            entries: viewModel.legendEntries.map((e) => ({ name: e.name, color: e.color })),
+            entries: viewModel.legendEntries.map((e) => ({ name: e.name, color: e.color, kind: e.kind })),
             title: lg.title,
             font: { family: lg.fontFamily, size: legendFontPx, bold: lg.bold, italic: lg.italic, underline: lg.underline },
             position: lg.position,
             width: viewport.width,
             height: viewport.height,
+            horizontal: viewModel.orientation === "horizontal",
         })
         : null;
 
@@ -252,6 +253,208 @@ export const App: React.FC<AppProps> = ({
         (entry.kind === "line"
             ? isLinePicked(entry.index)
             : viewModel.dataPoints.some((d) => d.seriesIndex === entry.index && isPicked(d)));
+
+    /**
+     * 折れ線 1 本。点はカテゴリの中心に置き、値の無いカテゴリでは線を切る。
+     * 点の上にマウスの当たり判定の円を置き、ツールヒントと選択を受ける。
+     * posOf(i) はカテゴリの軸の座標、valueOf(ratio) は値の軸の座標。横棒（horizontal）では点が上から下へ並ぶ
+     */
+    const renderLineSeries = (
+        line: LineSeriesInfo,
+        j: number,
+        part: "area" | "line",
+        posOf: (i: number) => number,
+        valueOf: (ratio: number) => number,
+        horizontal: boolean,
+        stepExtension: number,
+        stepBounds: [number, number]
+    ) => {
+        const pts = line.points.map((p, i) => {
+            const pos = posOf(i);
+            const val = p.ratio === null ? null : valueOf(p.ratio);
+            const at: XY | null = val === null ? null : horizontal ? { x: val, y: pos } : { x: pos, y: val };
+            return { p, i, at };
+        });
+        // 値の無いカテゴリで切った、途切れのない点の並び
+        const runs: XY[][] = [];
+        let run: XY[] = [];
+        for (const pt of pts) {
+            if (pt.at === null) {
+                if (run.length) runs.push(run);
+                run = [];
+                continue;
+            }
+            run.push(pt.at);
+        }
+        if (run.length) runs.push(run);
+        const shape = {
+            interpolation: line.interpolation,
+            smoothing: line.smoothing,
+            tension: line.tension / 100,
+            stepPosition: line.stepPosition,
+            stepConnect: line.stepConnect,
+        };
+        const path = runs.map((r) => linePath(r, shape, horizontal, stepExtension, stepBounds)).join(" ");
+        const dimmed = !viewModel.hasHighlights && selectedIds.length > 0 && !isLinePicked(j);
+        const opacity = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
+        const dash =
+            line.lineStyle === "dashed"
+                ? `${line.width * 3} ${line.width * 2}`
+                : line.lineStyle === "dotted"
+                    ? `${line.width * 0.1} ${line.width * 2}`
+                    : undefined;
+        const mk = viewModel.markers;
+        const markerFill = mk.color || line.color;
+        const markerOpacity = opacity * Math.max(0, Math.min(1, 1 - mk.transparency / 100));
+        const markerStroke = mk.borderShow ? (mk.borderMatchLine ? line.color : mk.borderColor) : "none";
+        const markerStrokeOpacity = opacity * Math.max(0, Math.min(1, 1 - mk.borderTransparency / 100));
+        const hitR = Math.max(6, line.width * 2);
+        if (part === "area") {
+            // 網掛け領域は棒の上に、透かして塗る（標準と同じ）
+            if (!line.areaShow) return null;
+            const area = viewModel.areas;
+            const baseline = valueOf(line.baselineRatio);
+            return runs.map((r, k) => (
+                <path
+                    key={`area-${j}-${k}`}
+                    d={areaPath(r, baseline, shape, horizontal, stepExtension, stepBounds)}
+                    className="line-area"
+                    fill={area.matchLineColor ? line.color : area.fill}
+                    fillOpacity={opacity * Math.max(0, Math.min(1, 1 - area.transparency / 100))}
+                    stroke="none"
+                    pointerEvents="none"
+                />
+            ));
+        }
+        return (
+            <g key={`line-${j}`} className="line-series">
+                {/* 線は「すべての系列に表示」「このシリーズに表示」がオンのときだけ（マーカーは別に出す） */}
+                {line.lineShow && (
+                    <path
+                        d={path}
+                        className="line-path"
+                        fill="none"
+                        stroke={line.color}
+                        strokeWidth={line.width}
+                        strokeDasharray={dash}
+                        strokeLinejoin={line.lineJoin === "miter" || line.lineJoin === "bevel" ? line.lineJoin : "round"}
+                        strokeLinecap={line.lineStyle === "dotted" ? "round" : "butt"}
+                        strokeOpacity={opacity}
+                        pointerEvents="none"
+                    />
+                )}
+                {pts.map((pt) =>
+                    pt.at === null ? null : (
+                        <g key={`pt-${j}-${pt.i}`}>
+                            {mk.show && (
+                                <path
+                                    d={markerPath(mk.shape, pt.at.x, pt.at.y, mk.size, horizontal)}
+                                    className="line-marker"
+                                    style={{
+                                        fill: markerFill,
+                                        fillOpacity: markerOpacity,
+                                        stroke: markerStroke,
+                                        strokeWidth: mk.borderShow ? mk.borderWidth : 0,
+                                        strokeOpacity: markerStrokeOpacity,
+                                    }}
+                                    pointerEvents="none"
+                                />
+                            )}
+                            <circle
+                                cx={pt.at.x}
+                                cy={pt.at.y}
+                                r={hitR}
+                                className="line-hit"
+                                fill="transparent"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onSelect(pt.p.selectionId, e.ctrlKey || e.metaKey);
+                                }}
+                                onContextMenu={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    onContextMenu(pt.p.selectionId, e.clientX, e.clientY);
+                                }}
+                                onMouseEnter={(e) => onLineTooltipShow?.(j, pt.i, e.clientX, e.clientY)}
+                                onMouseMove={(e) => onLineTooltipMove?.(j, pt.i, e.clientX, e.clientY)}
+                                onMouseLeave={() => onTooltipHide?.()}
+                            />
+                        </g>
+                    )
+                )}
+            </g>
+        );
+    };
+
+    /**
+     * リボンの帯（#76、横棒は #102）。同じ系列の棒を、隣のカテゴリの棒と S 字の帯でつなぐ（棒の後ろに描く）。
+     * 罫線は標準と同じく帯の両縁だけに引く。
+     * gapOf(i) は i 番目と i+1 番目のカテゴリの棒のあいだ（カテゴリの軸の座標）、extentOf(d) は棒の両端（値の軸の座標）。
+     * 縦棒ではカテゴリの軸が x、横棒では y
+     */
+    const renderRibbonBands = (
+        groups: CategoryGroup[],
+        gapOf: (i: number) => [number, number],
+        extentOf: (d: DataPoint) => [number, number],
+        horizontal: boolean
+    ): React.ReactNode[] => {
+        const rb = viewModel.ribbons;
+        const at = (u: number, v: number) => (horizontal ? `${v},${u}` : `${u},${v}`);
+        const nodes: React.ReactNode[] = [];
+        for (let i = 0; i + 1 < groups.length; i++) {
+            const [from, to] = gapOf(i);
+            const pad = (to - from) * (rb.spacing / 100);
+            const ua = from + pad;
+            const ub = to - pad;
+            if (ub <= ua) continue;
+            const um = (ua + ub) / 2;
+            groups[i].points.forEach((a, s) => {
+                const b = groups[i + 1].points[s];
+                if (!b || a.blank || b.blank) return;
+                const [a0, a1] = extentOf(a);
+                const [b0, b1] = extentOf(b);
+                if (a1 - a0 <= 0 && b1 - b0 <= 0) return;
+                const edgeStart = `M ${at(ua, a0)} C ${at(um, a0)} ${at(um, b0)} ${at(ub, b0)}`;
+                const edgeEnd = `M ${at(ub, b1)} C ${at(um, b1)} ${at(um, a1)} ${at(ua, a1)}`;
+                const band = `${edgeStart} L ${at(ub, b1)} C ${at(um, b1)} ${at(um, a1)} ${at(ua, a1)} Z`;
+                const color = rb.matchSeriesColor ? (viewModel.seriesMode ? viewModel.series[s]?.color ?? a.color : a.color) : rb.fill;
+                const dimmed = !viewModel.hasHighlights && selectedIds.length > 0 && !isPicked(a) && !isPicked(b);
+                const opacity = (1 - rb.transparency / 100) * (dimmed ? HIGHLIGHT_DIM_FACTOR : 1);
+                const borderColor = rb.borderMatchRibbon ? color : rb.borderFill;
+                nodes.push(
+                    <g key={`ribbon-${i}-${s}`} className="ribbon-group">
+                        <path
+                            d={band}
+                            className="ribbon"
+                            style={{ fill: color, fillOpacity: opacity }}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                const id = viewModel.series[s]?.selectionId ?? a.selectionId;
+                                onSelect(id, e.ctrlKey || e.metaKey);
+                            }}
+                            onMouseEnter={(e) => onRibbonTooltipShow?.(s, i, e.clientX, e.clientY)}
+                            onMouseMove={(e) => onRibbonTooltipMove?.(s, i, e.clientX, e.clientY)}
+                            onMouseLeave={() => onTooltipHide?.()}
+                        />
+                        {rb.borderShow &&
+                            [edgeStart, edgeEnd].map((curve, k) => (
+                                <path
+                                    key={k}
+                                    d={curve}
+                                    className="ribbon-border"
+                                    fill="none"
+                                    stroke={borderColor}
+                                    strokeWidth={rb.borderWidth}
+                                    strokeOpacity={1 - rb.borderTransparency / 100}
+                                    pointerEvents="none"
+                                />
+                            ))}
+                    </g>
+                );
+            });
+        }
+        return nodes;
+    };
 
     /** グラフ本体（軸・棒・ラベル）。width・height は凡例を除いた領域 */
     const renderChart = (width: number, height: number) => {
@@ -696,188 +899,35 @@ export const App: React.FC<AppProps> = ({
             );
         };
 
-        /**
-         * 折れ線 1 本。点はカテゴリの中心に置き、値の無いカテゴリでは線を切る。
-         * 点の上にマウスの当たり判定の円を置き、ツールヒントと選択を受ける
-         */
-        const renderLine = (line: LineSeriesInfo, j: number, xOffset: number, part: "area" | "line") => {
-            // 第 2 Y 軸には範囲の反転が無いので、そのまま下から上へ
-            const yOf = (ratio: number) =>
-                axis2On ? marginTop + plotHeight * (1 - Math.max(0, Math.min(1, ratio))) : yOfRatio(ratio);
-            const pts = line.points.map((p, i) => ({ p, i, x: xOffset + centerOf(i), y: p.ratio === null ? null : yOf(p.ratio) }));
-            // 値の無いカテゴリで切った、途切れのない点の並び
-            const runs: XY[][] = [];
-            let run: XY[] = [];
-            for (const pt of pts) {
-                if (pt.y === null) {
-                    if (run.length) runs.push(run);
-                    run = [];
-                    continue;
-                }
-                run.push({ x: pt.x, y: pt.y });
-            }
-            if (run.length) runs.push(run);
-            const shape = {
-                interpolation: line.interpolation,
-                smoothing: line.smoothing,
-                tension: line.tension / 100,
-                stepPosition: line.stepPosition,
-            };
-            const path = runs.map((r) => linePath(r, shape)).join(" ");
-            const dimmed = !viewModel.hasHighlights && selectedIds.length > 0 && !isLinePicked(j);
-            const opacity = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
-            const dash =
-                line.lineStyle === "dashed"
-                    ? `${line.width * 3} ${line.width * 2}`
-                    : line.lineStyle === "dotted"
-                        ? `${line.width * 0.1} ${line.width * 2}`
-                        : undefined;
-            const mk = viewModel.markers;
-            const markerFill = mk.color || line.color;
-            const markerOpacity = opacity * Math.max(0, Math.min(1, 1 - mk.transparency / 100));
-            const markerStroke = mk.borderShow ? (mk.borderMatchLine ? line.color : mk.borderColor) : "none";
-            const markerStrokeOpacity = opacity * Math.max(0, Math.min(1, 1 - mk.borderTransparency / 100));
-            const hitR = Math.max(6, line.width * 2);
-            if (part === "area") {
-                // 網掛け領域は棒の上に、透かして塗る（標準と同じ）
-                if (!line.areaShow) return null;
-                const area = viewModel.areas;
-                const baselineY = yOf(line.baselineRatio);
-                return runs.map((r, k) => (
-                    <path
-                        key={`area-${j}-${k}`}
-                        d={areaPath(r, baselineY, shape)}
-                        className="line-area"
-                        fill={area.matchLineColor ? line.color : area.fill}
-                        fillOpacity={opacity * Math.max(0, Math.min(1, 1 - area.transparency / 100))}
-                        stroke="none"
-                        pointerEvents="none"
-                    />
-                ));
-            }
-            return (
-                <g key={`line-${j}`} className="line-series">
-                    <path
-                        d={path}
-                        className="line-path"
-                        fill="none"
-                        stroke={line.color}
-                        strokeWidth={line.width}
-                        strokeDasharray={dash}
-                        strokeLinejoin={line.lineJoin === "miter" || line.lineJoin === "bevel" ? line.lineJoin : "round"}
-                        strokeLinecap={line.lineStyle === "dotted" ? "round" : "butt"}
-                        strokeOpacity={opacity}
-                        pointerEvents="none"
-                    />
-                    {pts.map((pt) =>
-                        pt.y === null ? null : (
-                            <g key={`pt-${j}-${pt.i}`}>
-                                {mk.show && (
-                                    <path
-                                        d={markerPath(mk.shape, pt.x, pt.y, mk.size)}
-                                        className="line-marker"
-                                        style={{
-                                            fill: markerFill,
-                                            fillOpacity: markerOpacity,
-                                            stroke: markerStroke,
-                                            strokeWidth: mk.borderShow ? mk.borderWidth : 0,
-                                            strokeOpacity: markerStrokeOpacity,
-                                        }}
-                                        pointerEvents="none"
-                                    />
-                                )}
-                                <circle
-                                    cx={pt.x}
-                                    cy={pt.y}
-                                    r={hitR}
-                                    className="line-hit"
-                                    fill="transparent"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        onSelect(pt.p.selectionId, e.ctrlKey || e.metaKey);
-                                    }}
-                                    onContextMenu={(e) => {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        onContextMenu(pt.p.selectionId, e.clientX, e.clientY);
-                                    }}
-                                    onMouseEnter={(e) => onLineTooltipShow?.(j, pt.i, e.clientX, e.clientY)}
-                                    onMouseMove={(e) => onLineTooltipMove?.(j, pt.i, e.clientX, e.clientY)}
-                                    onMouseLeave={() => onTooltipHide?.()}
-                                />
-                            </g>
-                        )
-                    )}
-                </g>
+        /** 折れ線（#74）。点はカテゴリの中心。第 2 Y 軸には範囲の反転が無いので、そのまま下から上へ */
+        const renderLine = (line: LineSeriesInfo, j: number, xOffset: number, part: "area" | "line") =>
+            renderLineSeries(
+                line,
+                j,
+                part,
+                (i) => xOffset + centerOf(i),
+                (ratio) => (axis2On ? marginTop + plotHeight * (1 - Math.max(0, Math.min(1, ratio))) : yOfRatio(ratio)),
+                false,
+                // ステップの線は、段が変わる位置と同じく、隣のカテゴリとのすき間の真ん中まで延ばす（プロットの外へは出さない）
+                step / 2,
+                [xOffset, xOffset + plotWidth]
             );
-        };
 
         /**
          * リボンの帯（#76）。同じ系列の棒を、隣のカテゴリの棒と S 字の帯でつなぐ（棒の後ろに描く）。
          * 罫線は標準と同じく帯の上と下の縁だけに引く
          */
         const renderRibbons = (xOffset: number) => {
-            const rb = viewModel.ribbons;
             const half = barWidth / 2;
-            const nodes: React.ReactNode[] = [];
-            for (let i = 0; i + 1 < groups.length; i++) {
-                const left = xOffset + centerOf(i) + half;
-                const right = xOffset + centerOf(i + 1) - half;
-                const pad = (right - left) * (rb.spacing / 100);
-                const xa = left + pad;
-                const xb = right - pad;
-                if (xb <= xa) continue;
-                const xm = (xa + xb) / 2;
-                groups[i].points.forEach((a, s) => {
-                    const b = groups[i + 1].points[s];
-                    if (!b || a.blank || b.blank) return;
-                    const ea = extentBetween(a.startRatio, a.valRatio);
-                    const eb = extentBetween(b.startRatio, b.valRatio);
-                    if (ea.height <= 0 && eb.height <= 0) return;
-                    const aTop = ea.top;
-                    const aBottom = ea.top + ea.height;
-                    const bTop = eb.top;
-                    const bBottom = eb.top + eb.height;
-                    const topCurve = `M ${xa},${aTop} C ${xm},${aTop} ${xm},${bTop} ${xb},${bTop}`;
-                    const bottomCurve = `M ${xb},${bBottom} C ${xm},${bBottom} ${xm},${aBottom} ${xa},${aBottom}`;
-                    const band = `${topCurve} L ${xb},${bBottom} C ${xm},${bBottom} ${xm},${aBottom} ${xa},${aBottom} Z`;
-                    const color = rb.matchSeriesColor ? (viewModel.seriesMode ? viewModel.series[s]?.color ?? a.color : a.color) : rb.fill;
-                    const dimmed = !viewModel.hasHighlights && selectedIds.length > 0 && !isPicked(a) && !isPicked(b);
-                    const opacity = (1 - rb.transparency / 100) * (dimmed ? HIGHLIGHT_DIM_FACTOR : 1);
-                    const borderColor = rb.borderMatchRibbon ? color : rb.borderFill;
-                    nodes.push(
-                        <g key={`ribbon-${i}-${s}`} className="ribbon-group">
-                            <path
-                                d={band}
-                                className="ribbon"
-                                style={{ fill: color, fillOpacity: opacity }}
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    const id = viewModel.series[s]?.selectionId ?? a.selectionId;
-                                    onSelect(id, e.ctrlKey || e.metaKey);
-                                }}
-                                onMouseEnter={(e) => onRibbonTooltipShow?.(s, i, e.clientX, e.clientY)}
-                                onMouseMove={(e) => onRibbonTooltipMove?.(s, i, e.clientX, e.clientY)}
-                                onMouseLeave={() => onTooltipHide?.()}
-                            />
-                            {rb.borderShow &&
-                                [topCurve, bottomCurve].map((curve, k) => (
-                                    <path
-                                        key={k}
-                                        d={curve}
-                                        className="ribbon-border"
-                                        fill="none"
-                                        stroke={borderColor}
-                                        strokeWidth={rb.borderWidth}
-                                        strokeOpacity={1 - rb.borderTransparency / 100}
-                                        pointerEvents="none"
-                                    />
-                                ))}
-                        </g>
-                    );
-                });
-            }
-            return nodes;
+            return renderRibbonBands(
+                groups,
+                (i) => [xOffset + centerOf(i) + half, xOffset + centerOf(i + 1) - half],
+                (d) => {
+                    const e = extentBetween(d.startRatio, d.valRatio);
+                    return [e.top, e.top + e.height];
+                },
+                false
+            );
         };
 
         // プロット内容の描画。xOffset はプロット左端の x
@@ -1319,6 +1369,19 @@ export const App: React.FC<AppProps> = ({
         const badgeAtTopRight = Boolean(badgeText) && unitPosition === "plotTopRight";
         const axisBlockHeight = tickRowHeight + valTitleHeight + (badgeInAxis ? badgeFontPx + 4 : 0);
 
+        // 第 2 X 軸（折れ線の値を値の軸と別の尺度で描くとき、#103）。値の軸の反対側に置く（値の軸が下なら上）
+        const axis2 = viewModel.valueAxis2;
+        const axis2On = axis2.show && viewModel.lines.length > 0;
+        const axis2AtTop = !valueAtTop;
+        const axis2TickFontPx = axis2.fontSize * PT_TO_PX;
+        const axis2TickRow = axis2On && axis2.valueShow ? axis2TickFontPx + 8 : 0;
+        const axis2TitleFontPx = axis2.titleFontSize * PT_TO_PX;
+        const hasAxis2Title = axis2On && axis2.titleShow && Boolean(axis2.titleText);
+        const axis2TitleHeight = hasAxis2Title ? axis2TitleFontPx + 8 : 0;
+        const axis2BadgeText = axis2On ? axis2.badgeText : "";
+        const axis2BadgeFontPx = axis2.unitFontSize * PT_TO_PX;
+        const axis2BlockHeight = axis2On ? axis2TickRow + axis2TitleHeight + (axis2BadgeText ? axis2BadgeFontPx + 4 : 0) : 0;
+
         // カテゴリの軸（左）。ラベルは「最大幅 (%)」まで、長ければ末尾を省略
         const catFontPx = catAxis.fontSize * PT_TO_PX;
         const catTitleFontPx = catAxis.titleFontSize * PT_TO_PX;
@@ -1332,8 +1395,8 @@ export const App: React.FC<AppProps> = ({
 
         const marginLeft = 4 + catTitleWidth + labelAreaWidth;
         const marginRight = 16;
-        const marginTop = 10 + (valueAtTop ? axisBlockHeight : 0) + (badgeAtTopRight ? badgeFontPx + 6 : 0);
-        const marginBottom = 6 + (valueAtTop ? 0 : axisBlockHeight);
+        const marginTop = 10 + (valueAtTop ? axisBlockHeight : 0) + (axis2AtTop ? axis2BlockHeight : 0) + (badgeAtTopRight ? badgeFontPx + 6 : 0);
+        const marginBottom = 6 + (valueAtTop ? axis2BlockHeight : axisBlockHeight);
         const viewHeight = Math.max(10, height - marginTop - marginBottom);
 
         // 「最小カテゴリの高さ」を下回るなら縦にスクロールする
@@ -1381,6 +1444,19 @@ export const App: React.FC<AppProps> = ({
             dl.position === "auto" || (stacked && dl.position === "outsideEnd")
                 ? (stacked ? "insideCenter" : "outsideEnd")
                 : dl.position;
+
+        /** 横棒の折れ線。第 2 X 軸には範囲の反転が無いので、そのまま左から右へ */
+        const renderHLine = (line: LineSeriesInfo, j: number, xOffset: number, yOffset: number, part: "area" | "line") =>
+            renderLineSeries(
+                line,
+                j,
+                part,
+                (i) => yOffset + centerOf(i),
+                (ratio) => xOffset + (axis2On ? plotWidth * Math.max(0, Math.min(1, ratio)) : xOfRatio(ratio)),
+                true,
+                step / 2,
+                [yOffset, yOffset + plotHeight]
+            );
 
         const renderHBar = (d: DataPoint, cy: number, key: string, xOffset: number, yOffset: number) => {
             if (d.blank) return null;
@@ -1601,6 +1677,19 @@ export const App: React.FC<AppProps> = ({
                         ))}
                     </g>
                 )}
+                {viewModel.ribbons.show && groups.length > 1 && (
+                    <g className="ribbons-group">
+                        {renderRibbonBands(
+                            groups,
+                            (i) => [yOffset + centerOf(i) + thickness / 2, yOffset + centerOf(i + 1) - thickness / 2],
+                            (d) => {
+                                const e = extentX(d.startRatio, d.valRatio);
+                                return [xOffset + e.left, xOffset + e.left + e.width];
+                            },
+                            true
+                        )}
+                    </g>
+                )}
                 <g className="bars-group">
                     {groups.map((g, i) => {
                         const cy = centerOf(i);
@@ -1633,11 +1722,87 @@ export const App: React.FC<AppProps> = ({
                         );
                     })}
                 </g>
+                {/* 折れ線の値（#103）。点はカテゴリの中心で、上から下へ並ぶ。既定では線を出さずマーカーだけ */}
+                {viewModel.lines.length > 0 && (
+                    <g className="lines-group">
+                        {viewModel.lines.map((line, j) => renderHLine(line, j, xOffset, yOffset, "area"))}
+                        {viewModel.lines.map((line, j) => renderHLine(line, j, xOffset, yOffset, "line"))}
+                    </g>
+                )}
             </>
         );
 
         /** 値の軸（目盛り・タイトル・単位ラベル）とカテゴリの軸のタイトル。スクロールしても動かない */
         const plotRightX = marginLeft + plotWidth;
+
+        /** 第 2 X 軸の目盛り・タイトル・単位ラベル。値の軸の反対側（上か下）に、プロットから外へ向かって並べる */
+        const renderH2Axis = () => {
+            if (!axis2On) return null;
+            const tickY = axis2AtTop ? marginTop - 4 : marginTop + viewHeight + axis2TickFontPx + 2;
+            const titleY = axis2AtTop ? marginTop - axis2TickRow - 4 : marginTop + viewHeight + axis2TickRow + axis2TitleFontPx + 2;
+            const badgeY = axis2AtTop
+                ? marginTop - axis2TickRow - axis2TitleHeight - 4
+                : marginTop + viewHeight + axis2TickRow + axis2TitleHeight + axis2BadgeFontPx + 2;
+            return (
+                <g className="y2-axis-container">
+                    {axis2.valueShow &&
+                        axis2.ticks.map((tick, i) => (
+                            <text
+                                key={`x2-${i}`}
+                                x={marginLeft + plotWidth * tick.ratio}
+                                y={tickY}
+                                className="y2-tick-label"
+                                textAnchor="middle"
+                                style={{
+                                    fontSize: `${axis2.fontSize}pt`,
+                                    fontFamily: axis2.fontFamily,
+                                    fontWeight: axis2.bold ? "bold" : "normal",
+                                    fontStyle: axis2.italic ? "italic" : "normal",
+                                    textDecoration: axis2.underline ? "underline" : undefined,
+                                    fill: axis2.labelColor,
+                                }}
+                            >
+                                {tick.label}
+                            </text>
+                        ))}
+                    {hasAxis2Title && (
+                        <text
+                            x={marginLeft + plotWidth / 2}
+                            y={titleY}
+                            className="y2-axis-title"
+                            textAnchor="middle"
+                            style={{
+                                fontSize: `${axis2.titleFontSize}pt`,
+                                fontFamily: axis2.titleFontFamily,
+                                fontWeight: axis2.titleBold ? "bold" : "normal",
+                                fontStyle: axis2.titleItalic ? "italic" : "normal",
+                                textDecoration: axis2.titleUnderline ? "underline" : undefined,
+                                fill: axis2.titleColor,
+                            }}
+                        >
+                            {fittedText(axis2.titleText, plotWidth, {
+                                family: axis2.titleFontFamily,
+                                size: axis2TitleFontPx,
+                                bold: axis2.titleBold,
+                                italic: axis2.titleItalic,
+                                underline: axis2.titleUnderline,
+                            })}
+                        </text>
+                    )}
+                    {axis2BadgeText && (
+                        <text
+                            x={plotRightX}
+                            y={badgeY}
+                            className="unit-axis-badge unit-axis2-badge"
+                            textAnchor="end"
+                            style={{ fontSize: `${axis2.unitFontSize}pt`, fill: axis2.unitColor }}
+                        >
+                            {axis2BadgeText}
+                        </text>
+                    )}
+                </g>
+            );
+        };
         const renderHAxes = () => {
             const tickY = valueAtTop ? marginTop - 4 : marginTop + viewHeight + valTickFontPx + 2;
             const titleY = valueAtTop ? marginTop - tickRowHeight - 4 : marginTop + viewHeight + tickRowHeight + valTitleFontPx + 2;
@@ -1705,6 +1870,7 @@ export const App: React.FC<AppProps> = ({
                             {badgeText}
                         </text>
                     )}
+                    {renderH2Axis()}
                     {hasCatTitle && (
                         <text
                             transform={`translate(${4 + catTitleFontPx * 0.5}, ${marginTop + viewHeight / 2}) rotate(-90)`}
@@ -1789,6 +1955,87 @@ export const App: React.FC<AppProps> = ({
      * 凡例。項目をクリックすると系列ごと選ぶ（Ctrl で追加）。
      * 選択があるときは、選んだ系列（または選んだ棒のある系列）以外の印を薄くする
      */
+    /**
+     * 凡例の棒の印。棒と同じ色・透過性・罫線の四角にし、棒に角丸があれば値の向きの端を丸める（縦棒は上、横棒は右）
+     */
+    const renderLegendBarGlyph = (entry: LegendItemInfo | undefined, item: LegendItemBox, dimmed: boolean, r: number) => {
+        const side = r * 2;
+        const style = entry?.barStyle;
+        const dim = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
+        const corner = Math.min(viewModel.columns.cornerRadius, side / 3);
+        const left = item.x;
+        const top = item.y - r;
+        const d = viewModel.orientation === "horizontal"
+            ? hBarPathOf(left, top, side, side, corner, true)
+            : barPathOf(left, top, side, side, corner, true);
+        return (
+            <path
+                d={d}
+                className="legend-marker"
+                style={{
+                    fill: item.color,
+                    fillOpacity: dim * Math.max(0, Math.min(1, 1 - (style?.transparency ?? 0) / 100)),
+                    stroke: style?.borderShow ? style.borderColor : "none",
+                    strokeWidth: style?.borderShow ? Math.min(2, style.borderWidth) : 0,
+                    strokeOpacity: dim,
+                }}
+            />
+        );
+    };
+
+    /**
+     * 凡例の折れ線の印。線と同じ色・線のスタイルの短い線を引き、マーカーを出していれば真ん中に同じ形で重ねる。
+     * 横棒では線が上から下へ流れるので、縦の短い線にする（ユーザーの提案）。
+     * 線を出していなければマーカーだけ（線もマーカーも出していなければ、印が消えないよう線を引く）
+     */
+    const renderLegendLineGlyph = (entry: LegendItemInfo, item: LegendItemBox, dimmed: boolean, r: number) => {
+        const line = viewModel.lines[entry.index];
+        const mk = viewModel.markers;
+        const dim = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
+        const color = line?.color ?? item.color;
+        const width = Math.max(1, Math.min(3, line?.width ?? 2));
+        const drawLine = !line || line.lineShow || !mk.show;
+        const dash =
+            line?.lineStyle === "dashed" ? `${width * 2} ${width * 1.5}` : line?.lineStyle === "dotted" ? `${width * 0.1} ${width * 2}` : undefined;
+        const cx = item.x + item.glyphWidth / 2;
+        const horizontal = viewModel.orientation === "horizontal";
+        // 横棒の縦の線は、行の高さに収まる長さ
+        const half = horizontal ? r * 1.4 : item.glyphWidth / 2;
+        // マーカーは行に収まる大きさまで（半径はサイズの 0.75 倍）
+        const size = Math.min(mk.size, (r * 1.3) / 0.75);
+        return (
+            <>
+                {drawLine && (
+                    <line
+                        x1={horizontal ? cx : cx - half}
+                        y1={horizontal ? item.y - half : item.y}
+                        x2={horizontal ? cx : cx + half}
+                        y2={horizontal ? item.y + half : item.y}
+                        className="legend-line"
+                        stroke={color}
+                        strokeWidth={width}
+                        strokeDasharray={dash}
+                        strokeLinecap={line?.lineStyle === "dotted" ? "round" : "butt"}
+                        strokeOpacity={dim}
+                    />
+                )}
+                {mk.show && (
+                    <path
+                        d={markerPath(mk.shape, cx, item.y, size, horizontal)}
+                        className="legend-marker"
+                        style={{
+                            fill: mk.color || color,
+                            fillOpacity: dim * Math.max(0, Math.min(1, 1 - mk.transparency / 100)),
+                            stroke: mk.borderShow ? (mk.borderMatchLine ? color : mk.borderColor) : "none",
+                            strokeWidth: mk.borderShow ? Math.min(2, mk.borderWidth) : 0,
+                            strokeOpacity: dim,
+                        }}
+                    />
+                )}
+            </>
+        );
+    };
+
     const renderLegend = (layout: LegendLayout) => {
         const r = layout.markerRadius;
         const anyPicked = selectedIds.length > 0 && !viewModel.hasHighlights;
@@ -1832,15 +2079,9 @@ export const App: React.FC<AppProps> = ({
                                 if (entry?.selectionId) onSelect(entry.selectionId, e.ctrlKey || e.metaKey);
                             }}
                         >
-                            <circle
-                                cx={item.x + r}
-                                cy={item.y}
-                                r={r}
-                                className="legend-marker"
-                                style={{ fill: item.color, fillOpacity: dimmed ? HIGHLIGHT_DIM_FACTOR : 1 }}
-                            />
+                            {entry?.kind === "line" ? renderLegendLineGlyph(entry, item, dimmed, r) : renderLegendBarGlyph(entry, item, dimmed, r)}
                             <text
-                                x={item.x + r * 2 + LEGEND_MARKER_GAP}
+                                x={item.x + item.glyphWidth + LEGEND_MARKER_GAP}
                                 y={item.y + legendFontPx * 0.35}
                                 className="legend-label"
                                 style={{ ...textStyle, fontWeight: lg.bold ? "bold" : "normal" }}

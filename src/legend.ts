@@ -21,6 +21,8 @@ export function legendPlacement(position: string): { side: LegendSide; align: Le
 export interface LegendEntry {
     name: string;
     color: string;
+    /** 棒は四角、折れ線は短い線（とマーカー）の印を描く。印の幅が違う。省略すると棒 */
+    kind?: "bar" | "line";
 }
 
 export interface LegendItemBox {
@@ -30,10 +32,12 @@ export interface LegendItemBox {
     text: string;
     name: string;
     color: string;
-    /** 印（丸）の左端 */
+    /** 印の左端 */
     x: number;
     /** 行の中央 */
     y: number;
+    /** 印の幅（棒の四角は markerRadius × 2、折れ線は長め。横棒の折れ線は縦の線なので四角と同じ） */
+    glyphWidth: number;
     /** 印と文字を合わせた幅 */
     width: number;
 }
@@ -50,8 +54,10 @@ export interface LegendLayout {
 
 const PAD = 4;
 const ITEM_GAP = 12;
-/** 印（丸）と名前のあいだ。描画側も同じ値で文字を置く */
+/** 印と名前のあいだ。描画側も同じ値で文字を置く */
 export const LEGEND_MARKER_GAP = 4;
+/** 折れ線の印（短い線）の長さ。文字サイズに対する比 */
+const LINE_GLYPH_RATIO = 1.6;
 const MARKER_GAP = LEGEND_MARKER_GAP;
 const TITLE_GAP = 8;
 /** 左右に置くとき、凡例が取ってよい幅の上限（ビジュアルの幅に対する比） */
@@ -75,6 +81,8 @@ export function layoutLegend(spec: {
     position: string;
     width: number;
     height: number;
+    /** 横棒のとき true。折れ線の印を縦の短い線にするので、印の幅を四角と同じにする */
+    horizontal?: boolean;
 }): LegendLayout | null {
     const { entries, font, width, height } = spec;
     if (!entries.length || width <= 0 || height <= 0) return null;
@@ -83,7 +91,9 @@ export function layoutLegend(spec: {
     const titleFont: FontSpec = { ...font, bold: true };
     const rowHeight = Math.ceil(font.size * 1.5);
     const markerRadius = Math.max(3, font.size * 0.32);
-    const markerWidth = markerRadius * 2 + MARKER_GAP;
+    const glyphWidthOf = (entry: LegendEntry) =>
+        entry.kind === "line" && !spec.horizontal ? Math.max(markerRadius * 2, Math.round(font.size * LINE_GLYPH_RATIO)) : markerRadius * 2;
+    const markerWidthOf = (entry: LegendEntry) => glyphWidthOf(entry) + MARKER_GAP;
     const reserve = { top: 0, bottom: 0, left: 0, right: 0 };
 
     if (side === "top" || side === "bottom") {
@@ -96,8 +106,8 @@ export function layoutLegend(spec: {
         const rows: { items: Placed[]; width: number }[] = [];
         let row = { items: [] as Placed[], width: titleWidth };
         entries.forEach((entry, index) => {
-            const text = fitText(entry.name, maxRowWidth - markerWidth, font);
-            const itemWidth = markerWidth + measureTextWidth(text, font);
+            const text = fitText(entry.name, maxRowWidth - markerWidthOf(entry), font);
+            const itemWidth = markerWidthOf(entry) + measureTextWidth(text, font);
             const need = (row.items.length ? ITEM_GAP : 0) + itemWidth;
             if (row.items.length > 0 && row.width + need > maxRowWidth) {
                 rows.push(row);
@@ -128,7 +138,7 @@ export function layoutLegend(spec: {
             r.items.forEach((p, k) => {
                 if (k > 0) x += ITEM_GAP;
                 const entry = entries[p.index];
-                items.push({ index: p.index, text: p.text, name: entry.name, color: entry.color, x, y, width: p.width });
+                items.push({ index: p.index, text: p.text, name: entry.name, color: entry.color, x, y, glyphWidth: glyphWidthOf(entry), width: p.width });
                 x += p.width;
             });
         });
@@ -141,10 +151,10 @@ export function layoutLegend(spec: {
     // 左右に置くときは縦に並べる。幅はビジュアルの 3 割まで
     const maxColumnWidth = Math.max(40, width * SIDE_MAX_RATIO) - PAD * 2;
     const titleText = spec.title ? fitText(spec.title, maxColumnWidth, titleFont) : "";
-    const texts = entries.map((e) => fitText(e.name, maxColumnWidth - markerWidth, font));
+    const texts = entries.map((e) => fitText(e.name, maxColumnWidth - markerWidthOf(e), font));
     const contentWidth = Math.max(
         titleText ? measureTextWidth(titleText, titleFont) : 0,
-        ...texts.map((t) => markerWidth + measureTextWidth(t, font))
+        ...texts.map((t, i) => markerWidthOf(entries[i]) + measureTextWidth(t, font))
     );
     const boxWidth = Math.min(maxColumnWidth, contentWidth) + PAD * 2;
     const lines = entries.length + (titleText ? 1 : 0);
@@ -162,7 +172,8 @@ export function layoutLegend(spec: {
         color: entry.color,
         x: PAD,
         y: y0 + (first + index) * rowHeight + rowHeight / 2,
-        width: markerWidth + measureTextWidth(texts[index], font),
+        glyphWidth: glyphWidthOf(entry),
+        width: markerWidthOf(entry) + measureTextWidth(texts[index], font),
     }));
 
     if (side === "left") reserve.left = boxWidth + PAD;

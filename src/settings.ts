@@ -97,7 +97,10 @@ export class AutoNumUpDown extends formattingSettings.NumUpDown {
     }
 }
 
-/** グラフの種類。標準では別々のビジュアルだが、barChart は書式ペインで切り替える */
+/**
+ * グラフの種類。標準では別々のビジュアルだが、barChart は書式ペインで切り替える。
+ * ribbon は 1.18 までの保存値だけ（リボンは種類ではなく「リボン」カードの見せ方にした、#108）
+ */
 export const CHART_TYPES = {
     clustered: "clustered",
     stacked: "stacked",
@@ -105,13 +108,23 @@ export const CHART_TYPES = {
     ribbon: "ribbon",
 } as const;
 
-export type ChartType = (typeof CHART_TYPES)[keyof typeof CHART_TYPES];
+export type ChartType = typeof CHART_TYPES.clustered | typeof CHART_TYPES.stacked | typeof CHART_TYPES.stacked100;
 
 export const CHART_TYPE_ITEMS: powerbi.IEnumMember[] = [
     { value: CHART_TYPES.clustered, displayName: "集合" },
     { value: CHART_TYPES.stacked, displayName: "積み上げ" },
     { value: CHART_TYPES.stacked100, displayName: "100% 積み上げ" },
-    { value: CHART_TYPES.ribbon, displayName: "リボン" },
+];
+
+/** リボンを出すときの積む順。凡例の順は標準の積み上げ＋リボン、値の大きい順は標準のリボン グラフと同じ */
+export const RIBBON_ORDERS = {
+    legend: "legend",
+    value: "value",
+} as const;
+
+export const RIBBON_ORDER_ITEMS: powerbi.IEnumMember[] = [
+    { value: RIBBON_ORDERS.legend, displayName: "凡例の順" },
+    { value: RIBBON_ORDERS.value, displayName: "値の大きい順" },
 ];
 
 /** 棒の向き。標準では縦棒と横棒は別のビジュアルだが、barChart は書式ペインで切り替える */
@@ -137,15 +150,19 @@ class TargetItem extends FormattingSettingsCard {
     }
 }
 
-export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
-    name = "columns";
-    displayName = "列";
-    analyticsPane = false;
+/**
+ * グラフの種類と向き。いちばん最初に選ぶものなので、書式ペインのいちばん上のカードにする（#100）。
+ * 1.14 までは「列」（いまの「棒」）カードにあり、保存先も columns だった。新しいカードに保存が無いレポートは、
+ * 古い保存を読んで同じ種類で開く（VisualFormattingSettingsModel.applyChartTypeDefaults）
+ */
+export class ChartCardSettings extends FormattingSettingsCard {
+    name = "chart";
+    displayName = "グラフの種類";
 
     /** 既定は集合（系列 1 本なら 1.4 までと同じ見た目） */
     chartType = new formattingSettings.ItemDropdown({
         name: "chartType",
-        displayName: "グラフの種類",
+        displayName: "種類",
         items: CHART_TYPE_ITEMS,
         value: CHART_TYPE_ITEMS[0],
     });
@@ -157,6 +174,15 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
         items: ORIENTATION_ITEMS,
         value: ORIENTATION_ITEMS[0],
     });
+
+    slices = [this.chartType, this.orientation];
+}
+
+export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
+    name = "columns";
+    /** 標準の日本語の表示は「列」（Columns の訳）だが、縦棒・横棒のどちらでも読めるよう「棒」にする（保存先は columns のまま） */
+    displayName = "棒";
+    analyticsPane = false;
 
     // --- 対象ごとに指定できるもの (「すべて」用の実体) ---
     fill = new formattingSettings.ColorPicker({
@@ -179,7 +205,7 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
 
     borderMatchColumn = new formattingSettings.ToggleSwitch({
         name: "borderMatchColumn",
-        displayName: "列の色を一致させる",
+        displayName: "棒の色を一致させる",
         value: false,
     });
 
@@ -293,13 +319,7 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
         ],
     });
 
-    typeGroup = new FormattingSettingsGroup({
-        name: "columnsType",
-        displayName: "グラフの種類",
-        slices: [this.chartType, this.orientation],
-    });
-
-    groups = [this.typeGroup, this.targetGroup, this.layoutGroup];
+    groups = [this.targetGroup, this.layoutGroup];
 
     /**
      * 「設定の適用先」に対象を並べる。系列が 1 本ならカテゴリ、複数なら系列が対象になる
@@ -333,7 +353,7 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
                             }),
                             new formattingSettings.ToggleSwitch({
                                 name: "borderMatchColumn",
-                                displayName: "列の色を一致させる",
+                                displayName: "棒の色を一致させる",
                                 value: target.borderMatchColumn,
                                 selector: target.selector,
                             }),
@@ -1684,17 +1704,25 @@ export interface LineTarget {
     /** テンション (%) */
     tension: number;
     stepPosition: string;
+    /** ステップの段と段をつなぐ線を出すか。オフなら値ごとの水平な線だけ（横棒では垂直な線だけ） */
+    stepConnect: boolean;
     /** 網掛け領域を出すか（網掛け領域の「このシリーズに表示」） */
     areaShow: boolean;
+    /** 線を出すか（線の「このシリーズに表示」） */
+    lineShow: boolean;
 }
 
-/** 線の形の既定（標準と同じ。テンションは Desktop のスライダーの位置から読んだ値） */
+/** 線の形の値（「すべて」と線ごとに同じ項目） */
+export type LineShapeValues = Pick<LineTarget, "lineJoin" | "interpolation" | "smoothing" | "tension" | "stepPosition" | "stepConnect">;
+
+/** 線の形の既定（標準と同じ。テンションは Desktop のスライダーの位置から読んだ値。段のつなぎは標準に無い項目で、既定は標準と同じくつなぐ） */
 export const LINE_SHAPE_DEFAULTS = {
     lineJoin: "round",
     interpolation: INTERPOLATIONS.linear,
     smoothing: "monotone",
     tension: 60,
     stepPosition: "center",
+    stepConnect: true,
 } as const;
 
 class LineTargetItem extends FormattingSettingsCard {
@@ -1709,7 +1737,7 @@ class LineTargetItem extends FormattingSettingsCard {
 
 /** 線の形のスライス。スムーズの種類とテンション・ステップの位置は、補間の種類に合うときだけ出す（標準と同じ） */
 function lineShapeSlices(
-    values: Pick<LineTarget, "lineJoin" | "interpolation" | "smoothing" | "tension" | "stepPosition">,
+    values: LineShapeValues,
     selector?: powerbi.data.Selector
 ): FormattingSettingsSlice[] {
     const smooth = values.interpolation === INTERPOLATIONS.smooth;
@@ -1751,6 +1779,13 @@ function lineShapeSlices(
             selector,
             visible: values.interpolation === INTERPOLATIONS.step,
         }),
+        new formattingSettings.ToggleSwitch({
+            name: "stepConnect",
+            displayName: "段のつなぎを表示",
+            value: values.stepConnect,
+            selector,
+            visible: values.interpolation === INTERPOLATIONS.step,
+        }),
     ];
 }
 
@@ -1761,6 +1796,16 @@ function lineShapeSlices(
 export class LinesCardSettings extends FormattingSettingsCompositeCard {
     name = "lines";
     displayName = "線";
+
+    /**
+     * 線を出すか（標準の「すべての系列に表示」）。既定はオンで、横棒では保存していなければオフ
+     * （横棒のカテゴリは順番に意味の無いものが多いので、線でつながずマーカーだけ出す、#103）
+     */
+    show = new formattingSettings.ToggleSwitch({
+        name: "show",
+        displayName: "すべての系列に表示",
+        value: true,
+    });
 
     /** 線ごとの色の実体。「すべて」には出さない（色は線ごとにテーマの色を割り当てる） */
     fill = new formattingSettings.ColorPicker({
@@ -1816,8 +1861,15 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
         value: itemOf(STEP_POSITION_ITEMS, LINE_SHAPE_DEFAULTS.stepPosition),
     });
 
+    /** ステップの段と段をつなぐ線を出すか（ユーザーの提案。オフなら値ごとの水準の線だけが並ぶ） */
+    stepConnect = new formattingSettings.ToggleSwitch({
+        name: "stepConnect",
+        displayName: "段のつなぎを表示",
+        value: LINE_SHAPE_DEFAULTS.stepConnect,
+    });
+
     /** 「すべて」の値（保存値か既定） */
-    shapeValues(): Pick<LineTarget, "lineJoin" | "interpolation" | "smoothing" | "tension" | "stepPosition"> {
+    shapeValues(): LineShapeValues {
         const dropdown = (slice: formattingSettings.ItemDropdown, fallback: string) => String(slice.value?.value ?? fallback);
         return {
             lineJoin: dropdown(this.lineJoin, LINE_SHAPE_DEFAULTS.lineJoin),
@@ -1825,6 +1877,7 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
             smoothing: dropdown(this.smoothing, LINE_SHAPE_DEFAULTS.smoothing),
             tension: typeof this.tension.value === "number" ? this.tension.value : LINE_SHAPE_DEFAULTS.tension,
             stepPosition: dropdown(this.stepPosition, LINE_SHAPE_DEFAULTS.stepPosition),
+            stepConnect: this.stepConnect.value ?? LINE_SHAPE_DEFAULTS.stepConnect,
         };
     }
 
@@ -1833,7 +1886,9 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
         this.smoothing.visible = values.interpolation === INTERPOLATIONS.smooth;
         this.tension.visible = this.smoothing.visible && values.smoothing === "cardinal";
         this.stepPosition.visible = values.interpolation === INTERPOLATIONS.step;
+        this.stepConnect.visible = this.stepPosition.visible;
         return new LineTargetItem("すべて", [
+            this.show,
             this.lineStyle,
             this.lineJoin,
             this.width,
@@ -1841,6 +1896,7 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
             this.smoothing,
             this.tension,
             this.stepPosition,
+            this.stepConnect,
         ]);
     }
 
@@ -1864,6 +1920,12 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
                     const [lineJoin, ...interpolation] = lineShapeSlices(target, target.selector);
                     // 並びは標準と同じ（線のスタイル・結合の種類・幅・補間の種類…）
                     return new LineTargetItem(target.name, [
+                        new formattingSettings.ToggleSwitch({
+                            name: "show",
+                            displayName: "このシリーズに表示",
+                            value: target.lineShow,
+                            selector: target.selector,
+                        }),
                         new formattingSettings.ColorPicker({
                             name: "fill",
                             displayName: "カラー",
@@ -1893,13 +1955,29 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
 }
 
 /**
- * リボン（グラフの種類がリボンのときだけ効く）。同じ系列を隣のカテゴリとつなぐ帯の見た目。
+ * リボン。積み上げ・100% 積み上げで、同じ系列を隣のカテゴリの棒と帯でつなぐ（標準の積み上げ縦棒の「リボン」カードと同じく、
+ * 見出しのトグルで出す、#108）。「積む順」を値の大きい順にすると、標準のリボン グラフと同じく順位の入れ替わりが帯で見える。
  * 標準は系列ごとにも変えられるが、ここでは「すべて」だけ（系列ごとは見送り）
  */
 export class RibbonsCardSettings extends FormattingSettingsCompositeCard {
     name = "ribbons";
     displayName = "リボン";
-    description = "グラフの種類がリボンのときに、同じ系列を隣のカテゴリとつなぐ帯";
+    description = "積み上げの棒を、隣のカテゴリの同じ系列と帯でつなぐ";
+
+    show = new formattingSettings.ToggleSwitch({
+        name: "show",
+        displayName: "リボン",
+        value: false,
+    });
+
+    topLevelSlice = this.show;
+
+    order = new formattingSettings.ItemDropdown({
+        name: "order",
+        displayName: "積む順",
+        items: RIBBON_ORDER_ITEMS,
+        value: RIBBON_ORDER_ITEMS[0],
+    });
 
     matchSeriesColor = new formattingSettings.ToggleSwitch({
         name: "matchSeriesColor",
@@ -1950,10 +2028,10 @@ export class RibbonsCardSettings extends FormattingSettingsCompositeCard {
         value: 1,
     });
 
-    /** 列の端と帯の端のすき間（カテゴリの間のすき間に対する %）。既定 0 で列に接する */
+    /** 棒の端と帯の端のすき間（カテゴリの間のすき間に対する %）。既定 0 で棒に接する */
     spacing = new formattingSettings.NumUpDown({
         name: "spacing",
-        displayName: "リボンと列の間のスペース (%)",
+        displayName: "リボンと棒の間のスペース (%)",
         value: 0,
     });
 
@@ -1973,7 +2051,7 @@ export class RibbonsCardSettings extends FormattingSettingsCompositeCard {
     layoutGroup = new FormattingSettingsGroup({
         name: "ribbonLayout",
         displayName: "レイアウト",
-        slices: [this.spacing],
+        slices: [this.order, this.spacing],
     });
 
     groups = [this.colorGroup, this.borderGroup, this.layoutGroup];
@@ -2263,6 +2341,7 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
 }
 
 export class VisualFormattingSettingsModel extends FormattingSettingsModel {
+    chart = new ChartCardSettings();
     categoryAxis = new CategoryAxisCardSettings();
     valueAxis = new ValueAxisCardSettings();
     valueAxis2 = new ValueAxis2CardSettings();
@@ -2276,9 +2355,10 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
     dataLabels = new DataLabelsCardSettings();
     totalLabels = new TotalLabelsCardSettings();
 
-    // 標準の複合グラフと同じ並び（X 軸・Y 軸・第 2 Y 軸・凡例・グリッド線・列・線・網掛け領域・マーカー・データ ラベル・合計ラベル）。
-    // リボンは標準のリボン グラフと同じく列のあと
+    // 標準の複合グラフと同じ並び（グラフの種類のあと、X 軸・Y 軸・第 2 Y 軸・凡例・グリッド線・棒・線・網掛け領域・マーカー・データ ラベル・合計ラベル）。
+    // リボンは標準のリボン グラフと同じく棒のあと
     cards = [
+        this.chart,
         this.categoryAxis,
         this.valueAxis,
         this.valueAxis2,
@@ -2314,13 +2394,16 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
      * 書式の名前（保存先）は変えないので、向きを切り替えても設定はそのまま
      */
     applyOrientation(): void {
-        const horizontal = String(this.columns.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
+        const horizontal = String(this.chart.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
         this.categoryAxis.displayName = horizontal ? "Y 軸" : "X 軸";
+        this.valueAxis2.displayName = horizontal ? "第 2 X 軸" : "第 2 Y 軸";
         this.valueAxis.displayName = horizontal ? "X 軸" : "Y 軸";
         this.categoryAxis.maxHeight.displayName = horizontal ? "最大幅 (%)" : "高さの最大値 (%)";
         this.categoryAxis.minCategoryWidth.displayName = horizontal ? "最小カテゴリの高さ (px)" : "カテゴリの最小幅 (px)";
         const [first, second] = horizontal ? [this.valueAxis, this.categoryAxis] : [this.categoryAxis, this.valueAxis];
-        this.cards = [first, second, ...this.cards.filter((c) => c !== this.categoryAxis && c !== this.valueAxis)];
+        // グラフの種類はいつもいちばん上
+        const rest = this.cards.filter((c) => c !== this.chart && c !== this.categoryAxis && c !== this.valueAxis);
+        this.cards = [this.chart, first, second, ...rest];
     }
 
     /**
@@ -2328,8 +2411,32 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
      * populateFormattingSettingsModel のあと、transform の前に呼ぶ
      */
     applyChartTypeDefaults(dataView: powerbi.DataView | undefined): void {
-        const chartType = String(this.columns.chartType.value?.value ?? CHART_TYPES.clustered);
-        const saved = dataView?.metadata?.objects?.dataLabels;
+        // 1.14 までは種類と向きを columns に保存していた。新しいカードに保存が無ければ、古い保存を使う
+        const objects = dataView?.metadata?.objects;
+        const legacy = (property: "chartType" | "orientation", slice: formattingSettings.ItemDropdown) => {
+            const old = objects?.columns?.[property];
+            if (objects?.chart?.[property] === undefined && old !== undefined && old !== null) {
+                const item = slice.items.find((i) => i.value === String(old));
+                if (item) slice.value = item;
+            }
+        };
+        legacy("chartType", this.chart.chartType);
+        legacy("orientation", this.chart.orientation);
+        // 1.18 までは種類に「リボン」があった。積み上げ＋リボン オン＋値の大きい順で開く（見た目は同じ、#108）
+        const savedType = objects?.chart?.chartType ?? objects?.columns?.chartType;
+        if (String(savedType) === CHART_TYPES.ribbon) {
+            this.chart.chartType.value = itemOf(CHART_TYPE_ITEMS, CHART_TYPES.stacked);
+            if (objects?.ribbons?.show === undefined) this.ribbons.show.value = true;
+            if (objects?.ribbons?.order === undefined) this.ribbons.order.value = itemOf(RIBBON_ORDER_ITEMS, RIBBON_ORDERS.value);
+        }
+
+        // 横棒では、線はつながずマーカーだけ出すのを既定にする（保存していなければ、#103）
+        const horizontal = String(this.chart.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
+        if (objects?.lines?.show === undefined) this.lines.show.value = !horizontal;
+        if (objects?.markers?.show === undefined) this.markers.show.value = horizontal;
+
+        const chartType = String(this.chart.chartType.value?.value ?? CHART_TYPES.clustered);
+        const saved = objects?.dataLabels;
         const hasDetailField = !!dataView?.metadata?.columns?.some((c) => c.roles?.labelDetail);
         this.dataLabels.applyChartTypeDefaults(chartType, saved, hasDetailField);
     }
@@ -2339,13 +2446,13 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
      * 隠すのは書式ペインの表示だけで、保存済みの値は残る。hasLines は「折れ線の値」にフィールドがあるとき true
      */
     applyCardVisibility(hasLines: boolean): void {
-        const chartType = String(this.columns.chartType.value?.value ?? CHART_TYPES.clustered);
-        const horizontal = String(this.columns.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
-        // 折れ線は縦棒の集合・積み上げ・100% 積み上げで描く（横棒とリボンでは描かない）
-        const linesDrawn = hasLines && !horizontal && chartType !== CHART_TYPES.ribbon;
+        const chartType = String(this.chart.chartType.value?.value ?? CHART_TYPES.clustered);
+        const horizontal = String(this.chart.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
+        // 折れ線の値は、どの種類・向きでも描く（横棒は既定でマーカーだけ、#103）
+        const linesDrawn = hasLines;
         this.totalLabels.visible = chartType === CHART_TYPES.stacked;
-        // 帯は縦棒のリボンで描く（横棒のリボンは値の大きい順に積むだけ）
-        this.ribbons.visible = chartType === CHART_TYPES.ribbon && !horizontal;
+        // リボンは積み上げ・100% 積み上げで出せる（縦棒・横棒とも。集合は棒が横に並ぶので帯でつながない、#108）
+        this.ribbons.visible = chartType === CHART_TYPES.stacked || chartType === CHART_TYPES.stacked100;
         this.valueAxis2.visible = linesDrawn;
         this.lines.visible = linesDrawn;
         this.areas.visible = linesDrawn;

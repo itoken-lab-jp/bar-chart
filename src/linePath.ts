@@ -18,39 +18,114 @@ export interface LineShape {
     tension: number;
     /** ステップのときの段の位置。"before" | "center" | "after" */
     stepPosition: string;
+    /** ステップの段と段をつなぐ線を出すか。省略するとつなぐ */
+    stepConnect?: boolean;
 }
 
 const round = (v: number) => Math.round(v * 100) / 100;
-const pt = (x: number, y: number) => `${round(x)},${round(y)}`;
+type Fmt = (x: number, y: number) => string;
+const pointXY: Fmt = (x, y) => `${round(x)},${round(y)}`;
+/** 横棒では、カテゴリの軸（y）を曲線の独立変数にするので、x と y を入れ替えて作り、書き出すときに戻す */
+const pointYX: Fmt = (x, y) => `${round(y)},${round(x)}`;
+const swapped = (points: XY[]) => points.map((p) => ({ x: p.y, y: p.x }));
 
-/** 途切れのない点の並び 1 つぶんの線（先頭の M を含む） */
-export function linePath(points: XY[], shape: LineShape): string {
-    if (!points.length) return "";
-    const head = `M ${pt(points[0].x, points[0].y)}`;
-    if (points.length === 1) return head;
-    return `${head} ${segmentsOf(points, shape)}`;
+/**
+ * ステップのときに、並びの最初の点の手前と最後の点の先へ延ばす範囲（カテゴリの軸の座標）。
+ * カテゴリの間隔（step）の半分を渡すと、段が変わる位置（隣のカテゴリとのすき間の真ん中）と同じところまで延びる。
+ * bounds（プロットの端）の外へは延ばさない。ステップ以外では延ばさない
+ */
+function stepEndsOf(shape: LineShape, first: XY, last: XY, extension: number, bounds?: [number, number]): [number, number] | null {
+    if (shape.interpolation !== "step" || !(extension > 0)) return null;
+    const [min, max] = bounds ?? [-Infinity, Infinity];
+    return [Math.min(first.x, Math.max(min, first.x - extension)), Math.max(last.x, Math.min(max, last.x + extension))];
 }
 
 /**
- * 線と基準線（値 0 の高さ）のあいだを塗る領域（網掛け領域）。線と同じ補間で上の辺を作り、
- * 基準線に下ろして閉じる
+ * 途切れのない点の並び 1 つぶんの線（先頭の M を含む）。
+ * horizontal なら、点は上から下へ並び（横棒のカテゴリ）、補間もその向きで行う。
+ * extension はステップのときに両端を延ばす長さ（点が 1 つでも、その長さの段を引く）、bounds は延ばせる範囲
  */
-export function areaPath(points: XY[], baselineY: number, shape: LineShape): string {
-    if (points.length < 2) return "";
-    const first = points[0];
-    const last = points[points.length - 1];
-    return `M ${pt(first.x, baselineY)} L ${pt(first.x, first.y)} ${segmentsOf(points, shape)} L ${pt(last.x, baselineY)} Z`;
+export function linePath(points: XY[], shape: LineShape, horizontal = false, extension = 0, bounds?: [number, number]): string {
+    if (!points.length) return "";
+    const pts = horizontal ? swapped(points) : points;
+    const pt = horizontal ? pointYX : pointXY;
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    const ends = stepEndsOf(shape, first, last, extension, bounds);
+    if (shape.interpolation === "step" && shape.stepConnect === false) {
+        return stepLevels(pts, shape.stepPosition, ends ?? [first.x, last.x])
+            .map(([from, to, y]) => `M ${pt(from, y)} L ${pt(to, y)}`)
+            .join(" ");
+    }
+    if (ends) {
+        const middle = pts.length > 1 ? ` ${segmentsOf(pts, shape, pt)}` : "";
+        return `M ${pt(ends[0], first.y)} L ${pt(first.x, first.y)}${middle} L ${pt(ends[1], last.y)}`;
+    }
+    const head = `M ${pt(first.x, first.y)}`;
+    if (pts.length === 1) return head;
+    return `${head} ${segmentsOf(pts, shape, pt)}`;
 }
 
-function segmentsOf(points: XY[], shape: LineShape): string {
-    if (shape.interpolation === "step") return stepSegments(points, shape.stepPosition);
+/**
+ * 線と基準線（値 0 の位置）のあいだを塗る領域（網掛け領域）。線と同じ補間で辺を作り、
+ * 基準線に下ろして閉じる。baseline は値の軸の座標（縦棒なら y、横棒なら x）。
+ * extension・bounds はステップのときに両端を延ばす長さと範囲（線と同じ範囲を塗る）
+ */
+export function areaPath(
+    points: XY[],
+    baseline: number,
+    shape: LineShape,
+    horizontal = false,
+    extension = 0,
+    bounds?: [number, number]
+): string {
+    if (!points.length) return "";
+    const pts = horizontal ? swapped(points) : points;
+    const pt = horizontal ? pointYX : pointXY;
+    const first = pts[0];
+    const last = pts[pts.length - 1];
+    const ends = stepEndsOf(shape, first, last, extension, bounds);
+    if (!ends && pts.length < 2) return "";
+    const middle = pts.length > 1 ? ` ${segmentsOf(pts, shape, pt)}` : "";
+    if (ends) {
+        return `M ${pt(ends[0], baseline)} L ${pt(ends[0], first.y)} L ${pt(first.x, first.y)}${middle} L ${pt(ends[1], last.y)} L ${pt(ends[1], baseline)} Z`;
+    }
+    return `M ${pt(first.x, baseline)} L ${pt(first.x, first.y)}${middle} L ${pt(last.x, baseline)} Z`;
+}
+
+function segmentsOf(points: XY[], shape: LineShape, pt: Fmt): string {
+    if (shape.interpolation === "step") return stepSegments(points, shape.stepPosition, pt);
     if (shape.interpolation === "smooth" && points.length > 2) {
-        return shape.smoothing === "cardinal" ? cardinalSegments(points, shape.tension) : monotoneSegments(points);
+        return shape.smoothing === "cardinal" ? cardinalSegments(points, shape.tension, pt) : monotoneSegments(points, pt);
     }
     return points.slice(1).map((p) => `L ${pt(p.x, p.y)}`).join(" ");
 }
 
-function stepSegments(points: XY[], position: string): string {
+/**
+ * 段のつなぎを出さないステップの、値ごとの水準の線（[始まり, 終わり, 高さ]）。
+ * つなぐときと同じ位置で段が変わる：中央は隣の点との真ん中、「次の値より前」は前の点、「次の値より後」は次の点。
+ * ends は並びの両端（延ばした先）
+ */
+function stepLevels(points: XY[], position: string, ends: [number, number]): Array<[number, number, number]> {
+    const n = points.length;
+    return points.map((p, i) => {
+        let from: number;
+        let to: number;
+        if (position === "before") {
+            from = i > 0 ? points[i - 1].x : ends[0];
+            to = i < n - 1 ? p.x : ends[1];
+        } else if (position === "after") {
+            from = i > 0 ? p.x : ends[0];
+            to = i < n - 1 ? points[i + 1].x : ends[1];
+        } else {
+            from = i > 0 ? (points[i - 1].x + p.x) / 2 : ends[0];
+            to = i < n - 1 ? (p.x + points[i + 1].x) / 2 : ends[1];
+        }
+        return [from, to, p.y];
+    });
+}
+
+function stepSegments(points: XY[], position: string, pt: Fmt): string {
     const parts: string[] = [];
     for (let i = 1; i < points.length; i++) {
         const a = points[i - 1];
@@ -70,7 +145,7 @@ function stepSegments(points: XY[], position: string): string {
 const sign = (v: number) => (v < 0 ? -1 : 1);
 
 /** 単調な 3 次補間（Steffen の方法。d3 の curveMonotoneX と同じ）。山と谷を行き過ぎない */
-function monotoneSegments(points: XY[]): string {
+function monotoneSegments(points: XY[], pt: Fmt): string {
     const n = points.length;
     const slopes: number[] = new Array(n).fill(0);
     for (let i = 1; i < n - 1; i++) {
@@ -98,7 +173,7 @@ function monotoneSegments(points: XY[]): string {
 }
 
 /** カーディナル スプライン（d3 の curveCardinal と同じ。両端の接線は 0） */
-function cardinalSegments(points: XY[], tension: number): string {
+function cardinalSegments(points: XY[], tension: number, pt: Fmt): string {
     const n = points.length;
     const k = (1 - Math.max(0, Math.min(1, tension))) / 6;
     const parts: string[] = [];
@@ -116,12 +191,15 @@ function cardinalSegments(points: XY[], tension: number): string {
 
 /**
  * マーカー 1 つの形。size はサイズ (px)。塗りの形として返す（× と ＋ とダッシュも太さのある形）。
- * 半径はサイズの 0.75 倍（Desktop で標準のサイズ 20 の円が直径 30px ほどだった。1.13 まではサイズの半分 + 0.5）
+ * 半径はサイズの 0.75 倍（Desktop で標準のサイズ 20 の円が直径 30px ほどだった。1.13 まではサイズの半分 + 0.5）。
+ * ダッシュは棒を横切る向きに引く（縦棒では横、横棒 horizontal では縦。棒に目標の印を打つ使い方）
  */
-export function markerPath(shape: string, cx: number, cy: number, size: number): string {
+export function markerPath(shape: string, cx: number, cy: number, size: number, horizontal = false): string {
     const r = Math.max(1, size * 0.75);
+    const pt = pointXY;
     const poly = (coords: Array<[number, number]>) =>
         `M ${coords.map(([dx, dy]) => pt(cx + dx, cy + dy)).join(" L ")} Z`;
+    const across = (coords: Array<[number, number]>) => poly(horizontal ? coords.map(([dx, dy]) => [dy, dx] as [number, number]) : coords);
     switch (shape) {
         case "square":
             return poly([[-r, -r], [r, -r], [r, r], [-r, r]]);
@@ -134,9 +212,9 @@ export function markerPath(shape: string, cx: number, cy: number, size: number):
             return poly([[0, -d], [d * 0.87, d * 0.5], [-d * 0.87, d * 0.5]]);
         }
         case "shortDash":
-            return poly([[-r, -r * 0.3], [r, -r * 0.3], [r, r * 0.3], [-r, r * 0.3]]);
+            return across([[-r, -r * 0.3], [r, -r * 0.3], [r, r * 0.3], [-r, r * 0.3]]);
         case "longDash":
-            return poly([[-r * 2, -r * 0.3], [r * 2, -r * 0.3], [r * 2, r * 0.3], [-r * 2, r * 0.3]]);
+            return across([[-r * 2, -r * 0.3], [r * 2, -r * 0.3], [r * 2, r * 0.3], [-r * 2, r * 0.3]]);
         case "plus": {
             const t = r * 0.3;
             return poly([

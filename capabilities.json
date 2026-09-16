@@ -35,8 +35,25 @@
         }
     ],
     "objects": {
+        "chart": {
+            "displayName": "グラフの種類",
+            "properties": {
+                "chartType": {
+                    "displayName": "種類",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "orientation": {
+                    "displayName": "向き",
+                    "type": {
+                        "enumeration": []
+                    }
+                }
+            }
+        },
         "columns": {
-            "displayName": "列",
+            "displayName": "棒",
             "properties": {
                 "chartType": {
                     "displayName": "グラフの種類",
@@ -73,7 +90,7 @@
                     }
                 },
                 "borderMatchColumn": {
-                    "displayName": "列の色を一致させる",
+                    "displayName": "棒の色を一致させる",
                     "type": {
                         "bool": true
                     }
@@ -366,6 +383,12 @@
         "lines": {
             "displayName": "線",
             "properties": {
+                "show": {
+                    "displayName": "すべての系列に表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "fill": {
                     "displayName": "カラー",
                     "type": {
@@ -417,6 +440,12 @@
                     "type": {
                         "enumeration": []
                     }
+                },
+                "stepConnect": {
+                    "displayName": "段のつなぎを表示",
+                    "type": {
+                        "bool": true
+                    }
                 }
             }
         },
@@ -456,6 +485,18 @@
         "ribbons": {
             "displayName": "リボン",
             "properties": {
+                "show": {
+                    "displayName": "リボン",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "order": {
+                    "displayName": "積む順",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "matchSeriesColor": {
                     "displayName": "データ系列の色を一致させる",
                     "type": {
@@ -513,7 +554,7 @@
                     }
                 },
                 "spacing": {
-                    "displayName": "リボンと列の間のスペース (%)",
+                    "displayName": "リボンと棒の間のスペース (%)",
                     "type": {
                         "numeric": true
                     }
