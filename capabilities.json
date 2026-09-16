@@ -23,6 +23,12 @@
             "description": "折れ線で描く値。棒と尺度が違えば右の第 2 Y 軸に出す"
         },
         {
+            "displayName": "ラベルの詳細",
+            "name": "labelDetail",
+            "kind": "Measure",
+            "description": "データ ラベルの「詳細」で、コンテンツを「カスタム」にしたときに出す値"
+        },
+        {
             "displayName": "ツールヒント",
             "name": "tooltips",
             "kind": "Measure"
@@ -141,6 +147,24 @@
         "valueAxis2": {
             "displayName": "第 2 Y 軸",
             "properties": {
+                "logarithmic": {
+                    "displayName": "対数目盛り",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "roundRange": {
+                    "displayName": "範囲を丸める",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "alignZeros": {
+                    "displayName": "0 を配置する",
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "show": {
                     "displayName": "表示",
                     "type": {
@@ -363,6 +387,69 @@
                     "type": {
                         "enumeration": []
                     }
+                },
+                "lineJoin": {
+                    "displayName": "結合の種類",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "interpolation": {
+                    "displayName": "補間の種類",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "smoothing": {
+                    "displayName": "スムーズの種類",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "tension": {
+                    "displayName": "テンション (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "stepPosition": {
+                    "displayName": "ステップの位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                }
+            }
+        },
+        "areas": {
+            "displayName": "網掛け領域",
+            "properties": {
+                "show": {
+                    "displayName": "網掛け領域",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "matchLineColor": {
+                    "displayName": "線の色を一致させる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "fill": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "transparency": {
+                    "displayName": "領域の透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
                 }
             }
         },
@@ -442,8 +529,64 @@
                         "bool": true
                     }
                 },
+                "shape": {
+                    "displayName": "型",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "size": {
                     "displayName": "サイズ (px)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "color": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "transparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "borderShow": {
+                    "displayName": "罫線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "borderMatchLine": {
+                    "displayName": "線の色を一致させる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "borderFill": {
+                    "displayName": "罫線のカラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "borderTransparency": {
+                    "displayName": "罫線の透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "borderWidth": {
+                    "displayName": "罫線の幅 (px)",
                     "type": {
                         "numeric": true
                     }
@@ -588,6 +731,86 @@
                         }
                     }
                 },
+                "valueShow": {
+                    "displayName": "値",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "detailShow": {
+                    "displayName": "詳細",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "detailContent": {
+                    "displayName": "コンテンツ",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "detailFontFamily": {
+                    "displayName": "フォント",
+                    "type": {
+                        "formatting": {
+                            "fontFamily": true
+                        }
+                    }
+                },
+                "detailFontSize": {
+                    "displayName": "文字サイズ",
+                    "type": {
+                        "formatting": {
+                            "fontSize": true
+                        }
+                    }
+                },
+                "detailBold": {
+                    "displayName": "太字",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "detailItalic": {
+                    "displayName": "斜体",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "detailUnderline": {
+                    "displayName": "下線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "detailColor": {
+                    "displayName": "詳細のカラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "detailTransparency": {
+                    "displayName": "詳細の透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "detailUnitType": {
+                    "displayName": "詳細の表示単位",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "detailPrecision": {
+                    "displayName": "詳細の小数点以下の桁数",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "backgroundShow": {
                     "displayName": "背景の表示",
                     "type": {
@@ -621,6 +844,12 @@
         "totalLabels": {
             "displayName": "合計ラベル",
             "properties": {
+                "unitType": {
+                    "displayName": "表示単位",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "show": {
                     "displayName": "表示",
                     "type": {
@@ -710,6 +939,12 @@
         "categoryAxis": {
             "displayName": "X 軸",
             "properties": {
+                "titleStyle": {
+                    "displayName": "スタイル",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "show": {
                     "displayName": "値",
                     "type": {
@@ -1058,6 +1293,18 @@
         "gridlines": {
             "displayName": "グリッド線",
             "properties": {
+                "horizontalScaleWithWidth": {
+                    "displayName": "幅で拡大縮小",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "verticalScaleWithWidth": {
+                    "displayName": "幅で拡大縮小",
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "horizontalShow": {
                     "displayName": "横",
                     "type": {
@@ -1135,6 +1382,9 @@
                 {
                     "series": {
                         "max": 0
+                    },
+                    "labelDetail": {
+                        "max": 1
                     }
                 },
                 {
@@ -1142,6 +1392,9 @@
                         "max": 1
                     },
                     "measure": {
+                        "max": 1
+                    },
+                    "labelDetail": {
                         "max": 1
                     }
                 }
@@ -1173,6 +1426,11 @@
                             },
                             {
                                 "for": {
+                                    "in": "labelDetail"
+                                }
+                            },
+                            {
+                                "for": {
                                     "in": "tooltips"
                                 }
                             }
@@ -1195,6 +1453,9 @@
         "roles": [
             "tooltips"
         ]
+    },
+    "sorting": {
+        "default": {}
     },
     "supportsHighlight": true,
     "privileges": []

@@ -64,12 +64,15 @@ export class Visual implements IVisual {
                 options.dataViews?.[0]
             );
 
+            // グラフの種類による既定（100% 積み上げのデータラベルは値がオフで詳細がオン）は、保存していない項目だけに効かせる
+            this.formattingSettings.applyChartTypeDefaults(options.dataViews?.[0]);
             const viewModel: ViewModel = transform(options.dataViews?.[0], this.host, this.formattingSettings);
             this.formattingSettings.applyTargets(viewModel.columnTargets, {
                 seriesMode: viewModel.seriesMode,
                 labelTargets: viewModel.labelTargets,
                 lineTargets: viewModel.lineTargets,
             });
+            this.formattingSettings.applyCardVisibility(viewModel.lines.length > 0);
             this.selectedIds = this.selectionManager.getSelectionIds() as ISelectionId[];
 
             const render = () =>

@@ -389,6 +389,17 @@ export const LABEL_ORIENTATION_ITEMS: powerbi.IEnumMember[] = [
 ];
 
 /** データラベルを系列ごとに変えるときの対象（複数系列のときだけ） */
+export const DETAIL_CONTENTS = {
+    percentOfTotal: "percentOfTotal",
+    custom: "custom",
+} as const;
+
+/** データ ラベルの詳細のコンテンツ。標準の「カスタム」はフィールドを選ぶので、ここでは「ラベルの詳細」に入れたフィールド */
+export const DETAIL_CONTENT_ITEMS: powerbi.IEnumMember[] = [
+    { value: DETAIL_CONTENTS.percentOfTotal, displayName: "全体に対する割合" },
+    { value: DETAIL_CONTENTS.custom, displayName: "カスタム（ラベルの詳細）" },
+];
+
 export interface LabelTarget {
     name: string;
     selector: powerbi.data.Selector;
@@ -598,6 +609,85 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
         value: PRECISIONS[0],
     });
 
+    /** 値の行を出すか。既定はオンで、100% 積み上げでは保存していなければオフ（標準と同じ、applyChartTypeDefaults） */
+    valueShow = new formattingSettings.ToggleSwitch({
+        name: "valueShow",
+        displayName: "値",
+        value: true,
+    });
+
+    /** 詳細の行を出すか。既定はオフで、100% 積み上げでは保存していなければオン（標準と同じ） */
+    detailShow = new formattingSettings.ToggleSwitch({
+        name: "detailShow",
+        displayName: "詳細",
+        value: false,
+    });
+
+    detailContent = new formattingSettings.ItemDropdown({
+        name: "detailContent",
+        displayName: "コンテンツ",
+        items: DETAIL_CONTENT_ITEMS,
+        value: DETAIL_CONTENT_ITEMS[0],
+    });
+
+    detailFont = new formattingSettings.FontControl({
+        name: "detailFont",
+        displayName: "フォント",
+        fontFamily: new formattingSettings.FontPicker({
+            name: "detailFontFamily",
+            displayName: "フォント",
+            value: "Segoe UI",
+        }),
+        fontSize: new formattingSettings.NumUpDown({
+            name: "detailFontSize",
+            displayName: "文字サイズ",
+            value: 9,
+        }),
+        bold: new formattingSettings.ToggleSwitch({
+            name: "detailBold",
+            displayName: "太字",
+            value: false,
+        }),
+        italic: new formattingSettings.ToggleSwitch({
+            name: "detailItalic",
+            displayName: "斜体",
+            value: false,
+        }),
+        underline: new formattingSettings.ToggleSwitch({
+            name: "detailUnderline",
+            displayName: "下線",
+            value: false,
+        }),
+    });
+
+    /** 空 = 自動（値の行と同じく、棒の色に合わせて白か黒） */
+    detailColor = new formattingSettings.ColorPicker({
+        name: "detailColor",
+        displayName: "カラー",
+        value: { value: "" },
+    });
+
+    detailTransparency = new formattingSettings.NumUpDown({
+        name: "detailTransparency",
+        displayName: "透過性 (%)",
+        value: 0,
+    });
+
+    /** カスタム（ラベルの詳細のフィールド）の数値の表示単位。「自動」はフィールドの書式のまま */
+    detailUnitType = new formattingSettings.ItemDropdown({
+        name: "detailUnitType",
+        displayName: "表示単位",
+        items: UNIT_TYPES,
+        value: UNIT_TYPES[0],
+    });
+
+    detailPrecision = new formattingSettings.ItemDropdown({
+        name: "detailPrecision",
+        displayName: "小数点以下の桁数",
+        items: PRECISIONS,
+        value: PRECISIONS[0],
+    });
+
     backgroundShow = new formattingSettings.ToggleSwitch({
         name: "backgroundShow",
         displayName: "背景の表示",
@@ -629,6 +719,7 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
     valuesGroup = new FormattingSettingsGroup({
         name: "labelValues",
         displayName: "値",
+        topLevelSlice: this.valueShow,
         slices: [
             this.fontFamily,
             this.fontSize,
@@ -636,6 +727,20 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
             this.italic,
             this.color,
             this.precision,
+        ],
+    });
+
+    detailGroup = new FormattingSettingsGroup({
+        name: "labelDetail",
+        displayName: "詳細",
+        topLevelSlice: this.detailShow,
+        slices: [
+            this.detailContent,
+            this.detailFont,
+            this.detailColor,
+            this.detailTransparency,
+            this.detailUnitType,
+            this.detailPrecision,
         ],
     });
 
@@ -652,15 +757,32 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
     groups = [
         this.optionsGroup,
         this.valuesGroup,
+        this.detailGroup,
         this.backgroundGroup,
     ];
+
+    /**
+     * グラフの種類による既定（標準は 100% 積み上げだけ、値がオフで詳細＝全体に対する割合がオン）。
+     * 保存していない項目だけ変える。saved はレポートに保存された dataLabels の値。
+     * hasDetailField は「ラベルの詳細」にフィールドがあるとき true（コンテンツの既定をカスタムにする）
+     */
+    applyChartTypeDefaults(chartType: string, saved: powerbi.DataViewObject | undefined, hasDetailField: boolean): void {
+        const percent = chartType === CHART_TYPES.stacked100;
+        if (saved?.valueShow === undefined) this.valueShow.value = !percent;
+        if (saved?.detailShow === undefined) this.detailShow.value = percent;
+        if (saved?.detailContent === undefined) {
+            this.detailContent.value = itemOf(DETAIL_CONTENT_ITEMS, !percent && hasDetailField ? DETAIL_CONTENTS.custom : DETAIL_CONTENTS.percentOfTotal);
+        }
+        // 表示単位は数値のフィールドにだけ効くので、割合のときは出さない
+        this.detailUnitType.visible = String(this.detailContent.value?.value) === DETAIL_CONTENTS.custom;
+    }
 
     /**
      * 複数系列のとき、「設定の適用先」に系列を並べ、系列ごとに表示とカラーを変えられるようにする。
      * 系列が 1 本なら何も足さない（1.4 までと同じ）
      */
     applyTargets(targets: LabelTarget[]): void {
-        const base = [this.optionsGroup, this.valuesGroup, this.backgroundGroup];
+        const base = [this.optionsGroup, this.valuesGroup, this.detailGroup, this.backgroundGroup];
         if (!targets.length) {
             this.groups = base;
             return;
@@ -742,6 +864,14 @@ export class TotalLabelsCardSettings extends FormattingSettingsCompositeCard {
         value: { value: "#605E5C" },
     });
 
+    /** 「自動」は Y 軸の表示単位に従う。選ぶと、その単位で割って語を付ける（#91） */
+    unitType = new formattingSettings.ItemDropdown({
+        name: "unitType",
+        displayName: "表示単位",
+        items: UNIT_TYPES,
+        value: UNIT_TYPES[0], // auto
+    });
+
     precision = new formattingSettings.ItemDropdown({
         name: "precision",
         displayName: "小数点以下の桁数",
@@ -777,7 +907,7 @@ export class TotalLabelsCardSettings extends FormattingSettingsCompositeCard {
     valuesGroup = new FormattingSettingsGroup({
         name: "totalValues",
         displayName: "値",
-        slices: [this.font, this.color, this.precision, this.splitPositiveNegative],
+        slices: [this.font, this.color, this.unitType, this.precision, this.splitPositiveNegative],
     });
 
     backgroundGroup = new FormattingSettingsGroup({
@@ -801,6 +931,52 @@ export const LINE_STYLE_ITEMS: powerbi.IEnumMember[] = [
     { value: LINE_STYLES.dashed, displayName: "破線" },
     { value: LINE_STYLES.solid, displayName: "実線" },
 ];
+
+/** 線の結合の種類。標準の日本語の表示は「マイター」「四捨五入」「ベベル」（Round の訳）だが、読みやすさを優先して「ラウンド」にする */
+export const LINE_JOIN_ITEMS: powerbi.IEnumMember[] = [
+    { value: "miter", displayName: "マイター" },
+    { value: "round", displayName: "ラウンド" },
+    { value: "bevel", displayName: "ベベル" },
+];
+
+export const INTERPOLATIONS = {
+    linear: "linear",
+    smooth: "smooth",
+    step: "step",
+} as const;
+
+export const INTERPOLATION_ITEMS: powerbi.IEnumMember[] = [
+    { value: INTERPOLATIONS.linear, displayName: "線形" },
+    { value: INTERPOLATIONS.smooth, displayName: "スムーズ" },
+    { value: INTERPOLATIONS.step, displayName: "ステップ" },
+];
+
+/** スムーズの種類。標準の日本語の表示は「モノトーン」「基数」（Cardinal の訳）だが、読みやすさを優先して「カーディナル」にする */
+export const SMOOTHING_ITEMS: powerbi.IEnumMember[] = [
+    { value: "monotone", displayName: "モノトーン" },
+    { value: "cardinal", displayName: "カーディナル" },
+];
+
+export const STEP_POSITION_ITEMS: powerbi.IEnumMember[] = [
+    { value: "before", displayName: "次の値より前" },
+    { value: "center", displayName: "中央" },
+    { value: "after", displayName: "次の値より後" },
+];
+
+/** マーカーの型。標準のドロップダウンは記号だけだが、見分けやすいよう名前を添える */
+export const MARKER_SHAPE_ITEMS: powerbi.IEnumMember[] = [
+    { value: "circle", displayName: "● 円" },
+    { value: "square", displayName: "■ 正方形" },
+    { value: "diamond", displayName: "◆ ひし形" },
+    { value: "triangle", displayName: "▲ 三角形" },
+    { value: "cross", displayName: "× バツ" },
+    { value: "shortDash", displayName: "- 短いダッシュ" },
+    { value: "longDash", displayName: "― 長いダッシュ" },
+    { value: "plus", displayName: "＋ プラス" },
+];
+
+const itemOf = (items: powerbi.IEnumMember[], value: string): powerbi.IEnumMember =>
+    items.find((i) => i.value === value) ?? items[0];
 
 export const TITLE_STYLES = {
     showTitleOnly: "showTitleOnly",
@@ -920,6 +1096,14 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
         value: { value: "#252423" },
     });
 
+    /** 標準の X 軸と同じ項目。カテゴリの軸には単位が無いので、どれを選んでもタイトルのまま（#91） */
+    titleStyle = new formattingSettings.ItemDropdown({
+        name: "titleStyle",
+        displayName: "スタイル",
+        items: TITLE_STYLE_ITEMS,
+        value: TITLE_STYLE_ITEMS[0],
+    });
+
     // --- レイアウトグループ ---
     minCategoryWidth = new formattingSettings.Slider({
         name: "minCategoryWidth",
@@ -944,6 +1128,7 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
         topLevelSlice: this.titleShow,
         slices: [
             this.titleText,
+            this.titleStyle,
             this.titleFont,
             this.titleColor,
         ],
@@ -1436,10 +1621,30 @@ export class ValueAxis2CardSettings extends FormattingSettingsCompositeCard {
         value: { value: "#605E5C" },
     });
 
+    // --- 範囲（標準の第 2 Y 軸と同じ項目、#91） ---
+    logarithmic = new formattingSettings.ToggleSwitch({
+        name: "logarithmic",
+        displayName: "対数目盛り",
+        value: false,
+    });
+
+    roundRange = new formattingSettings.ToggleSwitch({
+        name: "roundRange",
+        displayName: "範囲を丸める",
+        value: true,
+    });
+
+    /** 第 2 Y 軸に 0 を含め、その高さを Y 軸の 0 にそろえる（英語 UI の Align zeros） */
+    alignZeros = new formattingSettings.ToggleSwitch({
+        name: "alignZeros",
+        displayName: "0 を配置する",
+        value: false,
+    });
+
     rangeGroup = new FormattingSettingsGroup({
         name: "value2Range",
         displayName: "範囲",
-        slices: [this.start, this.end],
+        slices: [this.start, this.end, this.logarithmic, this.roundRange, this.alignZeros],
     });
 
     valuesGroup = new FormattingSettingsGroup({
@@ -1473,7 +1678,24 @@ export interface LineTarget {
     color: string;
     width: number;
     lineStyle: string;
+    lineJoin: string;
+    interpolation: string;
+    smoothing: string;
+    /** テンション (%) */
+    tension: number;
+    stepPosition: string;
+    /** 網掛け領域を出すか（網掛け領域の「このシリーズに表示」） */
+    areaShow: boolean;
 }
+
+/** 線の形の既定（標準と同じ。テンションは Desktop のスライダーの位置から読んだ値） */
+export const LINE_SHAPE_DEFAULTS = {
+    lineJoin: "round",
+    interpolation: INTERPOLATIONS.linear,
+    smoothing: "monotone",
+    tension: 60,
+    stepPosition: "center",
+} as const;
 
 class LineTargetItem extends FormattingSettingsCard {
     name = "lineTarget";
@@ -1485,8 +1707,55 @@ class LineTargetItem extends FormattingSettingsCard {
     }
 }
 
+/** 線の形のスライス。スムーズの種類とテンション・ステップの位置は、補間の種類に合うときだけ出す（標準と同じ） */
+function lineShapeSlices(
+    values: Pick<LineTarget, "lineJoin" | "interpolation" | "smoothing" | "tension" | "stepPosition">,
+    selector?: powerbi.data.Selector
+): FormattingSettingsSlice[] {
+    const smooth = values.interpolation === INTERPOLATIONS.smooth;
+    return [
+        new formattingSettings.ItemDropdown({
+            name: "lineJoin",
+            displayName: "結合の種類",
+            items: LINE_JOIN_ITEMS,
+            value: itemOf(LINE_JOIN_ITEMS, values.lineJoin),
+            selector,
+        }),
+        new formattingSettings.ItemDropdown({
+            name: "interpolation",
+            displayName: "補間の種類",
+            items: INTERPOLATION_ITEMS,
+            value: itemOf(INTERPOLATION_ITEMS, values.interpolation),
+            selector,
+        }),
+        new formattingSettings.ItemDropdown({
+            name: "smoothing",
+            displayName: "スムーズの種類",
+            items: SMOOTHING_ITEMS,
+            value: itemOf(SMOOTHING_ITEMS, values.smoothing),
+            selector,
+            visible: smooth,
+        }),
+        new formattingSettings.Slider({
+            name: "tension",
+            displayName: "テンション (%)",
+            value: values.tension,
+            selector,
+            visible: smooth && values.smoothing === "cardinal",
+        }),
+        new formattingSettings.ItemDropdown({
+            name: "stepPosition",
+            displayName: "ステップの位置",
+            items: STEP_POSITION_ITEMS,
+            value: itemOf(STEP_POSITION_ITEMS, values.stepPosition),
+            selector,
+            visible: values.interpolation === INTERPOLATIONS.step,
+        }),
+    ];
+}
+
 /**
- * 折れ線の見た目。「設定の適用先」に折れ線を並べ、線ごとにカラー・幅・線のスタイルを変えられる。
+ * 折れ線の見た目。「設定の適用先」に折れ線を並べ、線ごとにカラー・幅・線のスタイル・結合と補間を変えられる。
  * 標準の日本語の表示は「行」（Lines の訳）だが、読みやすさを優先して「線」にする
  */
 export class LinesCardSettings extends FormattingSettingsCompositeCard {
@@ -1513,8 +1782,66 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
         value: LINE_STYLE_ITEMS.find((i) => i.value === LINE_STYLES.solid) ?? LINE_STYLE_ITEMS[0],
     });
 
+    lineJoin = new formattingSettings.ItemDropdown({
+        name: "lineJoin",
+        displayName: "結合の種類",
+        items: LINE_JOIN_ITEMS,
+        value: itemOf(LINE_JOIN_ITEMS, LINE_SHAPE_DEFAULTS.lineJoin),
+    });
+
+    interpolation = new formattingSettings.ItemDropdown({
+        name: "interpolation",
+        displayName: "補間の種類",
+        items: INTERPOLATION_ITEMS,
+        value: itemOf(INTERPOLATION_ITEMS, LINE_SHAPE_DEFAULTS.interpolation),
+    });
+
+    smoothing = new formattingSettings.ItemDropdown({
+        name: "smoothing",
+        displayName: "スムーズの種類",
+        items: SMOOTHING_ITEMS,
+        value: itemOf(SMOOTHING_ITEMS, LINE_SHAPE_DEFAULTS.smoothing),
+    });
+
+    tension = new formattingSettings.Slider({
+        name: "tension",
+        displayName: "テンション (%)",
+        value: LINE_SHAPE_DEFAULTS.tension,
+    });
+
+    stepPosition = new formattingSettings.ItemDropdown({
+        name: "stepPosition",
+        displayName: "ステップの位置",
+        items: STEP_POSITION_ITEMS,
+        value: itemOf(STEP_POSITION_ITEMS, LINE_SHAPE_DEFAULTS.stepPosition),
+    });
+
+    /** 「すべて」の値（保存値か既定） */
+    shapeValues(): Pick<LineTarget, "lineJoin" | "interpolation" | "smoothing" | "tension" | "stepPosition"> {
+        const dropdown = (slice: formattingSettings.ItemDropdown, fallback: string) => String(slice.value?.value ?? fallback);
+        return {
+            lineJoin: dropdown(this.lineJoin, LINE_SHAPE_DEFAULTS.lineJoin),
+            interpolation: dropdown(this.interpolation, LINE_SHAPE_DEFAULTS.interpolation),
+            smoothing: dropdown(this.smoothing, LINE_SHAPE_DEFAULTS.smoothing),
+            tension: typeof this.tension.value === "number" ? this.tension.value : LINE_SHAPE_DEFAULTS.tension,
+            stepPosition: dropdown(this.stepPosition, LINE_SHAPE_DEFAULTS.stepPosition),
+        };
+    }
+
     private allItem(): FormattingSettingsCard {
-        return new LineTargetItem("すべて", [this.width, this.lineStyle]);
+        const values = this.shapeValues();
+        this.smoothing.visible = values.interpolation === INTERPOLATIONS.smooth;
+        this.tension.visible = this.smoothing.visible && values.smoothing === "cardinal";
+        this.stepPosition.visible = values.interpolation === INTERPOLATIONS.step;
+        return new LineTargetItem("すべて", [
+            this.lineStyle,
+            this.lineJoin,
+            this.width,
+            this.interpolation,
+            this.smoothing,
+            this.tension,
+            this.stepPosition,
+        ]);
     }
 
     targetGroup = new FormattingSettingsGroup({
@@ -1533,30 +1860,33 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
             displayName: "設定の適用先",
             containerItems: [
                 this.allItem(),
-                ...targets.slice(0, MAX_COLUMN_TARGETS).map(
-                    (target) =>
-                        new LineTargetItem(target.name, [
-                            new formattingSettings.ColorPicker({
-                                name: "fill",
-                                displayName: "カラー",
-                                value: { value: target.color },
-                                selector: target.selector,
-                            }),
-                            new formattingSettings.NumUpDown({
-                                name: "width",
-                                displayName: "幅 (px)",
-                                value: target.width,
-                                selector: target.selector,
-                            }),
-                            new formattingSettings.ItemDropdown({
-                                name: "lineStyle",
-                                displayName: "線のスタイル",
-                                items: LINE_STYLE_ITEMS,
-                                value: LINE_STYLE_ITEMS.find((i) => i.value === target.lineStyle) ?? LINE_STYLE_ITEMS[0],
-                                selector: target.selector,
-                            }),
-                        ])
-                ),
+                ...targets.slice(0, MAX_COLUMN_TARGETS).map((target) => {
+                    const [lineJoin, ...interpolation] = lineShapeSlices(target, target.selector);
+                    // 並びは標準と同じ（線のスタイル・結合の種類・幅・補間の種類…）
+                    return new LineTargetItem(target.name, [
+                        new formattingSettings.ColorPicker({
+                            name: "fill",
+                            displayName: "カラー",
+                            value: { value: target.color },
+                            selector: target.selector,
+                        }),
+                        new formattingSettings.ItemDropdown({
+                            name: "lineStyle",
+                            displayName: "線のスタイル",
+                            items: LINE_STYLE_ITEMS,
+                            value: LINE_STYLE_ITEMS.find((i) => i.value === target.lineStyle) ?? LINE_STYLE_ITEMS[0],
+                            selector: target.selector,
+                        }),
+                        lineJoin,
+                        new formattingSettings.NumUpDown({
+                            name: "width",
+                            displayName: "幅 (px)",
+                            value: target.width,
+                            selector: target.selector,
+                        }),
+                        ...interpolation,
+                    ]);
+                }),
             ],
         });
     }
@@ -1649,18 +1979,26 @@ export class RibbonsCardSettings extends FormattingSettingsCompositeCard {
     groups = [this.colorGroup, this.borderGroup, this.layoutGroup];
 }
 
-/** 折れ線の点の印。標準と同じく既定は出さない */
+/**
+ * 折れ線の点の印。標準と同じく既定は出さず、「すべてのカテゴリに表示」で出す。
+ * 標準の「設定の適用先」はカテゴリごとにも選べるが、ここでは「すべて」だけ（カテゴリごとは見送り）
+ */
 export class MarkersCardSettings extends FormattingSettingsCompositeCard {
     name = "markers";
     displayName = "マーカー";
 
     show = new formattingSettings.ToggleSwitch({
         name: "show",
-        displayName: "表示",
+        displayName: "すべてのカテゴリに表示",
         value: false,
     });
 
-    topLevelSlice = this.show;
+    shape = new formattingSettings.ItemDropdown({
+        name: "shape",
+        displayName: "型",
+        items: MARKER_SHAPE_ITEMS,
+        value: MARKER_SHAPE_ITEMS[0],
+    });
 
     size = new formattingSettings.NumUpDown({
         name: "size",
@@ -1668,13 +2006,150 @@ export class MarkersCardSettings extends FormattingSettingsCompositeCard {
         value: 5,
     });
 
+    /** 空 = 線の色（標準の既定と同じ） */
+    color = new formattingSettings.ColorPicker({
+        name: "color",
+        displayName: "カラー",
+        value: { value: "" },
+    });
+
+    transparency = new formattingSettings.NumUpDown({
+        name: "transparency",
+        displayName: "透過性 (%)",
+        value: 0,
+    });
+
+    borderShow = new formattingSettings.ToggleSwitch({
+        name: "borderShow",
+        displayName: "罫線",
+        value: false,
+    });
+
+    borderMatchLine = new formattingSettings.ToggleSwitch({
+        name: "borderMatchLine",
+        displayName: "線の色を一致させる",
+        value: false,
+    });
+
+    borderFill = new formattingSettings.ColorPicker({
+        name: "borderFill",
+        displayName: "カラー",
+        value: { value: "#605E5C" },
+    });
+
+    borderTransparency = new formattingSettings.NumUpDown({
+        name: "borderTransparency",
+        displayName: "透過性 (%)",
+        value: 0,
+    });
+
+    borderWidth = new formattingSettings.NumUpDown({
+        name: "borderWidth",
+        displayName: "幅 (px)",
+        value: 1,
+    });
+
+    optionsGroup = new FormattingSettingsGroup({
+        name: "markerOptions",
+        displayName: "設定の適用先",
+        slices: [this.show],
+    });
+
     shapeGroup = new FormattingSettingsGroup({
         name: "markerShape",
         displayName: "シェイプ",
-        slices: [this.size],
+        slices: [this.shape, this.size],
     });
 
-    groups = [this.shapeGroup];
+    colorGroup = new FormattingSettingsGroup({
+        name: "markerColor",
+        displayName: "カラー",
+        slices: [this.color, this.transparency],
+    });
+
+    borderGroup = new FormattingSettingsGroup({
+        name: "markerBorder",
+        displayName: "罫線",
+        topLevelSlice: this.borderShow,
+        slices: [this.borderMatchLine, this.borderFill, this.borderTransparency, this.borderWidth],
+    });
+
+    groups = [this.optionsGroup, this.shapeGroup, this.colorGroup, this.borderGroup];
+}
+
+class AreaTargetItem extends FormattingSettingsCard {
+    name = "areaTarget";
+
+    constructor(displayName: string, slices: FormattingSettingsSlice[]) {
+        super();
+        this.displayName = displayName;
+        this.slices = slices;
+    }
+}
+
+/**
+ * 網掛け領域。折れ線と値 0 の高さのあいだを、線の色（既定）を透かして塗る。
+ * 「設定の適用先」に折れ線を並べ、線ごとに出す・出さないを選べる（標準と同じ）
+ */
+export class AreasCardSettings extends FormattingSettingsCompositeCard {
+    name = "areas";
+    displayName = "網掛け領域";
+
+    show = new formattingSettings.ToggleSwitch({
+        name: "show",
+        displayName: "網掛け領域",
+        value: false,
+    });
+
+    topLevelSlice = this.show;
+
+    matchLineColor = new formattingSettings.ToggleSwitch({
+        name: "matchLineColor",
+        displayName: "線の色を一致させる",
+        value: true,
+    });
+
+    fill = new formattingSettings.ColorPicker({
+        name: "fill",
+        displayName: "カラー",
+        value: { value: "#118DFF" },
+    });
+
+    transparency = new formattingSettings.Slider({
+        name: "transparency",
+        displayName: "領域の透過性 (%)",
+        value: 60,
+    });
+
+    colorGroup = new FormattingSettingsGroup({
+        name: "areaColor",
+        displayName: "カラー",
+        slices: [this.matchLineColor, this.fill, this.transparency],
+    });
+
+    groups: FormattingSettingsGroup[] = [this.colorGroup];
+
+    applyTargets(targets: LineTarget[]): void {
+        if (!targets.length) {
+            this.groups = [this.colorGroup];
+            return;
+        }
+        const container = new FormattingSettingsContainer({
+            displayName: "設定の適用先",
+            containerItems: targets.slice(0, MAX_COLUMN_TARGETS).map(
+                (target) =>
+                    new AreaTargetItem(target.name, [
+                        new formattingSettings.ToggleSwitch({
+                            name: "show",
+                            displayName: "このシリーズに表示",
+                            value: target.areaShow,
+                            selector: target.selector,
+                        }),
+                    ])
+            ),
+        });
+        this.groups = [new FormattingSettingsGroup({ name: "areaTargets", slices: [], container }), this.colorGroup];
+    }
 }
 
 export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
@@ -1705,6 +2180,13 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
         displayName: "線のスタイル",
         items: LINE_STYLE_ITEMS,
         value: LINE_STYLE_ITEMS[0], // 点線
+    });
+
+    /** 点線・破線の模様を線の幅に合わせて伸び縮みさせる（標準の「幅で拡大縮小」、#91） */
+    horizontalScaleWithWidth = new formattingSettings.ToggleSwitch({
+        name: "horizontalScaleWithWidth",
+        displayName: "幅で拡大縮小",
+        value: false,
     });
 
     horizontalWidth = new formattingSettings.NumUpDown({
@@ -1739,6 +2221,12 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
         value: LINE_STYLE_ITEMS[0], // 点線
     });
 
+    verticalScaleWithWidth = new formattingSettings.ToggleSwitch({
+        name: "verticalScaleWithWidth",
+        displayName: "幅で拡大縮小",
+        value: false,
+    });
+
     verticalWidth = new formattingSettings.NumUpDown({
         name: "verticalWidth",
         displayName: "幅 (px)",
@@ -1753,6 +2241,7 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
             this.horizontalColor,
             this.horizontalTransparency,
             this.horizontalStyle,
+            this.horizontalScaleWithWidth,
             this.horizontalWidth,
         ],
     });
@@ -1765,6 +2254,7 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
             this.verticalColor,
             this.verticalTransparency,
             this.verticalStyle,
+            this.verticalScaleWithWidth,
             this.verticalWidth,
         ],
     });
@@ -1780,12 +2270,13 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
     gridlines = new GridlinesCardSettings();
     columns = new ColumnsCardSettings();
     lines = new LinesCardSettings();
+    areas = new AreasCardSettings();
     markers = new MarkersCardSettings();
     ribbons = new RibbonsCardSettings();
     dataLabels = new DataLabelsCardSettings();
     totalLabels = new TotalLabelsCardSettings();
 
-    // 標準の複合グラフと同じ並び（X 軸・Y 軸・第 2 Y 軸・凡例・グリッド線・列・線・マーカー・データ ラベル・合計ラベル）。
+    // 標準の複合グラフと同じ並び（X 軸・Y 軸・第 2 Y 軸・凡例・グリッド線・列・線・網掛け領域・マーカー・データ ラベル・合計ラベル）。
     // リボンは標準のリボン グラフと同じく列のあと
     cards = [
         this.categoryAxis,
@@ -1796,6 +2287,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.columns,
         this.ribbons,
         this.lines,
+        this.areas,
         this.markers,
         this.dataLabels,
         this.totalLabels,
@@ -1812,6 +2304,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.columns.applyTargets(targets, options.seriesMode ?? false);
         this.dataLabels.applyTargets(options.labelTargets ?? []);
         this.lines.applyTargets(options.lineTargets ?? []);
+        this.areas.applyTargets(options.lineTargets ?? []);
         this.applyOrientation();
     }
 
@@ -1828,5 +2321,34 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.categoryAxis.minCategoryWidth.displayName = horizontal ? "最小カテゴリの高さ (px)" : "カテゴリの最小幅 (px)";
         const [first, second] = horizontal ? [this.valueAxis, this.categoryAxis] : [this.categoryAxis, this.valueAxis];
         this.cards = [first, second, ...this.cards.filter((c) => c !== this.categoryAxis && c !== this.valueAxis)];
+    }
+
+    /**
+     * グラフの種類による既定を、レポートに保存していない項目に当てる（#92）。
+     * populateFormattingSettingsModel のあと、transform の前に呼ぶ
+     */
+    applyChartTypeDefaults(dataView: powerbi.DataView | undefined): void {
+        const chartType = String(this.columns.chartType.value?.value ?? CHART_TYPES.clustered);
+        const saved = dataView?.metadata?.objects?.dataLabels;
+        const hasDetailField = !!dataView?.metadata?.columns?.some((c) => c.roles?.labelDetail);
+        this.dataLabels.applyChartTypeDefaults(chartType, saved, hasDetailField);
+    }
+
+    /**
+     * グラフの種類とデータに関係ないカードを隠す（標準はその種類で使うカードだけを出す、#90）。
+     * 隠すのは書式ペインの表示だけで、保存済みの値は残る。hasLines は「折れ線の値」にフィールドがあるとき true
+     */
+    applyCardVisibility(hasLines: boolean): void {
+        const chartType = String(this.columns.chartType.value?.value ?? CHART_TYPES.clustered);
+        const horizontal = String(this.columns.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
+        // 折れ線は縦棒の集合・積み上げ・100% 積み上げで描く（横棒とリボンでは描かない）
+        const linesDrawn = hasLines && !horizontal && chartType !== CHART_TYPES.ribbon;
+        this.totalLabels.visible = chartType === CHART_TYPES.stacked;
+        // 帯は縦棒のリボンで描く（横棒のリボンは値の大きい順に積むだけ）
+        this.ribbons.visible = chartType === CHART_TYPES.ribbon && !horizontal;
+        this.valueAxis2.visible = linesDrawn;
+        this.lines.visible = linesDrawn;
+        this.areas.visible = linesDrawn;
+        this.markers.visible = linesDrawn;
     }
 }

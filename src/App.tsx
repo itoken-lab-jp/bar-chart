@@ -5,18 +5,16 @@ import powerbi from "powerbi-visuals-api";
 import IViewport = powerbi.IViewport;
 import ISelectionId = powerbi.visuals.ISelectionId;
 
-import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo } from "./viewModel";
+import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings } from "./viewModel";
 import { VisualFormattingSettingsModel } from "./settings";
-import { contrastingText, placeLabel, measureTextWidth, LABEL_PADDING } from "./unitUtils";
+import { contrastingText, placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
 import { clusterLayout } from "./layout";
 import { layoutLegend, LegendLayout, LEGEND_MARKER_GAP } from "./legend";
+import { linePath, areaPath, markerPath, XY } from "./linePath";
 
-/**
- * ラベル文字列を指定ピクセル幅に収まるよう末尾「...」で省略
- */
 /** 長ければ末尾を省略した文字（軸のタイトル用）。省略したときは、マウスを乗せると全体が出る */
-function fittedText(text: string, maxWidthPx: number, fontSizePx: number): React.ReactNode {
-    const shown = truncateText(text, maxWidthPx, fontSizePx);
+function fittedText(text: string, maxWidthPx: number, font: FontSpec): React.ReactNode {
+    const shown = truncateText(text, maxWidthPx, font);
     return shown === text ? text : (
         <>
             {shown}
@@ -25,36 +23,27 @@ function fittedText(text: string, maxWidthPx: number, fontSizePx: number): React
     );
 }
 
-function truncateText(text: string, maxWidthPx: number, fontSizePx: number): string {
+/**
+ * 指定の幅に収まるよう、末尾を「…」で省略した文字。幅は Power BI の文字幅の計測で測る（標準と同じ省略記号 1 文字）。
+ * 1.10 までは全角 1.05 文字分・「...」3 文字分と見積もっていて、標準より早く省略していた（#89）
+ */
+function truncateText(text: string, maxWidthPx: number, font: FontSpec): string {
     if (!text) return "";
-    const getWidth = (s: string) => {
-        let w = 0;
-        for (let i = 0; i < s.length; i++) {
-            w += s.charCodeAt(i) > 255 ? fontSizePx * 1.05 : fontSizePx * 0.6;
-        }
-        return w;
-    };
-
-    if (getWidth(text) <= maxWidthPx) {
-        return text;
+    if (measureTextWidth(text, font) <= maxWidthPx) return text;
+    const ellipsis = "…";
+    // 収まるいちばん長い先頭を二分探索で探す（計測の呼び出しを少なくする）
+    let lo = 0;
+    let hi = text.length - 1;
+    while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (measureTextWidth(text.slice(0, mid).trimEnd() + ellipsis, font) <= maxWidthPx) lo = mid;
+        else hi = mid - 1;
     }
-
-    const ellipsis = "...";
-    const ellipsisW = getWidth(ellipsis);
-    if (maxWidthPx <= ellipsisW) {
-        return text.charAt(0) + ellipsis;
-    }
-
-    let result = "";
-    for (let i = 0; i < text.length; i++) {
-        const next = text.slice(0, i + 1);
-        if (getWidth(next) + ellipsisW > maxWidthPx) {
-            break;
-        }
-        result = next;
-    }
-    return (result || text.charAt(0)) + ellipsis;
+    return (lo > 0 ? text.slice(0, lo).trimEnd() : text.charAt(0)) + ellipsis;
 }
+
+/** 斜めのカテゴリ名を、棒の下端から離す間隔 (px) */
+const ROTATED_LABEL_GAP = 8;
 
 /**
  * 斜めのカテゴリラベルをビジュアル左端から離しておく余白 (px)。
@@ -69,17 +58,66 @@ const HIGHLIGHT_DIM_FACTOR = 0.35;
 /** pt -> px 換算比率 (1pt = 4/3 px = 1.3333...px) */
 const PT_TO_PX = 4 / 3;
 
+interface DataLabelLine extends LabelLine {
+    kind: "value" | "detail";
+}
+
+/** データラベルの行（値の行と詳細の行。標準と同じく値が上） */
+function labelLinesOf(dl: DataLabelsSettings, d: DataPoint): DataLabelLine[] {
+    const lines: DataLabelLine[] = [];
+    if (dl.valueShow) {
+        lines.push({
+            kind: "value",
+            text: d.dataLabelText,
+            font: { family: dl.fontFamily, size: dl.fontSize * PT_TO_PX, bold: dl.bold, italic: dl.italic, underline: false },
+        });
+    }
+    if (dl.detailShow && d.detailText) {
+        lines.push({
+            kind: "detail",
+            text: d.detailText,
+            font: {
+                family: dl.detailFontFamily,
+                size: dl.detailFontSize * PT_TO_PX,
+                bold: dl.detailBold,
+                italic: dl.detailItalic,
+                underline: dl.detailUnderline,
+            },
+        });
+    }
+    return lines;
+}
+
+/** データラベルの行の文字の見た目。色が空なら autoColor（棒の色に合わせた白か黒） */
+function labelTextStyle(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoint, autoColor: string): React.CSSProperties {
+    const detail = line.kind === "detail";
+    return {
+        fill: (detail ? dl.detailColor : d.labelColor) || autoColor,
+        ...(detail && dl.detailTransparency > 0 ? { fillOpacity: 1 - dl.detailTransparency / 100 } : {}),
+        fontSize: `${line.font.size / PT_TO_PX}pt`,
+        fontFamily: line.font.family,
+        fontWeight: line.font.bold ? "bold" : "normal",
+        fontStyle: line.font.italic ? "italic" : "normal",
+        ...(line.font.underline ? { textDecoration: "underline" } : {}),
+    };
+}
+
 /**
  * グリッド線の線種。標準に合わせ、点線は細かい点（長さ 1 の線に丸い端）、破線は 4px 刻み。
  * 点線は端を丸めるので crispEdges を掛けない（点がつぶれる）
  */
-export function gridLineStroke(style: string): {
+export function gridLineStroke(style: string, width = 1, scaleWithWidth = false): {
     dashArray?: string;
     lineCap?: "round";
     shapeRendering: "crispEdges" | "auto";
 } {
-    if (style === "dotted") return { dashArray: "1 3", lineCap: "round", shapeRendering: "auto" };
-    if (style === "dashed") return { dashArray: "4 4", shapeRendering: "crispEdges" };
+    // 「幅で拡大縮小」がオンなら、点線・破線の模様を線の幅に比例させる（標準と同じく、細い線では模様が細かくなる、#91）。
+    // オフなら、幅によらず 1.10 までと同じ模様
+    const w = Math.max(1, width);
+    if (style === "dotted") {
+        return { dashArray: scaleWithWidth ? `${w} ${2 * w}` : "1 3", lineCap: "round", shapeRendering: "auto" };
+    }
+    if (style === "dashed") return { dashArray: scaleWithWidth ? `${3 * w} ${3 * w}` : "4 4", shapeRendering: "crispEdges" };
     return { shapeRendering: "crispEdges" };
 }
 
@@ -318,18 +356,13 @@ export const App: React.FC<AppProps> = ({
                 ? "insideCenter"
                 : viewModel.dataLabels.position;
 
-        // X軸カテゴリラベルの文字幅・回転判定
-        let maxCatChars = 0;
-        for (const g of groups) {
-            if (g.category.length > maxCatChars) {
-                maxCatChars = g.category.length;
-            }
-        }
+        // X軸カテゴリラベルの幅（実測）と回転の判定
         const catFontSizePx = catAxis.fontSize * PT_TO_PX;
-        const approxCatWidth = maxCatChars * (catFontSizePx * 0.85);
+        const catFont: FontSpec = { family: catAxis.fontFamily, size: catFontSizePx, bold: catAxis.bold, italic: catAxis.italic, underline: catAxis.underline };
+        const widestCat = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(g.category, catFont))) : 0;
 
-        // バンド幅に対してラベルが収まらなければ斜め-45度回転
-        const shouldRotateCat = catAxis.show && (approxCatWidth > step * 0.85);
+        // バンド幅に収まらなければ斜め -45 度に回転
+        const shouldRotateCat = catAxis.show && widestCat > step * 0.92;
 
         // X軸タイトル高さ (タイトル領域は高さ最大値の判定外で独立確保し、重なりを防止)
         const hasCatTitle = catAxis.titleShow && Boolean(catAxis.titleText);
@@ -337,21 +370,25 @@ export const App: React.FC<AppProps> = ({
         const catTitleHeight = hasCatTitle ? catTitleFontSizePx + 10 : 0;
 
         // X軸ラベル領域 (高さの最大値 % はここだけに効く)
-        // maxHeight は 0〜100% (既定 25%)。範囲は viewModel でクランプ済み
-        const maxLabelAreaHeight = Math.max(16, height * (catAxis.maxHeight / 100));
+        // maxHeight は 0〜100% (既定 25%)。標準と同じく、凡例を含むビジュアル全体の高さに対する割合。
+        // 斜めのラベルでは、割合はラベルの縦の広がりに効き、棒との間隔と文字の太さの半分は別に足す
+        // （Desktop で、タイトルありの標準は 8 文字、タイトルなしは 9 文字まで出した。1.13 までは 1 文字早かった）
+        const labelExtentMax = Math.max(16, viewport.height * (catAxis.maxHeight / 100));
+        const maxLabelAreaHeight = shouldRotateCat ? ROTATED_LABEL_GAP + labelExtentMax + catFontSizePx * 0.5 : labelExtentMax;
 
-        // 必要とされるラベル高さ
+        // 必要とされるラベル高さ（斜めは、棒との間隔＋ラベルの縦の広がり＋文字の太さの半分）
         const desiredLabelHeight = shouldRotateCat
-            ? approxCatWidth * Math.sin(Math.PI / 4) + 12
+            ? ROTATED_LABEL_GAP + widestCat * Math.SQRT1_2 + catFontSizePx * 0.5
             : catFontSizePx + 10;
 
         const labelAreaHeight = catAxis.show
             ? Math.max(14, Math.min(desiredLabelHeight, maxLabelAreaHeight))
             : 0;
 
-        // ラベル表示の最大許容長 (px) - これを超える場合は末尾を「...」に省略
+        // ラベルの長さの上限 (px)。超えたら末尾を「…」に省略。斜めは、ラベル領域の高さから棒との間隔を除いた分
+        // 領域がいちばん長いラベルちょうどのときに、計算の誤差で省略しないよう 0.5px の余裕を持たせる
         const maxAllowedLabelLen = shouldRotateCat
-            ? Math.max(12, (labelAreaHeight - 8) / Math.sin(Math.PI / 4))
+            ? Math.max(12, (labelAreaHeight - ROTATED_LABEL_GAP - catFontSizePx * 0.5) / Math.SQRT1_2 + 0.5)
             : Math.max(12, step * 0.92);
 
         // 全体の下部マージン = ラベル領域 + タイトル領域 + スクロールバー高さ + 余白
@@ -359,11 +396,11 @@ export const App: React.FC<AppProps> = ({
         const plotHeight = Math.max(10, height - marginTop - marginBottom);
 
         // 横グリッド線 (Y軸目盛線) の線種と透過性
-        const hStroke = gridLineStroke(gridlines.horizontalStyle);
+        const hStroke = gridLineStroke(gridlines.horizontalStyle, gridlines.horizontalWidth, gridlines.horizontalScaleWithWidth);
         const hOpacity = Math.max(0, Math.min(1, 1 - gridlines.horizontalTransparency / 100));
 
         // 縦グリッド線 (X軸目盛線) の線種と透過性
-        const vStroke = gridLineStroke(gridlines.verticalStyle);
+        const vStroke = gridLineStroke(gridlines.verticalStyle, gridlines.verticalWidth, gridlines.verticalScaleWithWidth);
         const vOpacity = Math.max(0, Math.min(1, 1 - gridlines.verticalTransparency / 100));
 
         // 縦グリッド線の位置: プロットの両端と、隣り合うカテゴリの中間
@@ -489,15 +526,9 @@ export const App: React.FC<AppProps> = ({
                         const dl = viewModel.dataLabels;
                         if (!dl.show || !d.labelShow || barH <= 0) return null;
 
-                        const text = d.dataLabelText;
+                        const lines = labelLinesOf(dl, d);
+                        if (!lines.length) return null;
                         const isVertical = dl.orientation === "vertical";
-                        const fontSpec = {
-                            family: dl.fontFamily,
-                            size: dl.fontSize * PT_TO_PX,
-                            bold: dl.bold,
-                            italic: dl.italic,
-                            underline: false,
-                        };
 
                         const barBottom = barTop + barH;
                         const placed = placeLabel({
@@ -505,8 +536,9 @@ export const App: React.FC<AppProps> = ({
                             top: barTop,
                             bottom: barBottom,
                             barWidth,
-                            value: text,
-                            font: fontSpec,
+                            value: lines[0].text,
+                            font: lines[0].font,
+                            lines,
                             vertical: isVertical,
                             // 積み上げでは外側が上の棒なので、入りきらないラベルを外へ逃がさず出さない
                             overflow: stacked ? false : dl.overflow,
@@ -515,15 +547,7 @@ export const App: React.FC<AppProps> = ({
                         if (!placed.fitsVertically && !placed.outside) return null;
                         if (!placed.fitsAlongBar && !dl.overflow) return null;
 
-                        let textColor = d.labelColor;
-                        if (!textColor) {
-                            if (placed.outside || dl.backgroundShow) {
-                                textColor = "#252423";
-                            } else {
-                                textColor = contrastingText(d.color);
-                            }
-                        }
-
+                        const autoColor = placed.outside || dl.backgroundShow ? "#252423" : contrastingText(d.color);
                         const bgOpacity = (100 - dl.backgroundTransparency) / 100;
 
                         return (
@@ -544,21 +568,18 @@ export const App: React.FC<AppProps> = ({
                                         fillOpacity={bgOpacity}
                                     />
                                 )}
-                                <text
-                                    x={0}
-                                    y={dl.fontSize * PT_TO_PX * 0.35}
-                                    className="data-label"
-                                    textAnchor="middle"
-                                    style={{
-                                        fill: textColor,
-                                        fontSize: `${dl.fontSize}pt`,
-                                        fontFamily: dl.fontFamily,
-                                        fontWeight: dl.bold ? "bold" : "normal",
-                                        fontStyle: dl.italic ? "italic" : "normal",
-                                    }}
-                                >
-                                    {text}
-                                </text>
+                                {lines.map((line, k) => (
+                                    <text
+                                        key={line.kind}
+                                        x={0}
+                                        y={placed.baselines[k]}
+                                        className={line.kind === "value" ? "data-label" : "data-label-detail"}
+                                        textAnchor="middle"
+                                        style={labelTextStyle(dl, line, d, autoColor)}
+                                    >
+                                        {line.text}
+                                    </text>
+                                ))}
                             </g>
                         );
                     })()}
@@ -633,7 +654,7 @@ export const App: React.FC<AppProps> = ({
                 ? Math.max(12, (cx - labelLeftBound) / Math.sin(Math.PI / 4))
                 : maxAllowedLabelLen;
             const effectiveMaxLen = Math.min(maxAllowedLabelLen, maxLenLeft);
-            const displayCat = truncateText(category, effectiveMaxLen, catFontSizePx);
+            const displayCat = truncateText(category, effectiveMaxLen, catFont);
             const labelStyle = {
                 fontSize: `${catAxis.fontSize}pt`,
                 fontFamily: catAxis.fontFamily,
@@ -645,7 +666,7 @@ export const App: React.FC<AppProps> = ({
 
             if (shouldRotateCat) {
                 // 斜め45度回転 (標準準拠: 棒の直下から左下に伸び、Y軸ラベルの下に被さる)
-                const labelTop = marginTop + plotHeight + 10;
+                const labelTop = marginTop + plotHeight + ROTATED_LABEL_GAP;
                 return (
                     <text
                         x={cx - 4}
@@ -679,21 +700,30 @@ export const App: React.FC<AppProps> = ({
          * 折れ線 1 本。点はカテゴリの中心に置き、値の無いカテゴリでは線を切る。
          * 点の上にマウスの当たり判定の円を置き、ツールヒントと選択を受ける
          */
-        const renderLine = (line: LineSeriesInfo, j: number, xOffset: number) => {
+        const renderLine = (line: LineSeriesInfo, j: number, xOffset: number, part: "area" | "line") => {
             // 第 2 Y 軸には範囲の反転が無いので、そのまま下から上へ
             const yOf = (ratio: number) =>
                 axis2On ? marginTop + plotHeight * (1 - Math.max(0, Math.min(1, ratio))) : yOfRatio(ratio);
             const pts = line.points.map((p, i) => ({ p, i, x: xOffset + centerOf(i), y: p.ratio === null ? null : yOf(p.ratio) }));
-            let path = "";
-            let pen = false;
+            // 値の無いカテゴリで切った、途切れのない点の並び
+            const runs: XY[][] = [];
+            let run: XY[] = [];
             for (const pt of pts) {
                 if (pt.y === null) {
-                    pen = false;
+                    if (run.length) runs.push(run);
+                    run = [];
                     continue;
                 }
-                path += `${pen ? "L" : "M"} ${pt.x},${pt.y} `;
-                pen = true;
+                run.push({ x: pt.x, y: pt.y });
             }
+            if (run.length) runs.push(run);
+            const shape = {
+                interpolation: line.interpolation,
+                smoothing: line.smoothing,
+                tension: line.tension / 100,
+                stepPosition: line.stepPosition,
+            };
+            const path = runs.map((r) => linePath(r, shape)).join(" ");
             const dimmed = !viewModel.hasHighlights && selectedIds.length > 0 && !isLinePicked(j);
             const opacity = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
             const dash =
@@ -702,18 +732,39 @@ export const App: React.FC<AppProps> = ({
                     : line.lineStyle === "dotted"
                         ? `${line.width * 0.1} ${line.width * 2}`
                         : undefined;
-            const markerR = Math.max(1, viewModel.markers.size / 2 + 0.5);
+            const mk = viewModel.markers;
+            const markerFill = mk.color || line.color;
+            const markerOpacity = opacity * Math.max(0, Math.min(1, 1 - mk.transparency / 100));
+            const markerStroke = mk.borderShow ? (mk.borderMatchLine ? line.color : mk.borderColor) : "none";
+            const markerStrokeOpacity = opacity * Math.max(0, Math.min(1, 1 - mk.borderTransparency / 100));
             const hitR = Math.max(6, line.width * 2);
+            if (part === "area") {
+                // 網掛け領域は棒の上に、透かして塗る（標準と同じ）
+                if (!line.areaShow) return null;
+                const area = viewModel.areas;
+                const baselineY = yOf(line.baselineRatio);
+                return runs.map((r, k) => (
+                    <path
+                        key={`area-${j}-${k}`}
+                        d={areaPath(r, baselineY, shape)}
+                        className="line-area"
+                        fill={area.matchLineColor ? line.color : area.fill}
+                        fillOpacity={opacity * Math.max(0, Math.min(1, 1 - area.transparency / 100))}
+                        stroke="none"
+                        pointerEvents="none"
+                    />
+                ));
+            }
             return (
                 <g key={`line-${j}`} className="line-series">
                     <path
-                        d={path.trim()}
+                        d={path}
                         className="line-path"
                         fill="none"
                         stroke={line.color}
                         strokeWidth={line.width}
                         strokeDasharray={dash}
-                        strokeLinejoin="round"
+                        strokeLinejoin={line.lineJoin === "miter" || line.lineJoin === "bevel" ? line.lineJoin : "round"}
                         strokeLinecap={line.lineStyle === "dotted" ? "round" : "butt"}
                         strokeOpacity={opacity}
                         pointerEvents="none"
@@ -721,13 +772,17 @@ export const App: React.FC<AppProps> = ({
                     {pts.map((pt) =>
                         pt.y === null ? null : (
                             <g key={`pt-${j}-${pt.i}`}>
-                                {viewModel.markers.show && (
-                                    <circle
-                                        cx={pt.x}
-                                        cy={pt.y}
-                                        r={markerR}
+                                {mk.show && (
+                                    <path
+                                        d={markerPath(mk.shape, pt.x, pt.y, mk.size)}
                                         className="line-marker"
-                                        style={{ fill: line.color, fillOpacity: opacity }}
+                                        style={{
+                                            fill: markerFill,
+                                            fillOpacity: markerOpacity,
+                                            stroke: markerStroke,
+                                            strokeWidth: mk.borderShow ? mk.borderWidth : 0,
+                                            strokeOpacity: markerStrokeOpacity,
+                                        }}
                                         pointerEvents="none"
                                     />
                                 )}
@@ -898,7 +953,11 @@ export const App: React.FC<AppProps> = ({
 
                     {/* 折れ線（複合）。棒の上に重ねる */}
                     {viewModel.lines.length > 0 && (
-                        <g className="lines-group">{viewModel.lines.map((line, j) => renderLine(line, j, xOffset))}</g>
+                        <g className="lines-group">
+                            {/* 網掛け領域はすべての線の下に塗る */}
+                            {viewModel.lines.map((line, j) => renderLine(line, j, xOffset, "area"))}
+                            {viewModel.lines.map((line, j) => renderLine(line, j, xOffset, "line"))}
+                        </g>
                     )}
                 </>
             );
@@ -970,7 +1029,13 @@ export const App: React.FC<AppProps> = ({
                                 fill: valAxis.titleColor,
                             }}
                         >
-                            {fittedText(valAxis.titleText, plotHeight, valTitleFontSizePx)}
+                            {fittedText(valAxis.titleText, plotHeight, {
+                                family: valAxis.titleFontFamily,
+                                size: valTitleFontSizePx,
+                                bold: valAxis.titleBold,
+                                italic: valAxis.titleItalic,
+                                underline: valAxis.titleUnderline,
+                            })}
                         </text>
                     )}
 
@@ -1032,7 +1097,13 @@ export const App: React.FC<AppProps> = ({
                                 fill: axis2.titleColor,
                             }}
                         >
-                            {fittedText(axis2.titleText, plotHeight, axis2TitleFontPx)}
+                            {fittedText(axis2.titleText, plotHeight, {
+                                family: axis2.titleFontFamily,
+                                size: axis2TitleFontPx,
+                                bold: axis2.titleBold,
+                                italic: axis2.titleItalic,
+                                underline: axis2.titleUnderline,
+                            })}
                         </text>
                     )}
                     {axis2BadgeText && (
@@ -1161,7 +1232,13 @@ export const App: React.FC<AppProps> = ({
                             }}
                             title={catAxis.titleText}
                         >
-                            {truncateText(catAxis.titleText, viewWidth, catTitleFontSizePx)}
+                            {truncateText(catAxis.titleText, viewWidth, {
+                                family: catAxis.titleFontFamily,
+                                size: catTitleFontSizePx,
+                                bold: catAxis.titleBold,
+                                italic: catAxis.titleItalic,
+                                underline: catAxis.titleUnderline,
+                            })}
                         </span>
                     </div>
                 )}
@@ -1201,7 +1278,13 @@ export const App: React.FC<AppProps> = ({
                             fill: catAxis.titleColor,
                         }}
                     >
-                        {fittedText(catAxis.titleText, plotWidth, catTitleFontSizePx)}
+                        {fittedText(catAxis.titleText, plotWidth, {
+                            family: catAxis.titleFontFamily,
+                            size: catTitleFontSizePx,
+                            bold: catAxis.titleBold,
+                            italic: catAxis.titleItalic,
+                            underline: catAxis.titleUnderline,
+                        })}
                     </text>
                 )}
             </svg>
@@ -1242,7 +1325,8 @@ export const App: React.FC<AppProps> = ({
         const hasCatTitle = catAxis.titleShow && Boolean(catAxis.titleText);
         const catFont = { family: catAxis.fontFamily, size: catFontPx, bold: catAxis.bold, italic: catAxis.italic, underline: catAxis.underline };
         const widestLabel = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(g.category, catFont))) : 0;
-        const maxLabelWidth = Math.max(16, width * (catAxis.maxHeight / 100));
+        // 標準と同じく、凡例を含むビジュアル全体の幅に対する割合
+        const maxLabelWidth = Math.max(16, viewport.width * (catAxis.maxHeight / 100));
         const labelAreaWidth = catAxis.show ? Math.min(widestLabel, maxLabelWidth) + 8 : 0;
         const catTitleWidth = hasCatTitle ? catTitleFontPx + 8 : 0;
 
@@ -1286,14 +1370,12 @@ export const App: React.FC<AppProps> = ({
             return { left: Math.min(a, b), width: Math.abs(b - a) };
         };
 
-        const valueStroke = gridLineStroke(gridlines.horizontalStyle);
+        const valueStroke = gridLineStroke(gridlines.horizontalStyle, gridlines.horizontalWidth, gridlines.horizontalScaleWithWidth);
         const valueOpacity = Math.max(0, Math.min(1, 1 - gridlines.horizontalTransparency / 100));
-        const categoryStroke = gridLineStroke(gridlines.verticalStyle);
+        const categoryStroke = gridLineStroke(gridlines.verticalStyle, gridlines.verticalWidth, gridlines.verticalScaleWithWidth);
         const categoryOpacity = Math.max(0, Math.min(1, 1 - gridlines.verticalTransparency / 100));
 
         const dl = viewModel.dataLabels;
-        const dlFontPx = dl.fontSize * PT_TO_PX;
-        const dlFont = { family: dl.fontFamily, size: dlFontPx, bold: dl.bold, italic: dl.italic, underline: false };
         // 横棒のデータラベルの位置。「自動」は集合なら外側の端、積み上げなら中央（積み上げでは外側に置かない）
         const hLabelPosition =
             dl.position === "auto" || (stacked && dl.position === "outsideEnd")
@@ -1334,8 +1416,10 @@ export const App: React.FC<AppProps> = ({
             // データラベル（横に並べる。「縦」の方向は横棒では使わない）
             const label = (() => {
                 if (!dl.show || !d.labelShow || w <= 0) return null;
-                const text = d.dataLabelText;
-                const textW = measureTextWidth(text, dlFont);
+                const lines = labelLinesOf(dl, d);
+                if (!lines.length) return null;
+                const block = labelBlock(lines);
+                const textW = block.width;
                 const right = left + w;
                 let x: number;
                 let anchor: "start" | "middle" | "end";
@@ -1357,42 +1441,43 @@ export const App: React.FC<AppProps> = ({
                     anchor = rightward ? "start" : "end";
                 }
                 const fitsLength = textW + LABEL_PADDING * 2 <= w;
-                const fitsThickness = thickness >= dlFontPx + 2;
+                const blockHeight = lines.length > 1 ? block.bottomEdge - block.topEdge : lines[0].font.size;
+                const fitsThickness = thickness >= blockHeight + 2;
                 // 積み上げでは隣が別の棒なので、値の向きに入りきらないラベルは出さない
                 if (inside && stacked && !fitsLength) return null;
                 if (inside && !(fitsLength && fitsThickness) && !dl.overflow) return null;
-                let textColor = d.labelColor;
-                if (!textColor) textColor = !inside || dl.backgroundShow ? "#252423" : contrastingText(d.color);
+                const autoColor = !inside || dl.backgroundShow ? "#252423" : contrastingText(d.color);
                 const midY = top + thickness / 2;
+                // 背景は 1 行なら 1.10 までと同じ高さ、複数行ならまとまりの上端から下端
+                const firstPx = lines[0].font.size;
+                const bgTop = lines.length > 1 ? midY + block.topEdge - 1 : midY - firstPx * 0.6 - 1;
+                const bgHeight = lines.length > 1 ? blockHeight + 2 : firstPx * 1.2 + 2;
                 const boxX = anchor === "start" ? x - LABEL_PADDING : anchor === "end" ? x - textW - LABEL_PADDING : x - textW / 2 - LABEL_PADDING;
                 return (
                     <g className="data-label-group" pointerEvents="none">
                         {dl.backgroundShow && (
                             <rect
                                 x={boxX}
-                                y={midY - dlFontPx * 0.6 - 1}
+                                y={bgTop}
                                 width={textW + LABEL_PADDING * 2}
-                                height={dlFontPx * 1.2 + 2}
+                                height={bgHeight}
                                 rx={2}
                                 fill={dl.backgroundColor}
                                 fillOpacity={(100 - dl.backgroundTransparency) / 100}
                             />
                         )}
-                        <text
-                            x={x}
-                            y={midY + dlFontPx * 0.35}
-                            className="data-label"
-                            textAnchor={anchor}
-                            style={{
-                                fill: textColor,
-                                fontSize: `${dl.fontSize}pt`,
-                                fontFamily: dl.fontFamily,
-                                fontWeight: dl.bold ? "bold" : "normal",
-                                fontStyle: dl.italic ? "italic" : "normal",
-                            }}
-                        >
-                            {text}
-                        </text>
+                        {lines.map((line, k) => (
+                            <text
+                                key={line.kind}
+                                x={x}
+                                y={midY + block.baselines[k]}
+                                className={line.kind === "value" ? "data-label" : "data-label-detail"}
+                                textAnchor={anchor}
+                                style={labelTextStyle(dl, line, d, autoColor)}
+                            >
+                                {line.text}
+                            </text>
+                        ))}
                     </g>
                 );
             })();
@@ -1540,7 +1625,7 @@ export const App: React.FC<AppProps> = ({
                                             fill: catAxis.labelColor,
                                         }}
                                     >
-                                        {truncateText(g.category, maxLabelWidth, catFontPx)}
+                                        {truncateText(g.category, maxLabelWidth, catFont)}
                                         <title>{g.category}</title>
                                     </text>
                                 )}
@@ -1600,7 +1685,13 @@ export const App: React.FC<AppProps> = ({
                                 fill: valAxis.titleColor,
                             }}
                         >
-                            {fittedText(valAxis.titleText, plotWidth, valTitleFontPx)}
+                            {fittedText(valAxis.titleText, plotWidth, {
+                                family: valAxis.titleFontFamily,
+                                size: valTitleFontPx,
+                                bold: valAxis.titleBold,
+                                italic: valAxis.titleItalic,
+                                underline: valAxis.titleUnderline,
+                            })}
                         </text>
                     )}
                     {badgeText && (
@@ -1629,7 +1720,13 @@ export const App: React.FC<AppProps> = ({
                                 fill: catAxis.titleColor,
                             }}
                         >
-                            {fittedText(catAxis.titleText, viewHeight, catTitleFontPx)}
+                            {fittedText(catAxis.titleText, viewHeight, {
+                                family: catAxis.titleFontFamily,
+                                size: catTitleFontPx,
+                                bold: catAxis.titleBold,
+                                italic: catAxis.titleItalic,
+                                underline: catAxis.titleUnderline,
+                            })}
                         </text>
                     )}
                 </g>

@@ -18,7 +18,9 @@ import {
     LineTarget,
     CHART_TYPES,
     ChartType,
+    DETAIL_CONTENTS,
     LINE_STYLES,
+    LINE_SHAPE_DEFAULTS,
     ORIENTATIONS,
     Orientation,
 } from "./settings";
@@ -54,6 +56,8 @@ export interface DataPoint {
     rank: number | null;
     formattedValue: string;
     dataLabelText: string;
+    /** データラベルの詳細の行（全体に対する割合か、ラベルの詳細のフィールドの値）。無ければ空 */
+    detailText: string;
     selectionId: ISelectionId;
     /** ハイライトの値。ハイライトが無い・この棒が該当しないときは null */
     highlight: number | null;
@@ -120,6 +124,20 @@ export interface LineSeriesInfo {
     color: string;
     width: number;
     lineStyle: string;
+    /** 結合の種類（"miter" | "round" | "bevel"） */
+    lineJoin: string;
+    /** 補間の種類（"linear" | "smooth" | "step"） */
+    interpolation: string;
+    /** スムーズの種類（"monotone" | "cardinal"） */
+    smoothing: string;
+    /** カーディナルのテンション (%) */
+    tension: number;
+    /** ステップの位置（"before" | "center" | "after"） */
+    stepPosition: string;
+    /** 網掛け領域を出すか（カードの表示と、線ごとの「このシリーズに表示」） */
+    areaShow: boolean;
+    /** 網掛け領域の下の辺（値 0 の高さ。軸の範囲の外なら端）の軸の比率 */
+    baselineRatio: number;
     /** 凡例のクリックで選ぶ ID（メジャー） */
     selectionId: ISelectionId;
     points: LinePoint[];
@@ -161,6 +179,29 @@ export interface LegendItemInfo {
     color: string;
     /** クリックで選ぶ ID。系列 1 本の棒は null（選ばない） */
     selectionId: ISelectionId | null;
+}
+
+/** 折れ線のマーカー */
+export interface MarkerSettings {
+    show: boolean;
+    /** 型（"circle" | "square" | "diamond" | "triangle" | "cross" | "shortDash" | "longDash" | "plus"） */
+    shape: string;
+    size: number;
+    /** 空 = 線の色 */
+    color: string;
+    transparency: number;
+    borderShow: boolean;
+    borderMatchLine: boolean;
+    borderColor: string;
+    borderTransparency: number;
+    borderWidth: number;
+}
+
+/** 網掛け領域の色 */
+export interface AreaSettings {
+    matchLineColor: boolean;
+    fill: string;
+    transparency: number;
 }
 
 /** リボンの帯の見た目 */
@@ -225,6 +266,18 @@ export interface UnitInfo {
 
 export interface DataLabelsSettings {
     show: boolean;
+    /** 値の行を出すか */
+    valueShow: boolean;
+    /** 詳細の行を出すか */
+    detailShow: boolean;
+    detailFontFamily: string;
+    detailFontSize: number;
+    detailBold: boolean;
+    detailItalic: boolean;
+    detailUnderline: boolean;
+    /** 空 = 自動（値の行と同じ） */
+    detailColor: string;
+    detailTransparency: number;
     position: string; // "auto" | "outsideEnd" | "insideTop" | "insideCenter" | "insideBottom"
     orientation: string; // "horizontal" | "vertical"
     overflow: boolean;
@@ -294,11 +347,13 @@ export interface GridlinesSettings {
     horizontalTransparency: number;
     horizontalStyle: string;
     horizontalWidth: number;
+    horizontalScaleWithWidth: boolean;
     verticalShow: boolean;
     verticalColor: string;
     verticalTransparency: number;
     verticalStyle: string;
     verticalWidth: number;
+    verticalScaleWithWidth: boolean;
 }
 
 export interface ColumnsSettings {
@@ -357,7 +412,8 @@ export interface ViewModel {
     /** 折れ線（複合）。無ければ空 */
     lines: LineSeriesInfo[];
     lineTargets: LineTarget[];
-    markers: { show: boolean; size: number };
+    markers: MarkerSettings;
+    areas: AreaSettings;
     valueAxis2: ValueAxis2Settings;
     ribbons: RibbonSettings;
     hasHighlights: boolean;
@@ -390,6 +446,21 @@ const clampBorderWidth = (v: number): number => Math.max(1, Math.min(5, v));
 export const MAX_LOG_TICKS = 8;
 
 /** Math.log10 の丸め誤差を吸収する（10 の冪ならちょうどの整数を返す） */
+/**
+ * 0 を含む範囲 [lo, hi] を広げて、0 が下から zero（0〜1）の割合の高さに来るようにする（第 2 Y 軸の「0 を配置する」、#91）。
+ * zero が端（0 か 1）で、反対側に値があって合わせられないときは、そのまま返す
+ */
+export function alignZeroAt(lo: number, hi: number, zero: number): [number, number] {
+    if (!(hi > lo) || lo > 0 || hi < 0) return [lo, hi];
+    const current = -lo / (hi - lo);
+    if (Math.abs(current - zero) < 1e-9) return [lo, hi];
+    if (zero <= 0) return lo === 0 ? [0, hi] : [lo, hi];
+    if (zero >= 1) return hi === 0 ? [lo, 0] : [lo, hi];
+    // 0 の下が足りなければ下へ、上が足りなければ上へ広げる
+    if (current < zero) return [(-zero * hi) / (1 - zero), hi];
+    return [lo, (-lo * (1 - zero)) / zero];
+}
+
 function log10Snap(v: number): number {
     const l = Math.log10(v);
     const r = Math.round(l);
@@ -479,11 +550,13 @@ const EMPTY_GRIDLINES: GridlinesSettings = {
     horizontalTransparency: 0,
     horizontalStyle: "dotted",
     horizontalWidth: 1,
+    horizontalScaleWithWidth: false,
     verticalShow: false,
     verticalColor: "#E1DFDD",
     verticalTransparency: 0,
     verticalStyle: "dotted",
     verticalWidth: 1,
+    verticalScaleWithWidth: false,
 };
 
 const EMPTY_DATA_LABELS: DataLabelsSettings = {
@@ -500,6 +573,15 @@ const EMPTY_DATA_LABELS: DataLabelsSettings = {
     backgroundColor: "#FFFFFF",
     backgroundTransparency: 0,
     precision: "auto",
+    valueShow: true,
+    detailShow: false,
+    detailFontFamily: "Segoe UI",
+    detailFontSize: 9,
+    detailBold: false,
+    detailItalic: false,
+    detailUnderline: false,
+    detailColor: "",
+    detailTransparency: 0,
 };
 
 const EMPTY_LEGEND: LegendInfo = {
@@ -561,7 +643,19 @@ const EMPTY: ViewModel = {
     totalLabels: EMPTY_TOTAL_LABELS,
     lines: [],
     lineTargets: [],
-    markers: { show: false, size: 5 },
+    markers: {
+        show: false,
+        shape: "circle",
+        size: 5,
+        color: "",
+        transparency: 0,
+        borderShow: false,
+        borderMatchLine: false,
+        borderColor: "#605E5C",
+        borderTransparency: 0,
+        borderWidth: 1,
+    },
+    areas: { matchLineColor: true, fill: "#118DFF", transparency: 60 },
     valueAxis2: {
         show: false,
         valueShow: true,
@@ -670,6 +764,8 @@ interface SeriesSlot {
     name: string;
     column: DataViewValueColumn;
     tooltips: DataViewValueColumn[];
+    /** 「ラベルの詳細」の列。無ければ undefined */
+    detail?: DataViewValueColumn;
     group: DataViewValueColumnGroup;
     /** 系列ごとの書式の保存先。凡例の系列はグループ、メジャーの系列は列のメタデータに入る */
     objects: Array<DataViewObjects | undefined>;
@@ -694,6 +790,8 @@ function seriesSlotsOf(
                 name: blankName ? BLANK_TEXT : legendFormatter.format(raw),
                 column,
                 tooltips: group.values.filter((c) => c !== column && c.source?.roles?.tooltips),
+                // 「値」と同じフィールドを入れると、Power BI は役割を 2 つ持つ 1 つの列にまとめて渡す
+                detail: group.values.find((c) => c.source?.roles?.labelDetail),
                 group,
                 objects: [group.objects, column.source?.objects],
             }];
@@ -704,11 +802,13 @@ function seriesSlotsOf(
     const columns = groups[0]?.values ?? valueColumns;
     const measures = columns.filter(isMeasure);
     const tooltips = columns.filter((c) => !measures.includes(c) && c.source?.roles?.tooltips);
+    const detail = columns.find((c) => c.source?.roles?.labelDetail);
     return measures.map((column) => ({
         key: column.source.queryName ?? column.source.displayName,
         name: column.source.displayName,
         column,
         tooltips,
+        detail,
         group: groups[0],
         objects: [column.source.objects],
     }));
@@ -1155,11 +1255,13 @@ export function transform(
         horizontalTransparency: Math.max(0, Math.min(100, gl.horizontalTransparency.value ?? 0)),
         horizontalStyle: String(gl.horizontalStyle.value?.value ?? "dotted"),
         horizontalWidth: Math.max(1, Math.min(10, gl.horizontalWidth.value ?? 1)),
+        horizontalScaleWithWidth: gl.horizontalScaleWithWidth.value ?? false,
         verticalShow: gl.verticalShow.value ?? false,
         verticalColor: gl.verticalColor.value?.value || "#E1DFDD",
         verticalTransparency: Math.max(0, Math.min(100, gl.verticalTransparency.value ?? 0)),
         verticalStyle: String(gl.verticalStyle.value?.value ?? "dotted"),
         verticalWidth: Math.max(1, Math.min(10, gl.verticalWidth.value ?? 1)),
+        verticalScaleWithWidth: gl.verticalScaleWithWidth.value ?? false,
     };
 
     // データラベル設定の抽出
@@ -1178,6 +1280,15 @@ export function transform(
         backgroundColor: dl.backgroundColor.value?.value ?? "#FFFFFF",
         backgroundTransparency: Math.max(0, Math.min(100, dl.backgroundTransparency.value ?? 0)),
         precision: String(dl.precision.value?.value ?? "auto"),
+        valueShow: dl.valueShow.value ?? true,
+        detailShow: dl.detailShow.value ?? false,
+        detailFontFamily: dl.detailFont.fontFamily.value ?? "Segoe UI",
+        detailFontSize: Math.max(8, Math.min(32, dl.detailFont.fontSize.value ?? 9)),
+        detailBold: dl.detailFont.bold?.value ?? false,
+        detailItalic: dl.detailFont.italic?.value ?? false,
+        detailUnderline: dl.detailFont.underline?.value ?? false,
+        detailColor: dl.detailColor.value?.value ?? "",
+        detailTransparency: clampPercent(dl.detailTransparency.value ?? 0),
     };
 
     // 列（columns）設定の抽出
@@ -1222,7 +1333,10 @@ export function transform(
     // 系列 1 本のときは 1.4 までと同じく「列」のカラー（カテゴリごとの指定があればそちら）
     const series: SeriesInfo[] = slots.map((slot) => {
         if (!seriesMode) return { name: slot.name, color: columnsSettings.fill, selectionId: null };
-        const color = firstOf(slot.objects, (o) => customColor(o, "fill")) ?? host.colorPalette.getColor(slot.key).value;
+        // テーマの色は、個別の指定がある系列でも必ず取る。Desktop の colorPalette は呼んだ順に色を割り当てるので、
+        // 取らないと後ろの系列の色が 1 つ前にずれる（標準では、ある系列の色を変えても他の系列の色は変わらない）
+        const themeColor = host.colorPalette.getColor(slot.key).value;
+        const color = firstOf(slot.objects, (o) => customColor(o, "fill")) ?? themeColor;
         const selectionId = legendSource
             ? host.createSelectionIdBuilder().withSeries(categorical!.values!, slot.group).createSelectionId()
             : host.createSelectionIdBuilder().withMeasure(slot.column.source.queryName).createSelectionId();
@@ -1249,10 +1363,17 @@ export function transform(
         };
     });
 
-    // 合計ラベル（積み上げのときだけ描く）。表示単位は Y 軸に従う
+    // 合計ラベル（積み上げのときだけ描く）。表示単位は「自動」なら Y 軸に従い（単位ラベルがあるので語は付けない）、
+    // 選んだときはその単位で割って語を付ける（#91）
     const tl = settings.totalLabels;
     const totalPrecisionValue = String(tl.precision.value?.value ?? "auto");
     const totalPrecision = totalPrecisionValue !== "auto" ? totalPrecisionValue : precision;
+    const totalUnitKey = getDropdownValue(tl.unitType.value, "auto");
+    const totalUnitDef = totalUnitKey === "auto" ? null : resolveUnit(totalUnitKey, maxAbs, unitNotation, totalPrecision);
+    const totalText = (v: number): string =>
+        totalUnitDef
+            ? `${formatValue(v, totalUnitDef.divisor, totalPrecision)}${totalUnitDef.unitWord}`
+            : formatValue(v, unitDef.divisor, totalPrecision);
     const totalLabelsSettings: TotalLabelsSettings = {
         show: chartType === CHART_TYPES.stacked && (tl.show.value ?? false),
         split: tl.splitPositiveNegative.value ?? false,
@@ -1294,6 +1415,45 @@ export function transform(
                 formattedValue: formatValue(val, unitDef.divisor, precision),
                 dataLabelText: formatValue(val, unitDef.divisor, labelPrecision),
             };
+
+    // データラベルの詳細の行。全体に対する割合は、100% 積み上げと複数系列ではカテゴリの合計（正と負の絶対値）に対する割合、
+    // 系列 1 本ではすべてのカテゴリの合計に対する割合。カスタムは「ラベルの詳細」に入れたフィールドの値
+    const detailContent = getDropdownValue(dl.detailContent.value, DETAIL_CONTENTS.percentOfTotal);
+    const detailPrecision = getDropdownValue(dl.detailPrecision.value, "auto");
+    const detailUnitKey = getDropdownValue(dl.detailUnitType.value, "auto");
+    const grandAbsolute = absoluteSums.reduce((sum, v) => sum + v, 0);
+    // 自動は標準と同じく小数 2 桁（30.00%）
+    const percentDigits = detailPrecision === "auto" ? 2 : Number(detailPrecision);
+    const percentText = (ratio: number) =>
+        `${(ratio * 100).toLocaleString("ja-JP", {
+            minimumFractionDigits: percentDigits,
+            maximumFractionDigits: percentDigits,
+        })}%`;
+    const detailFormatters = new Map<DataViewValueColumn, ReturnType<typeof valueFormatter.create>>();
+    const detailTextOf = (slot: SeriesSlot, i: number, val: number, skipped: boolean): string => {
+        if (skipped) return "";
+        if (detailContent !== DETAIL_CONTENTS.custom) {
+            const denominator = seriesMode || percent ? absoluteSums[i] : grandAbsolute;
+            return percentText(denominator > 0 ? val / denominator : 0);
+        }
+        const column = slot.detail;
+        const raw = column?.values[i];
+        if (!column || raw === null || raw === undefined) return "";
+        if (typeof raw !== "number") return String(raw);
+        if (detailUnitKey !== "auto") {
+            const unit = resolveUnit(detailUnitKey, Math.abs(raw), unitNotation, detailPrecision);
+            return `${formatValue(raw, unit.divisor, detailPrecision)}${unit.unitWord}`;
+        }
+        // 自動はフィールドの書式のまま（小数点以下の桁数を選んだら、その桁で出す）
+        const format = valueFormatter.getFormatStringByColumn(column.source) ?? "";
+        if (detailPrecision !== "auto") return /%/.test(format) ? percentText(raw) : formatValue(raw, 1, detailPrecision);
+        let formatter = detailFormatters.get(column);
+        if (!formatter) {
+            formatter = valueFormatter.create({ format });
+            detailFormatters.set(column, formatter);
+        }
+        return formatter.format(raw);
+    };
 
     // データポイントとカテゴリ別ターゲットの生成
     const categoryGroups: CategoryGroup[] = [];
@@ -1388,6 +1548,7 @@ export function transform(
                 outermost: true,
                 rank: ribbon ? ribbonRanks.get(s) ?? null : null,
                 ...formatted(val),
+                detailText: detailTextOf(slot, i, val, skipped),
                 selectionId,
                 highlight,
                 highlightRatio: highlightEnd === null ? null : calcRatio(highlightEnd),
@@ -1425,9 +1586,9 @@ export function transform(
                     hasNegative: negativeSums[i] < 0,
                     positiveEndRatio: calcRatio(positiveSums[i]),
                     negativeEndRatio: calcRatio(negativeSums[i]),
-                    netText: formatValue(positiveSums[i] + negativeSums[i], unitDef.divisor, totalPrecision),
-                    positiveText: formatValue(positiveSums[i], unitDef.divisor, totalPrecision),
-                    negativeText: formatValue(negativeSums[i], unitDef.divisor, totalPrecision),
+                    netText: totalText(positiveSums[i] + negativeSums[i]),
+                    positiveText: totalText(positiveSums[i]),
+                    negativeText: totalText(negativeSums[i]),
                 }
                 : null;
 
@@ -1507,27 +1668,69 @@ export function transform(
             v2Notation,
             v2Precision
         );
+    // 第 2 Y 軸の範囲：対数目盛り・範囲を丸める・0 を配置する（標準の第 2 Y 軸と同じ項目、#91）。
+    // 対数は、折れ線の値がすべて正かすべて負で、0 を配置しないときだけ効かせる（標準も 0 を配置すると対数は押せない）
+    const alignZeros2 = v2.alignZeros.value ?? false;
+    const logSign2 = lineMin > 0 ? 1 : lineMax < 0 ? -1 : 0;
+    const log2Active = onSecondary && (v2.logarithmic.value ?? false) && logSign2 !== 0 && !alignZeros2;
+    // 対数では、全体一律の表示単位の語を単位ラベルとタイトルに付けない（Y 軸と同じ）
+    const unitWord2 = log2Active ? "" : unitDef2.unitWord;
     let calcRatio2 = calcRatio;
     let ticks2: Tick[] = [];
     if (onSecondary) {
         const start2 = parseOptional(v2.start.value);
         const end2 = parseOptional(v2.end.value);
-        // 標準と同じく、第 2 Y 軸は 0 から始めず折れ線の範囲に合わせる（率が 90〜113% なら 90% あたりから）
-        const min2 = start2 ?? lineMin;
-        let max2 = end2 ?? lineMax;
-        if (!(max2 > min2)) max2 = min2 + (Math.abs(min2) || 1) * 0.1;
-        const scale2 = scaleLinear().domain([min2, max2]);
-        if (start2 === undefined && end2 === undefined) scale2.nice();
-        const [lo2, hi2] = scale2.domain();
-        const span2 = hi2 - lo2;
-        calcRatio2 = (v: number) => (span2 > 0 ? Math.max(0, Math.min(1, (v - lo2) / span2)) : 0);
-        const raw2 = scale2.ticks(5);
+        const roundRange2 = v2.roundRange.value ?? true;
+        let raw2: number[];
+        if (log2Active) {
+            const mags = lineNumbers.map((v) => Math.abs(v));
+            // 最小値・最大値の指定は大きさに直す。符号が折れ線と合わない指定は使わない（Y 軸と同じ）
+            const userLower = logSign2 > 0
+                ? (start2 !== undefined && start2 > 0 ? start2 : undefined)
+                : (end2 !== undefined && end2 < 0 ? -end2 : undefined);
+            const userUpper = logSign2 > 0
+                ? (end2 !== undefined && end2 > 0 ? end2 : undefined)
+                : (start2 !== undefined && start2 < 0 ? -start2 : undefined);
+            const lower = userLower ?? Math.pow(10, Math.ceil(log10Snap(Math.min(...mags))) - 1);
+            let upper = userUpper ?? (roundRange2 ? Math.pow(10, Math.ceil(log10Snap(Math.max(...mags)))) : Math.max(...mags));
+            if (!(upper > lower)) upper = lower * 10;
+            const logMin = Math.log10(lower);
+            const logSpan = Math.log10(upper) - logMin;
+            calcRatio2 = (v: number) => {
+                const mag = Math.abs(v);
+                if (mag <= 0) return logSign2 > 0 ? 0 : 1;
+                const r = logSpan > 0 ? Math.max(0, Math.min(1, (Math.log10(mag) - logMin) / logSpan)) : 0;
+                return logSign2 > 0 ? r : 1 - r;
+            };
+            raw2 = logAxisTicks(lower, upper).map((m) => logSign2 * m);
+        } else {
+            // 標準と同じく、第 2 Y 軸は 0 から始めず折れ線の範囲に合わせる（率が 90〜113% なら 90% あたりから）
+            let min2 = start2 ?? lineMin;
+            let max2 = end2 ?? lineMax;
+            // 0 を配置する：0 を含めたうえで、その高さを Y 軸の 0 にそろえる（Y 軸が対数のときは 0 が無いのでそろえない）
+            const aligning = alignZeros2 && !isLogScaleActive;
+            if (aligning) {
+                min2 = Math.min(min2, 0);
+                max2 = Math.max(max2, 0);
+            }
+            if (!(max2 > min2)) max2 = min2 + (Math.abs(min2) || 1) * 0.1;
+            const scale2 = scaleLinear().domain([min2, max2]);
+            if (roundRange2 && start2 === undefined && end2 === undefined) scale2.nice();
+            let [lo2, hi2] = scale2.domain();
+            if (aligning) [lo2, hi2] = alignZeroAt(lo2, hi2, invertRange ? 1 - zeroRatio : zeroRatio);
+            const span2 = hi2 - lo2;
+            calcRatio2 = (v: number) => (span2 > 0 ? Math.max(0, Math.min(1, (v - lo2) / span2)) : 0);
+            raw2 = scaleLinear().domain([lo2, hi2]).ticks(5);
+        }
         const step2 = raw2.length > 1 ? Math.abs(raw2[1] - raw2[0]) : 1;
         const percentDigits = v2Precision !== "auto" ? Number(v2Precision) : step2 * 100 < 1 ? 1 : 0;
         ticks2 = raw2.map((t) => {
             let label: string;
             if (isPercentLine) {
                 label = `${(t * 100).toFixed(percentDigits)}%`;
+            } else if (log2Active) {
+                // 対数は目盛りごとに桁の語を付ける（Y 軸と同じ）
+                label = formatDynamicValue(t, v2Notation, v2Precision, v2ShowUnitOnAxis);
             } else {
                 // Y 軸と同じく、目盛りは数字だけ（「軸ラベルに単位を表示」で 1.5万 のように付ける）
                 const num = formatValue(t, unitDef2.divisor, v2Precision);
@@ -1541,17 +1744,36 @@ export function transform(
     if (lineDefs.length && !seriesMode) host.colorPalette.getColor(slots[0].key);
     const lineCard = settings.lines;
     const defaultLineStyle = getDropdownValue(lineCard.lineStyle.value, LINE_STYLES.solid);
+    const defaultShape = lineCard.shapeValues();
+    const areaCard = settings.areas;
+    const areasOn = areaCard.show.value ?? false;
+    // 網掛け領域の下の辺は値 0 の高さ（軸の範囲の外なら端。対数なら端）
+    const baselineRatio = onSecondary ? calcRatio2(0) : calcRatio(0);
     const lines: LineSeriesInfo[] = lineDefs.map((def) => {
         const own = def.objects?.lines;
         const ownFill = (own?.fill as powerbi.Fill | undefined)?.solid?.color;
         const ownWidth = typeof own?.width === "number" ? own.width : null;
         const ownStyle = own?.lineStyle;
+        const ownText = (property: string, fallback: string): string => {
+            const raw = own?.[property];
+            return raw !== undefined && raw !== null ? String(raw) : fallback;
+        };
+        const ownAreaShow = def.objects?.areas?.show;
         const measureBuilder = () => host.createSelectionIdBuilder();
+        // 棒の系列と同じく、テーマの色は色の指定があっても取る（後ろの線の色がずれないように）
+        const themeColor = host.colorPalette.getColor(def.key).value;
         return {
             name: def.name,
-            color: ownFill ? String(ownFill) : host.colorPalette.getColor(def.key).value,
+            color: ownFill ? String(ownFill) : themeColor,
             width: Math.max(1, Math.min(10, ownWidth ?? lineCard.width.value ?? 3)),
             lineStyle: ownStyle !== undefined && ownStyle !== null ? String(ownStyle) : defaultLineStyle,
+            lineJoin: ownText("lineJoin", defaultShape.lineJoin),
+            interpolation: ownText("interpolation", defaultShape.interpolation),
+            smoothing: ownText("smoothing", defaultShape.smoothing),
+            tension: clampPercent(typeof own?.tension === "number" ? own.tension : defaultShape.tension),
+            stepPosition: ownText("stepPosition", defaultShape.stepPosition),
+            areaShow: areasOn && (typeof ownAreaShow === "boolean" ? ownAreaShow : true),
+            baselineRatio,
             selectionId: measureBuilder().withMeasure(def.key).createSelectionId(),
             points: categoryGroups.map((g) => {
                 const value = def.values[g.rowIndex];
@@ -1571,6 +1793,12 @@ export function transform(
         color: line.color,
         width: line.width,
         lineStyle: line.lineStyle,
+        lineJoin: line.lineJoin,
+        interpolation: line.interpolation,
+        smoothing: line.smoothing,
+        tension: line.tension,
+        stepPosition: line.stepPosition,
+        areaShow: typeof lineDefs[j].objects?.areas?.show === "boolean" ? Boolean(lineDefs[j].objects?.areas?.show) : true,
     }));
 
     const valueAxis2Settings: ValueAxis2Settings = {
@@ -1588,7 +1816,7 @@ export function transform(
         titleText: styledTitle(
             v2.titleText.value?.trim() || lines.map((l) => l.name).join(" および "),
             getDropdownValue(v2.titleStyle.value, "showTitleOnly"),
-            composeUnitText(unitDef2.unitWord, v2UnitText, v2IncludeDisplayUnit)
+            composeUnitText(unitWord2, v2UnitText, v2IncludeDisplayUnit)
         ),
         titleFontFamily: v2.titleFont.fontFamily.value ?? "DIN",
         titleFontSize: Math.max(8, Math.min(32, v2.titleFont.fontSize.value ?? 12)),
@@ -1602,7 +1830,7 @@ export function transform(
                 unitPosition: "valueAxisTop",
                 unitIncludeDisplayUnit: v2IncludeDisplayUnit,
                 unitStyle: getDropdownValue(v2.unitStyle.value, "parentheses"),
-                unitWord: unitDef2.unitWord,
+                unitWord: unitWord2,
                 unitText: v2UnitText,
             })
             : "",
@@ -1621,6 +1849,7 @@ export function transform(
     ];
     legendInfo.show = (seriesMode || legendEntries.length > 1) && (lg.show.value ?? true);
 
+    const mk = settings.markers;
     const unitFontSize = Math.max(6, Math.min(32, valAxis.unitFontSize.value ?? 9));
     const unitColor = valAxis.unitColor.value?.value || "#605E5C";
 
@@ -1658,8 +1887,21 @@ export function transform(
         lines,
         lineTargets,
         markers: {
-            show: settings.markers.show.value ?? false,
-            size: Math.max(1, Math.min(20, settings.markers.size.value ?? 5)),
+            show: mk.show.value ?? false,
+            shape: getDropdownValue(mk.shape.value, "circle"),
+            size: Math.max(1, Math.min(20, mk.size.value ?? 5)),
+            color: mk.color.value?.value ?? "",
+            transparency: clampPercent(mk.transparency.value ?? 0),
+            borderShow: mk.borderShow.value ?? false,
+            borderMatchLine: mk.borderMatchLine.value ?? false,
+            borderColor: mk.borderFill.value?.value || "#605E5C",
+            borderTransparency: clampPercent(mk.borderTransparency.value ?? 0),
+            borderWidth: Math.max(1, Math.min(10, mk.borderWidth.value ?? 1)),
+        },
+        areas: {
+            matchLineColor: areaCard.matchLineColor.value ?? true,
+            fill: areaCard.fill.value?.value || "#118DFF",
+            transparency: clampPercent(areaCard.transparency.value ?? 60),
         },
         valueAxis2: valueAxis2Settings,
         ribbons: ribbonSettings,
