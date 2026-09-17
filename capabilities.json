@@ -446,6 +446,12 @@
                     "type": {
                         "bool": true
                     }
+                },
+                "stepWidth": {
+                    "displayName": "段の幅",
+                    "type": {
+                        "enumeration": []
+                    }
                 }
             }
         },

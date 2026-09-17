@@ -6,9 +6,9 @@ import IViewport = powerbi.IViewport;
 import ISelectionId = powerbi.visuals.ISelectionId;
 
 import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings } from "./viewModel";
-import { VisualFormattingSettingsModel } from "./settings";
+import { VisualFormattingSettingsModel, STEP_WIDTHS } from "./settings";
 import { contrastingText, placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
-import { clusterLayout } from "./layout";
+import { clusterLayout, spanOf } from "./layout";
 import { layoutLegend, LegendLayout, LegendItemBox, LEGEND_MARKER_GAP } from "./legend";
 import { linePath, areaPath, markerPath, XY } from "./linePath";
 
@@ -257,7 +257,8 @@ export const App: React.FC<AppProps> = ({
     /**
      * 折れ線 1 本。点はカテゴリの中心に置き、値の無いカテゴリでは線を切る。
      * 点の上にマウスの当たり判定の円を置き、ツールヒントと選択を受ける。
-     * posOf(i) はカテゴリの軸の座標、valueOf(ratio) は値の軸の座標。横棒（horizontal）では点が上から下へ並ぶ
+     * posOf(i) はカテゴリの軸の座標、valueOf(ratio) は値の軸の座標。横棒（horizontal）では点が上から下へ並ぶ。
+     * barBand はカテゴリ 1 つの棒のまとまりの幅（集合なら系列の棒の端から端まで）。「段の幅」が「棒の幅」のときの線の長さ
      */
     const renderLineSeries = (
         line: LineSeriesInfo,
@@ -267,7 +268,8 @@ export const App: React.FC<AppProps> = ({
         valueOf: (ratio: number) => number,
         horizontal: boolean,
         stepExtension: number,
-        stepBounds: [number, number]
+        stepBounds: [number, number],
+        barBand: number
     ) => {
         const pts = line.points.map((p, i) => {
             const pos = posOf(i);
@@ -293,6 +295,7 @@ export const App: React.FC<AppProps> = ({
             tension: line.tension / 100,
             stepPosition: line.stepPosition,
             stepConnect: line.stepConnect,
+            stepLevelWidth: line.stepWidth === STEP_WIDTHS.bar ? barBand : 0,
         };
         const path = runs.map((r) => linePath(r, shape, horizontal, stepExtension, stepBounds)).join(" ");
         const dimmed = !viewModel.hasHighlights && selectedIds.length > 0 && !isLinePicked(j);
@@ -553,6 +556,7 @@ export const App: React.FC<AppProps> = ({
             columnsSettings.maxBarWidth
         );
         const barWidth = cluster.barWidth;
+        const clusterSpan = spanOf(cluster);
         // 積み上げのデータラベルは棒の中に置く。外側の指定（自動・外側の上）は中央に読み替える
         const labelPosition =
             stacked && (viewModel.dataLabels.position === "auto" || viewModel.dataLabels.position === "outsideEnd")
@@ -910,7 +914,8 @@ export const App: React.FC<AppProps> = ({
                 false,
                 // ステップの線は、段が変わる位置と同じく、隣のカテゴリとのすき間の真ん中まで延ばす（プロットの外へは出さない）
                 step / 2,
-                [xOffset, xOffset + plotWidth]
+                [xOffset, xOffset + plotWidth],
+                clusterSpan
             );
 
         /**
@@ -1421,6 +1426,7 @@ export const App: React.FC<AppProps> = ({
             columnsSettings.maxBarWidth
         );
         const thickness = cluster.barWidth;
+        const clusterSpan = spanOf(cluster);
 
         /** 値の比率 → プロット左端からの x（範囲の反転なら右から） */
         const xOfRatio = (ratio: number) => {
@@ -1455,7 +1461,8 @@ export const App: React.FC<AppProps> = ({
                 (ratio) => xOffset + (axis2On ? plotWidth * Math.max(0, Math.min(1, ratio)) : xOfRatio(ratio)),
                 true,
                 step / 2,
-                [yOffset, yOffset + plotHeight]
+                [yOffset, yOffset + plotHeight],
+                clusterSpan
             );
 
         const renderHBar = (d: DataPoint, cy: number, key: string, xOffset: number, yOffset: number) => {

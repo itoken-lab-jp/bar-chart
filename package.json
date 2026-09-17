@@ -1,6 +1,6 @@
 {
   "name": "bar-chart",
-  "version": "1.21.0.0",
+  "version": "1.22.0.0",
   "description": "標準では届かないグラフ表現を足していく棒グラフ",
   "license": "MIT",
   "private": true,

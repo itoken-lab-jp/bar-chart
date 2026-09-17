@@ -37,3 +37,9 @@ export function clusterLayout(bandWidth: number, count: number, seriesSpacing: n
         offsets: Array.from({ length: count }, (_, k) => (k - (count - 1) / 2) * slot),
     };
 }
+
+/** カテゴリ 1 つの棒のまとまりの幅（いちばん左の棒の左端から、いちばん右の棒の右端まで）。系列 1 本なら棒の幅 */
+export function spanOf(cluster: ClusterLayout): number {
+    const { offsets, barWidth } = cluster;
+    return offsets.length > 1 ? offsets[offsets.length - 1] - offsets[0] + barWidth : barWidth;
+}

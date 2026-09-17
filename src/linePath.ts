@@ -20,6 +20,11 @@ export interface LineShape {
     stepPosition: string;
     /** ステップの段と段をつなぐ線を出すか。省略するとつなぐ */
     stepConnect?: boolean;
+    /**
+     * 段のつなぎを出さないステップで、値ごとの線をこの長さ（カテゴリの軸の px）で点を中心に引く（「段の幅」が「棒の幅」、#122）。
+     * 省略か 0 なら、これまでどおりカテゴリの間隔いっぱいに引く
+     */
+    stepLevelWidth?: number;
 }
 
 const round = (v: number) => Math.round(v * 100) / 100;
@@ -53,6 +58,11 @@ export function linePath(points: XY[], shape: LineShape, horizontal = false, ext
     const last = pts[pts.length - 1];
     const ends = stepEndsOf(shape, first, last, extension, bounds);
     if (shape.interpolation === "step" && shape.stepConnect === false) {
+        const barWidth = shape.stepLevelWidth ?? 0;
+        if (barWidth > 0) {
+            // 棒の幅：点（カテゴリの中心）から左右に棒の幅の半分ずつ。ステップの位置と端の延長は効かない
+            return pts.map((p) => `M ${pt(p.x - barWidth / 2, p.y)} L ${pt(p.x + barWidth / 2, p.y)}`).join(" ");
+        }
         return stepLevels(pts, shape.stepPosition, ends ?? [first.x, last.x])
             .map(([from, to, y]) => `M ${pt(from, y)} L ${pt(to, y)}`)
             .join(" ");

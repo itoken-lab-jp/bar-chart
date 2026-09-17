@@ -137,6 +137,8 @@ export interface LineSeriesInfo {
     stepPosition: string;
     /** ステップの段と段をつなぐ線を出すか */
     stepConnect: boolean;
+    /** 段のつなぎを出さないときの線の長さ（"step" カテゴリの間隔 | "bar" 棒の幅） */
+    stepWidth: string;
     /** 網掛け領域を出すか（カードの表示と、線ごとの「このシリーズに表示」） */
     areaShow: boolean;
     /** 線（点をつなぐ線）を出すか。線ごとの「このシリーズに表示」、無ければ「すべての系列に表示」。マーカーは別 */
@@ -1789,6 +1791,7 @@ export function transform(
             tension: clampPercent(typeof own?.tension === "number" ? own.tension : defaultShape.tension),
             stepPosition: ownText("stepPosition", defaultShape.stepPosition),
             stepConnect: typeof own?.stepConnect === "boolean" ? own.stepConnect : defaultShape.stepConnect,
+            stepWidth: ownText("stepWidth", defaultShape.stepWidth),
             areaShow: areasOn && (typeof ownAreaShow === "boolean" ? ownAreaShow : true),
             lineShow: typeof ownLineShow === "boolean" ? ownLineShow : lineCard.show.value ?? true,
             baselineRatio,
@@ -1817,6 +1820,7 @@ export function transform(
         tension: line.tension,
         stepPosition: line.stepPosition,
         stepConnect: line.stepConnect,
+        stepWidth: line.stepWidth,
         areaShow: typeof lineDefs[j].objects?.areas?.show === "boolean" ? Boolean(lineDefs[j].objects?.areas?.show) : true,
         lineShow: line.lineShow,
     }));

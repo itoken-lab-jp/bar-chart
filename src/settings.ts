@@ -983,6 +983,19 @@ export const STEP_POSITION_ITEMS: powerbi.IEnumMember[] = [
     { value: "after", displayName: "次の値より後" },
 ];
 
+/** 段のつなぎを出さないステップの、値ごとの線の長さ（標準に無い項目、#122） */
+export const STEP_WIDTHS = {
+    /** カテゴリの間隔いっぱい（隣のカテゴリとのすき間の真ん中から真ん中まで）。1.21 までと同じ */
+    step: "step",
+    /** そのカテゴリの棒のまとまりの幅。棒ごとの目標の印に使う */
+    bar: "bar",
+} as const;
+
+export const STEP_WIDTH_ITEMS: powerbi.IEnumMember[] = [
+    { value: STEP_WIDTHS.step, displayName: "カテゴリの間隔" },
+    { value: STEP_WIDTHS.bar, displayName: "棒の幅" },
+];
+
 /** マーカーの型。標準のドロップダウンは記号だけだが、見分けやすいよう名前を添える */
 export const MARKER_SHAPE_ITEMS: powerbi.IEnumMember[] = [
     { value: "circle", displayName: "● 円" },
@@ -1706,6 +1719,8 @@ export interface LineTarget {
     stepPosition: string;
     /** ステップの段と段をつなぐ線を出すか。オフなら値ごとの水平な線だけ（横棒では垂直な線だけ） */
     stepConnect: boolean;
+    /** 段のつなぎを出さないときの、値ごとの線の長さ（STEP_WIDTHS） */
+    stepWidth: string;
     /** 網掛け領域を出すか（網掛け領域の「このシリーズに表示」） */
     areaShow: boolean;
     /** 線を出すか（線の「このシリーズに表示」） */
@@ -1713,9 +1728,12 @@ export interface LineTarget {
 }
 
 /** 線の形の値（「すべて」と線ごとに同じ項目） */
-export type LineShapeValues = Pick<LineTarget, "lineJoin" | "interpolation" | "smoothing" | "tension" | "stepPosition" | "stepConnect">;
+export type LineShapeValues = Pick<LineTarget, "lineJoin" | "interpolation" | "smoothing" | "tension" | "stepPosition" | "stepConnect" | "stepWidth">;
 
-/** 線の形の既定（標準と同じ。テンションは Desktop のスライダーの位置から読んだ値。段のつなぎは標準に無い項目で、既定は標準と同じくつなぐ） */
+/**
+ * 線の形の既定（標準と同じ。テンションは Desktop のスライダーの位置から読んだ値。
+ * 段のつなぎと段の幅は標準に無い項目で、既定は標準と同じくつなぎ、1.21 までと同じくカテゴリの間隔いっぱい）
+ */
 export const LINE_SHAPE_DEFAULTS = {
     lineJoin: "round",
     interpolation: INTERPOLATIONS.linear,
@@ -1723,6 +1741,7 @@ export const LINE_SHAPE_DEFAULTS = {
     tension: 60,
     stepPosition: "center",
     stepConnect: true,
+    stepWidth: STEP_WIDTHS.step,
 } as const;
 
 class LineTargetItem extends FormattingSettingsCard {
@@ -1785,6 +1804,14 @@ function lineShapeSlices(
             value: values.stepConnect,
             selector,
             visible: values.interpolation === INTERPOLATIONS.step,
+        }),
+        new formattingSettings.ItemDropdown({
+            name: "stepWidth",
+            displayName: "段の幅",
+            items: STEP_WIDTH_ITEMS,
+            value: itemOf(STEP_WIDTH_ITEMS, values.stepWidth),
+            selector,
+            visible: values.interpolation === INTERPOLATIONS.step && !values.stepConnect,
         }),
     ];
 }
@@ -1868,6 +1895,14 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
         value: LINE_SHAPE_DEFAULTS.stepConnect,
     });
 
+    /** 段のつなぎを出さないときの線の長さ（#122）。「棒の幅」なら棒ごとの目標の印になる */
+    stepWidth = new formattingSettings.ItemDropdown({
+        name: "stepWidth",
+        displayName: "段の幅",
+        items: STEP_WIDTH_ITEMS,
+        value: itemOf(STEP_WIDTH_ITEMS, LINE_SHAPE_DEFAULTS.stepWidth),
+    });
+
     /** 「すべて」の値（保存値か既定） */
     shapeValues(): LineShapeValues {
         const dropdown = (slice: formattingSettings.ItemDropdown, fallback: string) => String(slice.value?.value ?? fallback);
@@ -1878,6 +1913,7 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
             tension: typeof this.tension.value === "number" ? this.tension.value : LINE_SHAPE_DEFAULTS.tension,
             stepPosition: dropdown(this.stepPosition, LINE_SHAPE_DEFAULTS.stepPosition),
             stepConnect: this.stepConnect.value ?? LINE_SHAPE_DEFAULTS.stepConnect,
+            stepWidth: dropdown(this.stepWidth, LINE_SHAPE_DEFAULTS.stepWidth),
         };
     }
 
@@ -1887,6 +1923,7 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
         this.tension.visible = this.smoothing.visible && values.smoothing === "cardinal";
         this.stepPosition.visible = values.interpolation === INTERPOLATIONS.step;
         this.stepConnect.visible = this.stepPosition.visible;
+        this.stepWidth.visible = this.stepPosition.visible && !values.stepConnect;
         return new LineTargetItem("すべて", [
             this.show,
             this.lineStyle,
@@ -1897,6 +1934,7 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
             this.tension,
             this.stepPosition,
             this.stepConnect,
+            this.stepWidth,
         ]);
     }
 
