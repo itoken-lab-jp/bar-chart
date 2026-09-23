@@ -1,6 +1,6 @@
 /**
  * 折れ線の形（補間）とマーカーの形の SVG パス。標準の「線」カードの補間の種類と、
- * 「マーカー」カードの型に合わせる（docs/barchart-standard-gaps.md の「標準の動き」、#92）。
+ * 「マーカー」カードの型に合わせる（docs/barchart-standard-gaps.md の「標準の動き」）。
  * 曲線の作り方は d3-shape の curveMonotoneX・curveCardinal・curveStep と同じ（依存は足さない）。
  */
 
@@ -21,7 +21,7 @@ export interface LineShape {
     /** ステップの段と段をつなぐ線を出すか。省略するとつなぐ */
     stepConnect?: boolean;
     /**
-     * 段のつなぎを出さないステップで、値ごとの線をこの長さ（カテゴリの軸の px）で点を中心に引く（「段の幅」が「棒の幅」、#122）。
+     * 段のつなぎを出さないステップで、値ごとの線をこの長さ（カテゴリの軸の px）で点を中心に引く（「段の幅」が「棒の幅」のとき）。
      * 省略か 0 なら、これまでどおりカテゴリの間隔いっぱいに引く
      */
     stepLevelWidth?: number;

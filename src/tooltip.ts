@@ -21,14 +21,23 @@ export interface TooltipSeries {
     /** 系列の名前（凡例の値） */
     seriesName: string;
     measure: TooltipColumn;
+    /** 累計のときの、累計の前の値 */
+    before?: TooltipColumn;
     extras: TooltipColumn[];
 }
 
 export interface TooltipSource {
     /** カテゴリのフィールド名 */
     categoryName: string;
+    /**
+     * 階層。X 軸のフィールドが複数あって展開しているときだけ持つ。
+     * names はレベルの名前、texts は行ごとのレベルの表示（上のレベルから）
+     */
+    categoryLevels?: { names: string[]; texts: string[][] };
     /** 「値」のフィールド */
     measure: TooltipColumn;
+    /** 累計のときの、累計の前の値。measure の名前には（累計）が付く */
+    before?: TooltipColumn;
     /** 「ツールヒント」に追加されたフィールド */
     extras: TooltipColumn[];
     /** 複数系列のときの系列ごとの中身。無ければ measure と extras を使う（系列 1 本） */
@@ -55,6 +64,15 @@ export const BLANK_TEXT = "(空白)";
 export function formatTooltipValue(value: PrimitiveValue | undefined, format: string | undefined): string {
     if (value === null || value === undefined) return BLANK_TEXT;
     return valueFormatter.format(value, format);
+}
+
+/** カテゴリの行。階層なら標準と同じくレベルごとに 1 行ずつ（上のレベルから） */
+export function categoryTooltipRows(source: TooltipSource, rowIndex: number, category: string): VisualTooltipDataItem[] {
+    const levels = source.categoryLevels;
+    if (levels && levels.names.length > 1) {
+        return levels.names.map((name, k) => ({ displayName: name, value: levels.texts[rowIndex]?.[k] ?? "" }));
+    }
+    return [{ displayName: source.categoryName, value: category }];
 }
 
 /** 積み上げのときにツールヒントへ足すもの */
@@ -86,13 +104,15 @@ export function tooltipItemsOf(
 ): VisualTooltipDataItem[] {
     const series = source.series?.[seriesIndex];
     const measure = series?.measure ?? source.measure;
+    const before = series ? series.before : source.before;
     const extras = series?.extras ?? source.extras;
     const measureText = formatTooltipValue(measure.values[rowIndex], measure.format);
     const hasShare = stack.share !== null && stack.share !== undefined && measure.values[rowIndex] !== null && measure.values[rowIndex] !== undefined;
     return [
-        { displayName: source.categoryName, value: category },
+        ...categoryTooltipRows(source, rowIndex, category),
         ...(series?.legendName ? [{ displayName: series.legendName, value: series.seriesName }] : []),
         { displayName: measure.displayName, value: hasShare ? `${measureText} (${formatShare(stack.share!)})` : measureText },
+        ...(before ? [{ displayName: before.displayName, value: formatTooltipValue(before.values[rowIndex], before.format) }] : []),
         ...(stack.total !== null && stack.total !== undefined
             ? [{ displayName: TOTAL_TEXT, value: formatTooltipValue(stack.total, measure.format) }]
             : []),

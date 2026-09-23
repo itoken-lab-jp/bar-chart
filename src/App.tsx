@@ -5,10 +5,10 @@ import powerbi from "powerbi-visuals-api";
 import IViewport = powerbi.IViewport;
 import ISelectionId = powerbi.visuals.ISelectionId;
 
-import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings } from "./viewModel";
+import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings, ParetoRank } from "./viewModel";
 import { VisualFormattingSettingsModel, STEP_WIDTHS } from "./settings";
 import { contrastingText, placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
-import { clusterLayout, spanOf } from "./layout";
+import { clusterLayout, spanOf, levelRunsOf } from "./layout";
 import { layoutLegend, LegendLayout, LegendItemBox, LEGEND_MARKER_GAP } from "./legend";
 import { linePath, areaPath, markerPath, XY } from "./linePath";
 
@@ -25,7 +25,7 @@ function fittedText(text: string, maxWidthPx: number, font: FontSpec): React.Rea
 
 /**
  * 指定の幅に収まるよう、末尾を「…」で省略した文字。幅は Power BI の文字幅の計測で測る（標準と同じ省略記号 1 文字）。
- * 1.10 までは全角 1.05 文字分・「...」3 文字分と見積もっていて、標準より早く省略していた（#89）
+ * 1.10 までは全角 1.05 文字分・「...」3 文字分と見積もっていて、標準より早く省略していた
  */
 function truncateText(text: string, maxWidthPx: number, font: FontSpec): string {
     if (!text) return "";
@@ -44,6 +44,9 @@ function truncateText(text: string, maxWidthPx: number, font: FontSpec): string 
 
 /** 斜めのカテゴリ名を、棒の下端から離す間隔 (px) */
 const ROTATED_LABEL_GAP = 8;
+/** 階層の「囲み」の枠：隣の枠とのすき間の半分と、角の丸み (px) */
+const LEVEL_BOX_GAP = 2;
+const LEVEL_BOX_RADIUS = 4;
 
 /**
  * 斜めのカテゴリラベルをビジュアル左端から離しておく余白 (px)。
@@ -111,7 +114,7 @@ export function gridLineStroke(style: string, width = 1, scaleWithWidth = false)
     lineCap?: "round";
     shapeRendering: "crispEdges" | "auto";
 } {
-    // 「幅で拡大縮小」がオンなら、点線・破線の模様を線の幅に比例させる（標準と同じく、細い線では模様が細かくなる、#91）。
+    // 「幅で拡大縮小」がオンなら、点線・破線の模様を線の幅に比例させる（標準と同じく、細い線では模様が細かくなる）。
     // オフなら、幅によらず 1.10 までと同じ模様
     const w = Math.max(1, width);
     if (style === "dotted") {
@@ -173,6 +176,8 @@ export interface AppProps {
     selectedIds?: ISelectionId[];
     /** 棒以外の所をクリックした（選択の解除） */
     onClearSelection?: () => void;
+    /** パレートのランクの帯を押した。そのランクの棒をまとめて選ぶ */
+    onSelectMany?: (ids: ISelectionId[], multiSelect: boolean) => void;
     /** 棒にマウスが入った。座標はクライアント座標（ルート基準への変換は visual.ts） */
     onTooltipShow?: (d: DataPoint, clientX: number, clientY: number) => void;
     /** 棒の上でマウスが動いた */
@@ -187,7 +192,16 @@ export interface AppProps {
     onRibbonTooltipShow?: (seriesIndex: number, fromIndex: number, clientX: number, clientY: number) => void;
     /** リボンの帯の上でマウスが動いた */
     onRibbonTooltipMove?: (seriesIndex: number, fromIndex: number, clientX: number, clientY: number) => void;
+    /** 閲覧者がグラフの上の「累計」ボタンを押した。保存は visual.ts */
+    onToggleCumulative?: () => void;
+    /** 閲覧者がグラフの上で累計の区切りを選んだ。保存は visual.ts */
+    onChangeCumulativeReset?: (reset: string) => void;
+    /** 操作を受け付けるか（ダッシュボードのタイルでは false）。false なら切り替えボタンを出さない */
+    interactive?: boolean;
 }
+
+/** 閲覧者向けの累計の切り替えボタンの行の高さ (px)。出すときだけグラフの上に取る */
+const TOOLBAR_HEIGHT = 28;
 
 const NO_SELECTION: ISelectionId[] = [];
 
@@ -198,6 +212,7 @@ export const App: React.FC<AppProps> = ({
     onContextMenu,
     selectedIds = NO_SELECTION,
     onClearSelection,
+    onSelectMany,
     onTooltipShow,
     onTooltipMove,
     onTooltipHide,
@@ -205,6 +220,9 @@ export const App: React.FC<AppProps> = ({
     onLineTooltipMove,
     onRibbonTooltipShow,
     onRibbonTooltipMove,
+    onToggleCumulative,
+    onChangeCumulativeReset,
+    interactive = true,
 }) => {
     const [hoveredKey, setHoveredKey] = React.useState<string | null>(null);
 
@@ -219,6 +237,11 @@ export const App: React.FC<AppProps> = ({
     const lg = viewModel.legend;
     const legendFontPx = lg.fontSize * PT_TO_PX;
 
+    // 閲覧者向けの累計の切り替え。出すぶんだけ上を空け、凡例とグラフはその下に描く
+    const toolbarOn = viewModel.cumulative.toggle && interactive;
+    const toolbarHeight = toolbarOn ? TOOLBAR_HEIGHT : 0;
+    const bodyHeight = Math.max(10, viewport.height - toolbarHeight);
+
     // 凡例（複数系列のときだけ）。グラフの外側に置き、その分だけグラフの領域を縮める
     const legend: LegendLayout | null = lg.show
         ? layoutLegend({
@@ -227,7 +250,7 @@ export const App: React.FC<AppProps> = ({
             font: { family: lg.fontFamily, size: legendFontPx, bold: lg.bold, italic: lg.italic, underline: lg.underline },
             position: lg.position,
             width: viewport.width,
-            height: viewport.height,
+            height: bodyHeight,
             horizontal: viewModel.orientation === "horizontal",
         })
         : null;
@@ -238,7 +261,99 @@ export const App: React.FC<AppProps> = ({
      */
     const isPicked = (d: DataPoint): boolean => {
         const seriesId = viewModel.series[d.seriesIndex]?.selectionId;
-        return selectedIds.some((s) => s.equals(d.selectionId) || (seriesId ? s.equals(seriesId) : false));
+        const categoryId = d.categorySelectionId;
+        // 「その他」は、まとめたカテゴリが全部選ばれているか、凡例でその系列が選ばれているかで見る
+        // （仮の ID は、まとめた先頭のカテゴリのものなので比べない）
+        if (d.selectionIds?.length) {
+            return (
+                d.selectionIds.every((id) => selectedIds.some((s) => s.equals(id))) ||
+                (seriesId ? selectedIds.some((s) => s.equals(seriesId)) : false)
+            );
+        }
+        return selectedIds.some(
+            (s) => s.equals(d.selectionId) || (seriesId ? s.equals(seriesId) : false) || (categoryId ? s.equals(categoryId) : false)
+        );
+    };
+
+    /** この線を第 2 軸で描くか。パレートでは累積比の線（選べない線）だけが第 2 軸で、ほかは左の軸を共有する */
+    const onAxis2 = (line: LineSeriesInfo) =>
+        viewModel.valueAxis2.show && viewModel.lines.length > 0 && (!viewModel.pareto.enabled || line.selectable === false);
+
+    /** パレートのランクの帯の区切り（同じランクが続くところ。end は含まない）。0 以下のカテゴリ（ランク無し）は区切りを作らない */
+    const rankRuns = (): Array<{ start: number; end: number; rank: ParetoRank }> => {
+        const ranks = viewModel.pareto.ranks;
+        const runs: Array<{ start: number; end: number; rank: ParetoRank }> = [];
+        let start = 0;
+        for (let i = 1; i <= ranks.length; i++) {
+            if (i < ranks.length && ranks[i] === ranks[start]) continue;
+            const rank = ranks[start];
+            if (rank) runs.push({ start, end: i, rank });
+            start = i;
+        }
+        return runs;
+    };
+
+    /**
+     * パレートのランクの帯の 1 区切り。角の丸い帯に名前と件数を書く。
+     * 押すか Enter・Space で、そのランクのカテゴリをまとめて選ぶ（Ctrl で足す）
+     */
+    const renderRankRun = (
+        run: { start: number; end: number; rank: ParetoRank },
+        box: { x: number; y: number; width: number; height: number },
+        font: FontSpec,
+        labelStyle: React.CSSProperties
+    ) => {
+        const pareto = viewModel.pareto;
+        const { rank } = run;
+        const count = run.end - run.start;
+        const full = `${pareto.labels[rank]} ${count}件`;
+        const available = box.width - 8;
+        const text = measureTextWidth(full, font) <= available ? full : pareto.labels[rank];
+        const showText = measureTextWidth(text, font) <= available && box.height >= font.size;
+        const ids = pareto.selections[rank];
+        const picked = ids.length > 0 && ids.every((id) => selectedIds.some((s) => s.equals(id)));
+        const select = (multi: boolean) => onSelectMany?.(ids, multi);
+        return (
+            <g
+                key={`rank-${run.start}`}
+                className="pareto-rank"
+                role="button"
+                tabIndex={0}
+                aria-label={full}
+                aria-pressed={picked}
+                style={{ cursor: "pointer" }}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    select(e.ctrlKey || e.metaKey);
+                }}
+                onKeyDown={(e) => {
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    select(e.ctrlKey || e.metaKey);
+                }}
+            >
+                <rect
+                    x={box.x}
+                    y={box.y}
+                    width={Math.max(0, box.width)}
+                    height={Math.max(0, box.height)}
+                    rx={4}
+                    style={{ fill: pareto.colors[rank], fillOpacity: picked ? 0.45 : 0.22 }}
+                />
+                {showText && (
+                    <text
+                        x={box.x + box.width / 2}
+                        y={box.y + box.height / 2 + font.size * 0.35}
+                        textAnchor="middle"
+                        className="pareto-rank-label"
+                        style={labelStyle}
+                    >
+                        {text}
+                    </text>
+                )}
+            </g>
+        );
     };
 
     /** 折れ線が選ばれているか（凡例で線ごと、または線の点） */
@@ -281,6 +396,11 @@ export const App: React.FC<AppProps> = ({
         const runs: XY[][] = [];
         let run: XY[] = [];
         for (const pt of pts) {
+            // 累計の区切りで 0 に戻るところも切る（前の区切りの終わりから下がる線を引かない）
+            if (pt.p.breakBefore && run.length) {
+                runs.push(run);
+                run = [];
+            }
             if (pt.at === null) {
                 if (run.length) runs.push(run);
                 run = [];
@@ -371,12 +491,14 @@ export const App: React.FC<AppProps> = ({
                                 fill="transparent"
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    onSelect(pt.p.selectionId, e.ctrlKey || e.metaKey);
+                                    if (pt.p.selectionIds) onSelectMany?.(pt.p.selectionIds, e.ctrlKey || e.metaKey);
+                                    else onSelect(pt.p.selectionId, e.ctrlKey || e.metaKey);
                                 }}
                                 onContextMenu={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    onContextMenu(pt.p.selectionId, e.clientX, e.clientY);
+                                    // 「その他」は特定のカテゴリにしない（仮の ID を渡すと、まとめた先頭のカテゴリのメニューになる）
+                                    onContextMenu(pt.p.selectionIds ? (null as unknown as ISelectionId) : pt.p.selectionId, e.clientX, e.clientY);
                                 }}
                                 onMouseEnter={(e) => onLineTooltipShow?.(j, pt.i, e.clientX, e.clientY)}
                                 onMouseMove={(e) => onLineTooltipMove?.(j, pt.i, e.clientX, e.clientY)}
@@ -390,7 +512,7 @@ export const App: React.FC<AppProps> = ({
     };
 
     /**
-     * リボンの帯（#76、横棒は #102）。同じ系列の棒を、隣のカテゴリの棒と S 字の帯でつなぐ（棒の後ろに描く）。
+     * リボンの帯。同じ系列の棒を、隣のカテゴリの棒と S 字の帯でつなぐ（棒の後ろに描く）。
      * 罫線は標準と同じく帯の両縁だけに引く。
      * gapOf(i) は i 番目と i+1 番目のカテゴリの棒のあいだ（カテゴリの軸の座標）、extentOf(d) は棒の両端（値の軸の座標）。
      * 縦棒ではカテゴリの軸が x、横棒では y
@@ -566,10 +688,40 @@ export const App: React.FC<AppProps> = ({
         // X軸カテゴリラベルの幅（実測）と回転の判定
         const catFontSizePx = catAxis.fontSize * PT_TO_PX;
         const catFont: FontSpec = { family: catAxis.fontFamily, size: catFontSizePx, bold: catAxis.bold, italic: catAxis.italic, underline: catAxis.underline };
-        const widestCat = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(g.category, catFont))) : 0;
+        // 階層を段に重ねるときは、棒のすぐ下にいちばん下のレベルだけを出し、上のレベルはその下の段に出す
+        const stackedLevels = catAxis.show && catAxis.levelCount > 1 && !catAxis.concatenateLabels;
+        const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.category);
+        const categoryLabelStyle: React.CSSProperties = {
+            fontSize: `${catAxis.fontSize}pt`,
+            fontFamily: catAxis.fontFamily,
+            fontWeight: catAxis.bold ? "bold" : "normal",
+            fontStyle: catAxis.italic ? "italic" : "normal",
+            textDecoration: catAxis.underline ? "underline" : undefined,
+            fill: catAxis.labelColor,
+        };
+        const boxedLevels = stackedLevels && catAxis.hierarchyStyle === "boxed";
+        // 標準の段の枠は薄い点線。色はラベルの色に合わせる（ハイコントラストでもラベルと同じ色になる）
+        const levelSeparatorStyle: React.CSSProperties = {
+            stroke: catAxis.labelColor,
+            strokeOpacity: 0.35,
+            strokeWidth: 1,
+            strokeDasharray: "1 2",
+            shapeRendering: "crispEdges",
+        };
+        // 囲みの枠。ラベルの色をごく淡く敷き、同じ色の細い線で縁取る
+        const levelBoxStyle: React.CSSProperties = {
+            fill: catAxis.labelColor,
+            fillOpacity: 0.06,
+            stroke: catAxis.labelColor,
+            strokeOpacity: 0.3,
+            strokeWidth: 1,
+        };
+        const widestCat = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(labelOf(g), catFont))) : 0;
 
         // バンド幅に収まらなければ斜め -45 度に回転
         const shouldRotateCat = catAxis.show && widestCat > step * 0.92;
+        // 階層を段に重ねるときは、斜めではなく縦に立てる（標準と同じ。斜めだと左隣の区切りの線をまたぐ）
+        const uprightCat = shouldRotateCat && stackedLevels;
 
         // X軸タイトル高さ (タイトル領域は高さ最大値の判定外で独立確保し、重なりを防止)
         const hasCatTitle = catAxis.titleShow && Boolean(catAxis.titleText);
@@ -583,10 +735,12 @@ export const App: React.FC<AppProps> = ({
         const labelExtentMax = Math.max(16, viewport.height * (catAxis.maxHeight / 100));
         const maxLabelAreaHeight = shouldRotateCat ? ROTATED_LABEL_GAP + labelExtentMax + catFontSizePx * 0.5 : labelExtentMax;
 
-        // 必要とされるラベル高さ（斜めは、棒との間隔＋ラベルの縦の広がり＋文字の太さの半分）
-        const desiredLabelHeight = shouldRotateCat
-            ? ROTATED_LABEL_GAP + widestCat * Math.SQRT1_2 + catFontSizePx * 0.5
-            : catFontSizePx + 10;
+        // 必要とされるラベル高さ（斜めは、棒との間隔＋ラベルの縦の広がり＋文字の太さの半分。縦はラベルの長さそのまま）
+        const desiredLabelHeight = uprightCat
+            ? ROTATED_LABEL_GAP + widestCat + catFontSizePx * 0.5
+            : shouldRotateCat
+                ? ROTATED_LABEL_GAP + widestCat * Math.SQRT1_2 + catFontSizePx * 0.5
+                : catFontSizePx + 10;
 
         const labelAreaHeight = catAxis.show
             ? Math.max(14, Math.min(desiredLabelHeight, maxLabelAreaHeight))
@@ -594,12 +748,27 @@ export const App: React.FC<AppProps> = ({
 
         // ラベルの長さの上限 (px)。超えたら末尾を「…」に省略。斜めは、ラベル領域の高さから棒との間隔を除いた分
         // 領域がいちばん長いラベルちょうどのときに、計算の誤差で省略しないよう 0.5px の余裕を持たせる
-        const maxAllowedLabelLen = shouldRotateCat
-            ? Math.max(12, (labelAreaHeight - ROTATED_LABEL_GAP - catFontSizePx * 0.5) / Math.SQRT1_2 + 0.5)
-            : Math.max(12, step * 0.92);
+        const maxAllowedLabelLen = uprightCat
+            ? Math.max(12, labelAreaHeight - ROTATED_LABEL_GAP - catFontSizePx * 0.5 + 0.5)
+            : shouldRotateCat
+                ? Math.max(12, (labelAreaHeight - ROTATED_LABEL_GAP - catFontSizePx * 0.5) / Math.SQRT1_2 + 0.5)
+                : Math.max(12, step * 0.92);
 
-        // 全体の下部マージン = ラベル領域 + タイトル領域 + スクロールバー高さ + 余白
-        const marginBottom = Math.max(20, labelAreaHeight + catTitleHeight + SCROLLBAR_HEIGHT + 6);
+        // 上のレベルの段。多くてもプロットを潰さないよう、ラベルと合わせてグラフの高さの半分までにする（上のレベルから落とす）
+        // 囲みは枠の上下に余白が要るので、段を少し高くする
+        const levelRowHeight = catFontSizePx + (boxedLevels ? 12 : 8);
+        const levelRows = stackedLevels
+            ? Math.min(catAxis.levelCount - 1, Math.max(0, Math.floor((height * 0.5 - labelAreaHeight) / levelRowHeight)))
+            : 0;
+        const levelAreaHeight = levelRows * levelRowHeight;
+
+        // パレートのランクの帯。カテゴリのラベル（と階層の段）の下に 1 段取る
+        const pareto = viewModel.pareto;
+        const rankBandOn = pareto.enabled && pareto.showRankBand && catAxis.show;
+        const rankBandHeight = rankBandOn ? catFontSizePx + 12 : 0;
+
+        // 全体の下部マージン = ラベル領域 + 上のレベルの段 + ランクの帯 + タイトル領域 + スクロールバー高さ + 余白
+        const marginBottom = Math.max(20, labelAreaHeight + levelAreaHeight + rankBandHeight + catTitleHeight + SCROLLBAR_HEIGHT + 6);
         const plotHeight = Math.max(10, height - marginTop - marginBottom);
 
         // 横グリッド線 (Y軸目盛線) の線種と透過性
@@ -688,12 +857,13 @@ export const App: React.FC<AppProps> = ({
                     className={`bar-item ${isHovered ? "hovered" : ""}`}
                     onClick={(e) => {
                         e.stopPropagation();
-                        onSelect(d.selectionId, e.ctrlKey || e.metaKey);
+                        if (d.selectionIds) onSelectMany?.(d.selectionIds, e.ctrlKey || e.metaKey);
+                        else onSelect(d.selectionId, e.ctrlKey || e.metaKey);
                     }}
                     onContextMenu={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        onContextMenu(d.selectionId, e.clientX, e.clientY);
+                        onContextMenu(d.selectionIds ? (null as unknown as ISelectionId) : d.selectionId, e.clientX, e.clientY);
                     }}
                     onMouseEnter={() => setHoveredKey(key)}
                     onMouseLeave={() => setHoveredKey(null)}
@@ -852,25 +1022,155 @@ export const App: React.FC<AppProps> = ({
             });
         };
 
+        /**
+         * 階層の上のレベルの段。標準と同じく、いちばん下のレベルのラベルの下に、1 つ上のレベルから順に段を重ね、
+         * 同じ親が続く区切りを点線の枠で囲む。文字は区切りの幅の中央に置き、はみ出す分は省略する
+         */
+        const renderLevelRows = (xOffset: number) => {
+            const paths = groups.map((g) => g.levels);
+            const rowsTop = marginTop + plotHeight + labelAreaHeight;
+            const edgeOf = (i: number) => Math.max(0, Math.min(plotWidth, centerOf(i) - step / 2));
+            const nodes: React.ReactNode[] = [];
+            for (let r = 0; r < levelRows; r++) {
+                // r = 0 がいちばん下のレベルのすぐ上のレベル
+                const level = catAxis.levelCount - 2 - r;
+                const top = rowsTop + r * levelRowHeight;
+                const bottom = top + levelRowHeight;
+                if (!boxedLevels) {
+                    nodes.push(
+                        <line key={`lv-top-${r}`} x1={xOffset} y1={top} x2={xOffset + plotWidth} y2={top} className="level-separator" style={levelSeparatorStyle} />
+                    );
+                }
+                levelRunsOf(paths, level, groups.map((g) => g.levelKeys)).forEach((run, k) => {
+                    const left = run.start === 0 ? 0 : edgeOf(run.start);
+                    const right = run.end === groups.length - 1 ? plotWidth : edgeOf(run.end + 1);
+                    if (boxedLevels) {
+                        // 囲み：区切りごとに角の丸い淡い枠。隣の枠とは少し離す
+                        nodes.push(
+                            <rect
+                                key={`lv-box-${r}-${k}`}
+                                x={xOffset + left + LEVEL_BOX_GAP}
+                                y={top + LEVEL_BOX_GAP}
+                                width={Math.max(0, right - left - LEVEL_BOX_GAP * 2)}
+                                height={Math.max(0, levelRowHeight - LEVEL_BOX_GAP * 2)}
+                                rx={LEVEL_BOX_RADIUS}
+                                className="level-box"
+                                style={levelBoxStyle}
+                            />
+                        );
+                    }
+                    // 区切りの線は棒の下から、この段の下まで
+                    if (!boxedLevels) [left, right].forEach((x, e) =>
+                        nodes.push(
+                            <line
+                                key={`lv-edge-${r}-${k}-${e}`}
+                                x1={xOffset + x}
+                                y1={marginTop + plotHeight}
+                                x2={xOffset + x}
+                                y2={bottom}
+                                className="level-separator"
+                                style={levelSeparatorStyle}
+                            />
+                        )
+                    );
+                    // 省略しても収まらない区切りには文字を出さない（省略は最低 1 文字＋…を残すので、隣にはみ出して重なる）
+                    const available = right - left - 4 - (boxedLevels ? LEVEL_BOX_GAP * 2 : 0);
+                    const shown = truncateText(run.text, available, catFont);
+                    if (measureTextWidth(shown, catFont) > available) return;
+                    nodes.push(
+                        <text
+                            key={`lv-text-${r}-${k}`}
+                            x={xOffset + (left + right) / 2}
+                            y={top + levelRowHeight / 2 + catFontSizePx * 0.35}
+                            className="x-category-level"
+                            textAnchor="middle"
+                            style={categoryLabelStyle}
+                        >
+                            {shown}
+                            <title>{run.text}</title>
+                        </text>
+                    );
+                });
+            }
+            return <g className="category-levels">{nodes}</g>;
+        };
+
+        /**
+         * パレートの境目。累積比の軸（右、0〜100%）の境目の高さに破線を引く。
+         * 線の色は累積比の線に合わせ、棒と重なっても読めるよう薄くする
+         */
+        const renderThresholds = (xOffset: number) => {
+            const ratioLine = viewModel.lines.find((l) => l.selectable === false);
+            const color = ratioLine?.color ?? catAxis.labelColor;
+            return (
+                <g className="pareto-thresholds" pointerEvents="none">
+                    {pareto.thresholds.map((t, k) => {
+                        const y = marginTop + plotHeight * (1 - Math.max(0, Math.min(1, t)));
+                        return (
+                            <line
+                                key={`th-${k}`}
+                                x1={xOffset}
+                                y1={y}
+                                x2={xOffset + plotWidth}
+                                y2={y}
+                                className="pareto-threshold"
+                                style={{ stroke: color, strokeOpacity: 0.6, strokeWidth: 1, strokeDasharray: "4 3" }}
+                            />
+                        );
+                    })}
+                </g>
+            );
+        };
+
+        /**
+         * パレートのランクの帯。同じランクが続くところを角の丸い帯にし、
+         * 名前と件数を書く。帯を押すと、そのランクの棒をまとめて選ぶ（Ctrl で足す）
+         */
+        const renderRankBand = (xOffset: number) => {
+            const top = marginTop + plotHeight + labelAreaHeight + levelAreaHeight + 2;
+            const edgeOf = (i: number) => Math.max(0, Math.min(plotWidth, centerOf(i) - step / 2));
+            const last = pareto.ranks.length;
+            return (
+                <g className="pareto-ranks">
+                    {rankRuns().map((run) => {
+                        const left = run.start === 0 ? 0 : edgeOf(run.start);
+                        const right = run.end === last ? plotWidth : edgeOf(run.end);
+                        return renderRankRun(run, { x: xOffset + left + 2, y: top, width: right - left - 4, height: rankBandHeight - 4 }, catFont, categoryLabelStyle);
+                    })}
+                </g>
+            );
+        };
+
         /** X軸カテゴリラベル (長さに応じて ... 省略し、左端はみ出し時も ... で省略)。cx はカテゴリの中心 */
         const renderCategoryLabel = (category: string, cx: number) => {
             // 斜めラベルは左下へ伸びるので、左端までの距離も許容長に含める
             // （スクロール時の左端はスクロール領域の端 = x 0 でクリップされる）
             const labelLeftBound = scrolls ? 0 : CATEGORY_LABEL_LEFT_SAFE_MARGIN;
-            const maxLenLeft = shouldRotateCat
+            const maxLenLeft = shouldRotateCat && !uprightCat
                 ? Math.max(12, (cx - labelLeftBound) / Math.sin(Math.PI / 4))
                 : maxAllowedLabelLen;
             const effectiveMaxLen = Math.min(maxAllowedLabelLen, maxLenLeft);
             const displayCat = truncateText(category, effectiveMaxLen, catFont);
-            const labelStyle = {
-                fontSize: `${catAxis.fontSize}pt`,
-                fontFamily: catAxis.fontFamily,
-                fontWeight: catAxis.bold ? "bold" : "normal",
-                fontStyle: catAxis.italic ? "italic" : "normal",
-                textDecoration: catAxis.underline ? "underline" : undefined,
-                fill: catAxis.labelColor,
-            };
+            const labelStyle = categoryLabelStyle;
 
+            if (uprightCat) {
+                // 縦に立てる。棒の中心の真下から下へ読み上げる向き（区切りの枠の中に収まる）
+                const labelTop = marginTop + plotHeight + ROTATED_LABEL_GAP;
+                return (
+                    <text
+                        x={cx}
+                        y={labelTop}
+                        transform={`rotate(-90, ${cx}, ${labelTop})`}
+                        className="x-category-label"
+                        textAnchor="end"
+                        dominantBaseline="central"
+                        style={labelStyle}
+                    >
+                        {displayCat}
+                        <title>{category}</title>
+                    </text>
+                );
+            }
             if (shouldRotateCat) {
                 // 斜め45度回転 (標準準拠: 棒の直下から左下に伸び、Y軸ラベルの下に被さる)
                 const labelTop = marginTop + plotHeight + ROTATED_LABEL_GAP;
@@ -903,14 +1203,15 @@ export const App: React.FC<AppProps> = ({
             );
         };
 
-        /** 折れ線（#74）。点はカテゴリの中心。第 2 Y 軸には範囲の反転が無いので、そのまま下から上へ */
+        /** 折れ線。点はカテゴリの中心。第 2 Y 軸には範囲の反転が無いので、そのまま下から上へ */
         const renderLine = (line: LineSeriesInfo, j: number, xOffset: number, part: "area" | "line") =>
             renderLineSeries(
                 line,
                 j,
                 part,
                 (i) => xOffset + centerOf(i),
-                (ratio) => (axis2On ? marginTop + plotHeight * (1 - Math.max(0, Math.min(1, ratio))) : yOfRatio(ratio)),
+                // 第 2 軸で描く線（パレートでは累積比の線だけ。「折れ線の値」の線は左の軸で、範囲の反転に従う）
+                (ratio) => (onAxis2(line) ? marginTop + plotHeight * (1 - Math.max(0, Math.min(1, ratio))) : yOfRatio(ratio)),
                 false,
                 // ステップの線は、段が変わる位置と同じく、隣のカテゴリとのすき間の真ん中まで延ばす（プロットの外へは出さない）
                 step / 2,
@@ -919,7 +1220,7 @@ export const App: React.FC<AppProps> = ({
             );
 
         /**
-         * リボンの帯（#76）。同じ系列の棒を、隣のカテゴリの棒と S 字の帯でつなぐ（棒の後ろに描く）。
+         * リボンの帯。同じ系列の棒を、隣のカテゴリの棒と S 字の帯でつなぐ（棒の後ろに描く）。
          * 罫線は標準と同じく帯の上と下の縁だけに引く
          */
         const renderRibbons = (xOffset: number) => {
@@ -1000,11 +1301,15 @@ export const App: React.FC<AppProps> = ({
                                 <g key={`cat-${i}`} className="category-group">
                                     {g.points.map((d, s) => renderBar(d, cx + (stacked ? 0 : cluster.offsets[s] ?? 0), `${i}-${s}`))}
                                     {renderTotalLabels(g, cx)}
-                                    {catAxis.show && renderCategoryLabel(g.category, cx)}
+                                    {catAxis.show && renderCategoryLabel(labelOf(g), cx)}
                                 </g>
                             );
                         })}
                     </g>
+
+                    {levelRows > 0 && renderLevelRows(xOffset)}
+                    {rankBandOn && renderRankBand(xOffset)}
+                    {pareto.enabled && pareto.showThresholds && renderThresholds(xOffset)}
 
                     {/* 折れ線（複合）。棒の上に重ねる */}
                     {viewModel.lines.length > 0 && (
@@ -1347,7 +1652,7 @@ export const App: React.FC<AppProps> = ({
     };
 
     /**
-     * 横棒（#75）。カテゴリの軸を左、値の軸を下に置き、先頭のカテゴリを上にする（標準と同じ）。
+     * 横棒。カテゴリの軸を左、値の軸を下に置き、先頭のカテゴリを上にする（標準と同じ）。
      * 値の比率（startRatio・valRatio）と集合の並び（clusterLayout）は縦棒と同じものを使い、写し方だけ変える。
      * グリッド線は、値の線に「横」、カテゴリの区切りに「縦」の設定を使う（縦棒と同じく値かカテゴリかで対応させる）
      */
@@ -1374,7 +1679,7 @@ export const App: React.FC<AppProps> = ({
         const badgeAtTopRight = Boolean(badgeText) && unitPosition === "plotTopRight";
         const axisBlockHeight = tickRowHeight + valTitleHeight + (badgeInAxis ? badgeFontPx + 4 : 0);
 
-        // 第 2 X 軸（折れ線の値を値の軸と別の尺度で描くとき、#103）。値の軸の反対側に置く（値の軸が下なら上）
+        // 第 2 X 軸（折れ線の値を値の軸と別の尺度で描くとき）。値の軸の反対側に置く（値の軸が下なら上）
         const axis2 = viewModel.valueAxis2;
         const axis2On = axis2.show && viewModel.lines.length > 0;
         const axis2AtTop = !valueAtTop;
@@ -1392,10 +1697,39 @@ export const App: React.FC<AppProps> = ({
         const catTitleFontPx = catAxis.titleFontSize * PT_TO_PX;
         const hasCatTitle = catAxis.titleShow && Boolean(catAxis.titleText);
         const catFont = { family: catAxis.fontFamily, size: catFontPx, bold: catAxis.bold, italic: catAxis.italic, underline: catAxis.underline };
-        const widestLabel = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(g.category, catFont))) : 0;
+        // 階層を段に重ねるときは、棒のすぐ左にいちばん下のレベルだけを出し、上のレベルはさらに左の列に出す
+        const stackedLevels = catAxis.show && catAxis.levelCount > 1 && !catAxis.concatenateLabels;
+        const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.category);
+        const widestLabel = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(labelOf(g), catFont))) : 0;
         // 標準と同じく、凡例を含むビジュアル全体の幅に対する割合
         const maxLabelWidth = Math.max(16, viewport.width * (catAxis.maxHeight / 100));
-        const labelAreaWidth = catAxis.show ? Math.min(widestLabel, maxLabelWidth) + 8 : 0;
+        const lowestLabelWidth = catAxis.show ? Math.min(widestLabel, maxLabelWidth) + 8 : 0;
+        // 上のレベルの列。棒に近い（下の）レベルから置き、ラベルと合わせてグラフの幅の半分までにする（上のレベルから落とす）
+        const levelColumns: Array<{ level: number; width: number }> = [];
+        if (stackedLevels) {
+            let used = lowestLabelWidth;
+            for (let level = catAxis.levelCount - 2; level >= 0; level--) {
+                const widest = Math.max(0, ...groups.map((g) => measureTextWidth(g.levels[level] ?? "", catFont)));
+                const columnWidth = Math.min(widest, maxLabelWidth) + 12;
+                if (used + columnWidth > width * 0.5) break;
+                levelColumns.push({ level, width: columnWidth });
+                used += columnWidth;
+            }
+        }
+        // パレートのランクの帯。いちばん下のレベルのラベルのすぐ左に 1 列取る
+        const pareto = viewModel.pareto;
+        const rankBandOn = pareto.enabled && pareto.showRankBand && catAxis.show;
+        // 幅は、帯を出すランクの「名前 N件」のいちばん長いもの。ラベルの最大幅で頭を打つ（長い名前でプロットを押し出さない。入らなければ名前だけ、それも入らなければ文字を出さない）
+        const rankBandWidth = rankBandOn
+            ? Math.min(
+                maxLabelWidth,
+                Math.max(0, ...(["A", "B", "C"] as ParetoRank[]).map((r) => {
+                    const count = pareto.ranks.filter((x) => x === r).length;
+                    return count > 0 ? measureTextWidth(`${pareto.labels[r]} ${count}件`, catFont) : 0;
+                }))
+            ) + 16
+            : 0;
+        const labelAreaWidth = lowestLabelWidth + rankBandWidth + levelColumns.reduce((sum, c) => sum + c.width, 0);
         const catTitleWidth = hasCatTitle ? catTitleFontPx + 8 : 0;
 
         const marginLeft = 4 + catTitleWidth + labelAreaWidth;
@@ -1458,7 +1792,7 @@ export const App: React.FC<AppProps> = ({
                 j,
                 part,
                 (i) => yOffset + centerOf(i),
-                (ratio) => xOffset + (axis2On ? plotWidth * Math.max(0, Math.min(1, ratio)) : xOfRatio(ratio)),
+                (ratio) => xOffset + (onAxis2(line) ? plotWidth * Math.max(0, Math.min(1, ratio)) : xOfRatio(ratio)),
                 true,
                 step / 2,
                 [yOffset, yOffset + plotHeight],
@@ -1571,12 +1905,13 @@ export const App: React.FC<AppProps> = ({
                     className={`bar-item ${hoveredKey === key ? "hovered" : ""}`}
                     onClick={(e) => {
                         e.stopPropagation();
-                        onSelect(d.selectionId, e.ctrlKey || e.metaKey);
+                        if (d.selectionIds) onSelectMany?.(d.selectionIds, e.ctrlKey || e.metaKey);
+                        else onSelect(d.selectionId, e.ctrlKey || e.metaKey);
                     }}
                     onContextMenu={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        onContextMenu(d.selectionId, e.clientX, e.clientY);
+                        onContextMenu(d.selectionIds ? (null as unknown as ISelectionId) : d.selectionId, e.clientX, e.clientY);
                     }}
                     onMouseEnter={() => setHoveredKey(key)}
                     onMouseLeave={() => setHoveredKey(null)}
@@ -1637,6 +1972,88 @@ export const App: React.FC<AppProps> = ({
                     </text>
                 );
             });
+        };
+
+        /**
+         * 階層の上のレベルの列。いちばん下のレベルのラベルの左に、1 つ上のレベルから順に列を足し、
+         * 同じ親が続く区切りを点線の枠で囲む。文字は区切りの高さの中央、列の右寄せ
+         */
+        const renderHLevelColumns = (xOffset: number, yOffset: number) => {
+            const paths = groups.map((g) => g.levels);
+            const edgeOf = (i: number) => Math.max(0, Math.min(plotHeight, centerOf(i) - step / 2));
+            const separator: React.CSSProperties = {
+                stroke: catAxis.labelColor,
+                strokeOpacity: 0.35,
+                strokeWidth: 1,
+                strokeDasharray: "1 2",
+                shapeRendering: "crispEdges",
+            };
+            const boxed = catAxis.hierarchyStyle === "boxed";
+            const nodes: React.ReactNode[] = [];
+            let right = xOffset - lowestLabelWidth - rankBandWidth;
+            levelColumns.forEach(({ level, width: columnWidth }, c) => {
+                const left = right - columnWidth;
+                if (!boxed) {
+                    nodes.push(
+                        <line key={`lv-side-${c}`} x1={right} y1={yOffset} x2={right} y2={yOffset + plotHeight} className="level-separator" style={separator} />
+                    );
+                }
+                levelRunsOf(paths, level, groups.map((g) => g.levelKeys)).forEach((run, k) => {
+                    const top = run.start === 0 ? 0 : edgeOf(run.start);
+                    const bottom = run.end === groups.length - 1 ? plotHeight : edgeOf(run.end + 1);
+                    if (boxed) {
+                        // 囲み：区切りごとに角の丸い淡い枠。隣の枠とは少し離す
+                        nodes.push(
+                            <rect
+                                key={`lv-box-${c}-${k}`}
+                                x={left + LEVEL_BOX_GAP}
+                                y={yOffset + top + LEVEL_BOX_GAP}
+                                width={Math.max(0, columnWidth - LEVEL_BOX_GAP * 2)}
+                                height={Math.max(0, bottom - top - LEVEL_BOX_GAP * 2)}
+                                rx={LEVEL_BOX_RADIUS}
+                                className="level-box"
+                                style={{
+                                    fill: catAxis.labelColor,
+                                    fillOpacity: 0.06,
+                                    stroke: catAxis.labelColor,
+                                    strokeOpacity: 0.3,
+                                    strokeWidth: 1,
+                                }}
+                            />
+                        );
+                    }
+                    // 区切りの線は棒の左から、この列の左まで
+                    if (!boxed) [top, bottom].forEach((y, e) =>
+                        nodes.push(
+                            <line key={`lv-edge-${c}-${k}-${e}`} x1={left} y1={yOffset + y} x2={xOffset} y2={yOffset + y} className="level-separator" style={separator} />
+                        )
+                    );
+                    // 文字の高さも無い区切りには文字を出さない（隣の区切りの文字と重なる）
+                    if (bottom - top < catFontPx) return;
+                    nodes.push(
+                        <text
+                            key={`lv-text-${c}-${k}`}
+                            x={boxed ? (left + right) / 2 : right - 6}
+                            y={yOffset + (top + bottom) / 2 + catFontPx * 0.35}
+                            className="x-category-level"
+                            textAnchor={boxed ? "middle" : "end"}
+                            style={{
+                                fontSize: `${catAxis.fontSize}pt`,
+                                fontFamily: catAxis.fontFamily,
+                                fontWeight: catAxis.bold ? "bold" : "normal",
+                                fontStyle: catAxis.italic ? "italic" : "normal",
+                                textDecoration: catAxis.underline ? "underline" : undefined,
+                                fill: catAxis.labelColor,
+                            }}
+                        >
+                            {truncateText(run.text, columnWidth - 12, catFont)}
+                            <title>{run.text}</title>
+                        </text>
+                    );
+                });
+                right = left;
+            });
+            return <g className="category-levels">{nodes}</g>;
         };
 
         /** プロット（グリッド線・棒・ラベル・カテゴリ名）。xOffset・yOffset はプロットの左上、labelRightX はカテゴリ名の右端 */
@@ -1721,7 +2138,7 @@ export const App: React.FC<AppProps> = ({
                                             fill: catAxis.labelColor,
                                         }}
                                     >
-                                        {truncateText(g.category, maxLabelWidth, catFont)}
+                                        {truncateText(labelOf(g), maxLabelWidth, catFont)}
                                         <title>{g.category}</title>
                                     </text>
                                 )}
@@ -1729,7 +2146,51 @@ export const App: React.FC<AppProps> = ({
                         );
                     })}
                 </g>
-                {/* 折れ線の値（#103）。点はカテゴリの中心で、上から下へ並ぶ。既定では線を出さずマーカーだけ */}
+                {levelColumns.length > 0 && renderHLevelColumns(xOffset, yOffset)}
+                {rankBandOn && (
+                    <g className="pareto-ranks">
+                        {rankRuns().map((run) => {
+                            const edgeOf = (i: number) => Math.max(0, Math.min(plotHeight, centerOf(i) - step / 2));
+                            const top = run.start === 0 ? 0 : edgeOf(run.start);
+                            const bottom = run.end === pareto.ranks.length ? plotHeight : edgeOf(run.end);
+                            const left = xOffset - lowestLabelWidth - rankBandWidth;
+                            return renderRankRun(
+                                run,
+                                { x: left + 2, y: yOffset + top + 2, width: rankBandWidth - 4, height: bottom - top - 4 },
+                                catFont,
+                                {
+                                    fontSize: `${catAxis.fontSize}pt`,
+                                    fontFamily: catAxis.fontFamily,
+                                    fontWeight: catAxis.bold ? "bold" : "normal",
+                                    fontStyle: catAxis.italic ? "italic" : "normal",
+                                    textDecoration: catAxis.underline ? "underline" : undefined,
+                                    fill: catAxis.labelColor,
+                                }
+                            );
+                        })}
+                    </g>
+                )}
+                {pareto.enabled && pareto.showThresholds && (
+                    // 境目は累積比の軸（上、0〜100%）の位置に縦の破線
+                    <g className="pareto-thresholds" pointerEvents="none">
+                        {pareto.thresholds.map((t, k) => {
+                            const x = xOffset + plotWidth * Math.max(0, Math.min(1, t));
+                            const ratioLine = viewModel.lines.find((l) => l.selectable === false);
+                            return (
+                                <line
+                                    key={`th-${k}`}
+                                    x1={x}
+                                    y1={yOffset}
+                                    x2={x}
+                                    y2={yOffset + plotHeight}
+                                    className="pareto-threshold"
+                                    style={{ stroke: ratioLine?.color ?? catAxis.labelColor, strokeOpacity: 0.6, strokeWidth: 1, strokeDasharray: "4 3" }}
+                                />
+                            );
+                        })}
+                    </g>
+                )}
+                {/* 折れ線の値。点はカテゴリの中心で、上から下へ並ぶ。既定では線を出さずマーカーだけ */}
                 {viewModel.lines.length > 0 && (
                     <g className="lines-group">
                         {viewModel.lines.map((line, j) => renderHLine(line, j, xOffset, yOffset, "area"))}
@@ -2103,14 +2564,102 @@ export const App: React.FC<AppProps> = ({
         );
     };
 
-    const { width, height } = viewport;
+    const { width } = viewport;
+    const height = bodyHeight;
     const chartWidth = legend ? Math.max(10, width - legend.reserve.left - legend.reserve.right) : width;
     const chartHeight = legend ? Math.max(10, height - legend.reserve.top - legend.reserve.bottom) : height;
+
+    /**
+     * 累計の切り替えボタンと区切りの選択（閲覧者が押せる所）。押した状態は visual.ts がレポートに保存する。
+     * 棒のクリックと同じく、ここでの操作は選択の解除に伝えない
+     */
+    const renderToolbar = () => {
+        const cumulative = viewModel.cumulative;
+        const on = cumulative.enabled;
+        const accent = viewModel.series[0]?.color ?? viewModel.categoryAxis.labelColor;
+        const textColor = viewModel.categoryAxis.labelColor;
+        const font: React.CSSProperties = { fontFamily: viewModel.categoryAxis.fontFamily, fontSize: "9pt" };
+        const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+        const resetItems = [{ value: "none", displayName: "区切らない" }, ...cumulative.levels];
+        return (
+            <div
+                className="cumulative-toolbar"
+                style={{ position: "absolute", top: 0, right: 0, height: TOOLBAR_HEIGHT, display: "flex", alignItems: "center", gap: 6, paddingRight: 4, whiteSpace: "nowrap" }}
+                onClick={stop}
+                onContextMenu={stop}
+            >
+                {on && cumulative.levels.length > 0 && (
+                    <select
+                        className="cumulative-reset"
+                        aria-label="累計の区切り"
+                        value={cumulative.reset}
+                        onChange={(e) => onChangeCumulativeReset?.(e.target.value)}
+                        style={{ ...font, width: "auto", maxWidth: 180, flexShrink: 0, color: textColor, height: 22, border: `1px solid ${withAlpha(textColor, 0.4)}`, borderRadius: 11, padding: "0 6px", background: "transparent" }}
+                    >
+                        {resetItems.map((item) => (
+                            <option key={String(item.value)} value={String(item.value)}>
+                                {`区切り: ${String(item.displayName)}`}
+                            </option>
+                        ))}
+                    </select>
+                )}
+                <button
+                    type="button"
+                    className="cumulative-toggle"
+                    aria-pressed={on}
+                    onClick={() => onToggleCumulative?.()}
+                    style={{
+                        ...font,
+                        height: 22,
+                        padding: "0 10px 0 8px",
+                        borderRadius: 11,
+                        border: `1px solid ${on ? accent : withAlpha(textColor, 0.4)}`,
+                        background: on ? withAlpha(accent, 0.16) : "transparent",
+                        color: on ? accent : textColor,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 6,
+                        cursor: "pointer",
+                        whiteSpace: "nowrap",
+                        flexShrink: 0,
+                    }}
+                >
+                    <span
+                        aria-hidden="true"
+                        style={{ width: 9, height: 9, borderRadius: "50%", background: on ? accent : "transparent", border: on ? "none" : `1px solid ${withAlpha(textColor, 0.5)}` }}
+                    />
+                    累計
+                </button>
+            </div>
+        );
+    };
+
+    /** 凡例とグラフ。凡例があれば、凡例を除いた領域にグラフを描く（中の絶対配置はこの領域が基準になる） */
+    const renderLegendAndBody = () =>
+        legend ? (
+            <>
+                <div
+                    className="unit-bar-chart-area"
+                    style={{
+                        position: "absolute",
+                        left: legend.reserve.left,
+                        top: legend.reserve.top,
+                        width: chartWidth,
+                        height: chartHeight,
+                    }}
+                >
+                    {renderBody(chartWidth, chartHeight)}
+                </div>
+                {renderLegend(legend)}
+            </>
+        ) : (
+            renderBody(width, height)
+        );
 
     return (
         <div
             className="unit-bar-container"
-            style={{ width, height, position: "relative" }}
+            style={{ width, height: viewport.height, position: "relative" }}
             // 棒のクリック・右クリックは棒側で止めるので、ここに来るのは棒以外の所だけ。
             // （以前は target === currentTarget で判定していたが、SVG が全面を覆うため常に偽だった）
             onClick={() => onClearSelection?.()}
@@ -2119,26 +2668,22 @@ export const App: React.FC<AppProps> = ({
                 onContextMenu(null as unknown as ISelectionId, e.clientX, e.clientY);
             }}
         >
-            {legend ? (
-                <>
-                    {/* 凡例を除いた領域にグラフを描く。中の絶対配置はこの領域が基準になる */}
-                    <div
-                        className="unit-bar-chart-area"
-                        style={{
-                            position: "absolute",
-                            left: legend.reserve.left,
-                            top: legend.reserve.top,
-                            width: chartWidth,
-                            height: chartHeight,
-                        }}
-                    >
-                        {renderBody(chartWidth, chartHeight)}
-                    </div>
-                    {renderLegend(legend)}
-                </>
+            {toolbarOn && renderToolbar()}
+            {toolbarOn ? (
+                // ボタンの行の下を、凡例とグラフの領域にする（中の絶対配置はこの領域が基準になる）
+                <div className="unit-bar-body" style={{ position: "absolute", left: 0, top: toolbarHeight, width, height }}>
+                    {renderLegendAndBody()}
+                </div>
             ) : (
-                renderBody(width, height)
+                renderLegendAndBody()
             )}
         </div>
     );
 };
+
+/** 色に透明度を付ける（#RRGGBB のときだけ。ほかの書き方ならそのまま） */
+function withAlpha(color: string, alpha: number): string {
+    if (!/^#[0-9a-fA-F]{6}$/.test(color)) return color;
+    const a = Math.round(Math.max(0, Math.min(1, alpha)) * 255).toString(16).padStart(2, "0");
+    return `${color}${a}`;
+}

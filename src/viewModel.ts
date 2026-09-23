@@ -5,6 +5,7 @@ import { scaleLinear } from "d3-scale";
 import { valueFormatter } from "powerbi-visuals-utils-formattingutils";
 import DataView = powerbi.DataView;
 import DataViewCategorical = powerbi.DataViewCategorical;
+import DataViewCategoryColumn = powerbi.DataViewCategoryColumn;
 import DataViewValueColumn = powerbi.DataViewValueColumn;
 import DataViewValueColumnGroup = powerbi.DataViewValueColumnGroup;
 import DataViewObjects = powerbi.DataViewObjects;
@@ -24,6 +25,8 @@ import {
     LINE_SHAPE_DEFAULTS,
     ORIENTATIONS,
     Orientation,
+    CALCULATION_MODES,
+    CUMULATIVE_RESET_NONE,
 } from "./settings";
 import {
     resolveUnit,
@@ -34,7 +37,8 @@ import {
     UnitDefinition,
     UNIT_DEFINITIONS,
 } from "./unitUtils";
-import { TooltipSource, TooltipStack, TooltipColumn, tooltipColumnOf, formatTooltipValue, BLANK_TEXT } from "./tooltip";
+import { collapseOthers, lineIndependenceOf } from "./others";
+import { TooltipSource, TooltipStack, TooltipColumn, tooltipColumnOf, formatTooltipValue, categoryTooltipRows, BLANK_TEXT } from "./tooltip";
 
 export interface DataPoint {
     category: string;
@@ -60,6 +64,13 @@ export interface DataPoint {
     /** データラベルの詳細の行（全体に対する割合か、ラベルの詳細のフィールドの値）。無ければ空 */
     detailText: string;
     selectionId: ISelectionId;
+    /**
+     * カテゴリだけの ID。パレートのランクの帯はカテゴリで選ぶので、系列があるときに棒の ID（カテゴリ＋系列）と
+     * 一致しない。選ばれているかを見るときはこちらとも比べる。系列 1 本なら selectionId と同じ
+     */
+    categorySelectionId?: ISelectionId;
+    /** 「その他」の棒だけ持つ。押したらまとめたカテゴリを全部選ぶ */
+    selectionIds?: ISelectionId[];
     /** ハイライトの値。ハイライトが無い・この棒が該当しないときは null */
     highlight: number | null;
     /** highlight を valRatio と同じ軸で表した比率。highlight が null なら null */
@@ -103,6 +114,10 @@ export interface StackTotals {
 /** カテゴリ 1 つぶんの棒（系列の順＝凡例の順） */
 export interface CategoryGroup {
     category: string;
+    /** 階層のレベルごとの表示（上のレベルから）。1 列なら [category] */
+    levels: string[];
+    /** レベルごとの元の値を見分けるキー。親の区切りと並べ替えは表示ではなくこれで見る */
+    levelKeys: string[];
     rowIndex: number;
     points: DataPoint[];
     /** 積み上げのときの合計。集合・100% 積み上げでは null */
@@ -112,6 +127,10 @@ export interface CategoryGroup {
 /** 折れ線の点 1 つ。並びは categoryGroups と同じ（並べ替えのあと） */
 export interface LinePoint {
     rowIndex: number;
+    /** 「その他」の点だけ持つ。押したらまとめたカテゴリを全部選ぶ */
+    selectionIds?: ISelectionId[];
+    /** この点の手前で線を切るか（累計の区切りで 0 に戻るところ） */
+    breakBefore?: boolean;
     /** 値。空白なら null（線を切る） */
     value: number | null;
     /** 軸の比率。第 2 Y 軸で描くときは第 2 Y 軸の比率 */
@@ -147,6 +166,11 @@ export interface LineSeriesInfo {
     baselineRatio: number;
     /** 凡例のクリックで選ぶ ID（メジャー） */
     selectionId: ISelectionId;
+    /**
+     * 凡例・線のクリックで線ごと選べるか。パレートの累積比の線（ビジュアルが計算した線でメジャーが無い）は false。
+     * 省略は true
+     */
+    selectable?: boolean;
     points: LinePoint[];
     /** ツールヒント用。values は DataView の行番号で引く */
     tooltip: TooltipColumn;
@@ -319,6 +343,12 @@ export interface CategoryAxisSettings {
     titleUnderline: boolean;
     titleColor: string;
     minCategoryWidth: number;
+    /** 階層のラベルを 1 行につなぐか（標準の「ラベルの連結」）。1 列のときは使わない */
+    concatenateLabels: boolean;
+    /** 階層のレベルの数。1 なら階層なし */
+    levelCount: number;
+    /** 段に重ねた上のレベルの見せ方（"lines" 区切り線 | "boxed" 囲み） */
+    hierarchyStyle: string;
 }
 
 export interface ValueAxisSettings {
@@ -428,6 +458,10 @@ export interface ViewModel {
     hasHighlights: boolean;
     /** ツールヒントの元データ。データが無いときは null */
     tooltip: TooltipSource | null;
+    /** 累計の状態 */
+    cumulative: CumulativeInfo;
+    /** パレートの状態 */
+    pareto: ParetoInfo;
     isEmpty: boolean;
 }
 
@@ -456,7 +490,7 @@ export const MAX_LOG_TICKS = 8;
 
 /** Math.log10 の丸め誤差を吸収する（10 の冪ならちょうどの整数を返す） */
 /**
- * 0 を含む範囲 [lo, hi] を広げて、0 が下から zero（0〜1）の割合の高さに来るようにする（第 2 Y 軸の「0 を配置する」、#91）。
+ * 0 を含む範囲 [lo, hi] を広げて、0 が下から zero（0〜1）の割合の高さに来るようにする（第 2 Y 軸の「0 を配置する」）。
  * zero が端（0 か 1）で、反対側に値があって合わせられないときは、そのまま返す
  */
 export function alignZeroAt(lo: number, hi: number, zero: number): [number, number] {
@@ -523,6 +557,9 @@ const EMPTY_CATEGORY_AXIS: CategoryAxisSettings = {
     titleUnderline: false,
     titleColor: "#252423",
     minCategoryWidth: 20,
+    concatenateLabels: false,
+    levelCount: 1,
+    hierarchyStyle: "lines",
 };
 
 const EMPTY_VALUE_AXIS: ValueAxisSettings = {
@@ -619,7 +656,20 @@ const EMPTY_TOTAL_LABELS: TotalLabelsSettings = {
     backgroundTransparency: 0,
 };
 
+const EMPTY_PARETO: ParetoInfo = {
+    enabled: false,
+    thresholds: [0.8, 0.95],
+    showThresholds: false,
+    showRankBand: false,
+    ranks: [],
+    labels: { A: "A", B: "B", C: "C" },
+    colors: { A: "#118DFF", B: "#74B9FF", C: "#C4E1FF" },
+    selections: { A: [], B: [], C: [] },
+};
+
 const EMPTY: ViewModel = {
+    cumulative: { available: false, enabled: false, toggle: false, levels: [], reset: "none" },
+    pareto: EMPTY_PARETO,
     dataPoints: [],
     categoryGroups: [],
     series: [],
@@ -748,8 +798,8 @@ export function lineTooltipItems(
     const group = viewModel.categoryGroups[pointIndex];
     if (!line || !group || !viewModel.tooltip) return [];
     return [
-        { displayName: viewModel.tooltip.categoryName, value: group.category },
-        { displayName: line.name, value: formatTooltipValue(line.tooltip.values[group.rowIndex], line.tooltip.format) },
+        ...categoryTooltipRows(viewModel.tooltip, group.rowIndex, group.category),
+        { displayName: line.tooltip.displayName, value: formatTooltipValue(line.tooltip.values[group.rowIndex], line.tooltip.format) },
     ];
 }
 
@@ -871,11 +921,96 @@ const labelColorOf = (objects: DataViewObjects | undefined): string | null => {
     return fill?.solid?.color ? String(fill.solid.color) : null;
 };
 
+/**
+ * 値の大きい順に並べる。階層（levels が 2 つ以上）では、上のレベルから順に、
+ * 親どうしを配下の合計で並べ、その中で子を並べる。同じ値なら元の順を保つ
+ */
+export function sortWithinParents<T extends { levels: string[]; levelKeys?: string[] }>(items: T[], totalOf: (item: T) => number): T[] {
+    const depth = items[0]?.levels.length ?? 1;
+    const sumOf = (list: T[]) => list.reduce((sum, item) => sum + totalOf(item), 0);
+    const sortAt = (list: T[], level: number): T[] => {
+        if (level >= depth - 1) return [...list].sort((a, b) => totalOf(b) - totalOf(a));
+        const buckets = new Map<string, T[]>();
+        for (const item of list) {
+            // 親は元の値で見分ける（空白と文字の "null" のように、表示が同じでも別の親がある）
+            const key = (item.levelKeys ?? item.levels)[level];
+            const bucket = buckets.get(key);
+            if (bucket) bucket.push(item);
+            else buckets.set(key, [item]);
+        }
+        return [...buckets.values()].sort((a, b) => sumOf(b) - sumOf(a)).flatMap((bucket) => sortAt(bucket, level + 1));
+    };
+    return sortAt(items, 0);
+}
+
+/**
+ * 書式の区切り。選択肢はデータ次第で、書式の読み込み（populateFormattingSettingsModel）の時点では「区切らない」しか無く、
+ * 保存した値が選択肢に無いとして捨てられる。なので保存先（metadata.objects）から直接読む（Desktop で確認）
+ */
+export function savedCumulativeReset(dataView: DataView | undefined, calc: VisualFormattingSettingsModel["calculation"]): string {
+    const raw = dataView?.metadata?.objects?.calculation?.cumulativeReset;
+    if (typeof raw === "string" && raw !== "") return raw;
+    const value = calc.cumulativeReset.value;
+    return String((value && typeof value === "object" ? value.value : value) ?? CUMULATIVE_RESET_NONE);
+}
+
+/**
+ * 閲覧者の操作（グラフの上の累計の切り替えボタン・区切り）。visual.ts が保存済みの状態から作る。
+ * 無ければ書式の値どおり
+ */
+export interface CalculationRuntime {
+    /** 累計を効かせるか。書式が累計のときだけ意味を持つ */
+    cumulative?: boolean;
+    /** 閲覧者が選んだ区切り（レベルの queryName か CUMULATIVE_RESET_NONE）。null なら書式の値 */
+    cumulativeReset?: string | null;
+}
+
+/** パレートのランク。累積比で A・B・C に分ける */
+export type ParetoRank = "A" | "B" | "C";
+
+/** パレートの状態。棒の並び（categoryGroups）の順で持つ */
+export interface ParetoInfo {
+    enabled: boolean;
+    /** A と B、B と C の境目（累積比、0〜1） */
+    thresholds: [number, number];
+    showThresholds: boolean;
+    showRankBand: boolean;
+    /** 棒の並びの順のランク。値が 0 以下（累積比に数えない）なら null */
+    ranks: Array<ParetoRank | null>;
+    labels: Record<ParetoRank, string>;
+    colors: Record<ParetoRank, string>;
+    /** ランクごとの棒の ID（帯を押したときにまとめて選ぶ） */
+    selections: Record<ParetoRank, ISelectionId[]>;
+}
+
+/** 累計の状態。書式ペインの区切りの選択肢と、グラフの上のボタンに使う */
+export interface CumulativeInfo {
+    /** 書式の「計算」が累計か（閲覧者のボタンを出せる） */
+    available: boolean;
+    /** いま累計を効かせているか（閲覧者がボタンで切ったら false） */
+    enabled: boolean;
+    /** グラフの上に切り替えボタンを出すか */
+    toggle: boolean;
+    /** 区切りの選択肢。X 軸の階層のレベル（いちばん下を除く）。value は queryName */
+    levels: powerbi.IEnumMember[];
+    /** いまの区切り（CUMULATIVE_RESET_NONE なら区切らない） */
+    reset: string;
+}
+
 export function transform(
     dataView: DataView | undefined,
     host: IVisualHost,
-    settings: VisualFormattingSettingsModel
+    settings: VisualFormattingSettingsModel,
+    runtime: CalculationRuntime = {}
 ): ViewModel {
+    // 上位 N 件＋「その他」。読む前に DataView を畳む。「その他」の選択は元のカテゴリの列から作り直す
+    const originalCategories = dataView?.categorical?.categories;
+    const originalDataView = dataView;
+    const others = collapseOthers(dataView, settings.columns.otherCount.value ?? 0, settings.columns.otherLabel.value?.trim() || "その他");
+    dataView = others.dataView;
+    const otherRow = others.otherRow;
+    const otherSelectionIds = others.mergedRows.map((r) => host.createSelectionIdBuilder().withCategory(originalCategories![0], r).createSelectionId());
+
     const categorical: DataViewCategorical | undefined = dataView?.categorical;
     const categories = categorical?.categories?.[0];
     const valueColumns: DataViewValueColumn[] = categorical?.values ?? [];
@@ -892,14 +1027,36 @@ export function transform(
     const seriesMode = !!legendSource || slots.length > 1;
     const rowCount = categories.values.length;
 
+    // 階層。X 軸にフィールドが複数あり、展開していると、上のレベルから順に 1 列ずつ届く。
+    // 1 列のときは 1.22 までと同じ（levels が 1 つ）
+    const levelColumns: DataViewCategoryColumn[] = categorical!.categories!;
     // 日付のカテゴリはモデルの書式で出す（String() だと JS の日付の文字列になる）。それ以外は 1.4 までと同じ
-    const categoryFormatter = categories.source?.type?.dateTime
-        ? valueFormatter.create({ format: valueFormatter.getFormatStringByColumn(categories.source) || "yyyy/MM/dd" })
-        : null;
-    const categoryText = (i: number): string => {
-        const raw = categories.values[i];
-        return categoryFormatter && raw !== null && raw !== undefined ? categoryFormatter.format(raw) : String(raw);
-    };
+    const levelTextOf = levelColumns.map((column) => {
+        const formatter = column.source?.type?.dateTime
+            ? valueFormatter.create({ format: valueFormatter.getFormatStringByColumn(column.source) || "yyyy/MM/dd" })
+            : null;
+        return (i: number): string => {
+            const raw = column.values[i];
+            return formatter && raw !== null && raw !== undefined ? formatter.format(raw) : String(raw);
+        };
+    });
+    const levelsAt = (i: number): string[] => levelTextOf.map((text) => text(i));
+    const levelKeysAt = (i: number): string[] =>
+        levelColumns.map((column) => {
+            const raw = column.values[i];
+            if (raw === null || raw === undefined) return "blank";
+            return raw instanceof Date ? `date:${raw.getTime()}` : `${typeof raw}:${String(raw)}`;
+        });
+    /** 1 行で読むときの名前。階層は上のレベルから空白でつなぐ（標準の「ラベルの連結」と同じ） */
+    const categoryText = (i: number): string => levelsAt(i).join(" ");
+    /**
+     * ID と書式の保存先は、いちばん下のレベルの列（1 列なら今までと同じ列）。この列の ID は上のレベルを含んだ
+     * 複合で（保存される selector は FY・半期・四半期の And）、別の年の Q1 とも区別できる。
+     * レベルごとに withCategory を重ねると selector の data が重複し、保存した書式が objects に戻らない（2026-09-23、Desktop）
+     */
+    const lowestLevel = levelColumns[levelColumns.length - 1];
+    const withCategories = (builder: powerbi.visuals.ISelectionIdBuilder, i: number) => builder.withCategory(lowestLevel, i);
+    const categoryObjectsAt = (i: number) => lowestLevel.objects?.[i];
 
     const orientation: Orientation =
         String(settings.chart.orientation?.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal
@@ -908,7 +1065,7 @@ export function transform(
     const horizontal = orientation === ORIENTATIONS.horizontal;
 
     // 折れ線の値。凡例があると、系列ごとに同じメジャーの列が複製されて届くので queryName でまとめる。
-    // 標準の複合は縦棒だけだが、どの種類・向きでも描く（リボンは #101、横棒は #103。横棒は既定でマーカーだけ）
+    // 標準の複合は縦棒だけだが、どの種類・向きでも描く（横棒は既定でマーカーだけ）
     const lineColumns = new Map<string, DataViewValueColumn[]>();
     for (const group of groups) {
         for (const column of group.values) {
@@ -924,6 +1081,7 @@ export function transform(
      * 系列ごとの値がどの行でも同じなら（凡例に左右されないメジャー）その値、違えば足した値を使う
      * （標準はカテゴリ単位で計算するが、カスタムビジュアルは凡例で分けたデータしか受け取れないため）
      */
+    const lineIndependenceBeforeCollapse = otherRow >= 0 ? lineIndependenceOf(originalDataView) : null;
     const lineDefs = [...lineColumns.entries()].map(([key, columns]) => {
         const numbersAt = (i: number) =>
             columns
@@ -931,9 +1089,10 @@ export function transform(
                 .filter((v) => v !== null && v !== undefined)
                 .map((v) => (typeof v === "number" ? v : Number(v)))
                 .filter((v) => Number.isFinite(v));
-        const independent = Array.from({ length: rowCount }, (_, i) => numbersAt(i)).every(
-            (vals) => vals.every((v) => v === vals[0])
-        );
+        // 「その他」にまとめたときは、畳む前の DataView で判定する（行が減ると判定が変わり、残したカテゴリの線の値まで変わる）
+        const independent =
+            lineIndependenceBeforeCollapse?.get(key) ??
+            Array.from({ length: rowCount }, (_, i) => numbersAt(i)).every((vals) => vals.every((v) => v === vals[0]));
         const values: Array<number | null> = Array.from({ length: rowCount }, (_, i) => {
             const vals = numbersAt(i);
             if (!vals.length) return null;
@@ -963,9 +1122,11 @@ export function transform(
     };
 
     const chartTypeValue = getDropdownValue(settings.chart.chartType?.value, CHART_TYPES.clustered);
+    // パレート。100% 積み上げのパレートはどの棒も同じ高さで意味が無いので、そのあいだは積み上げとして描く
+    const paretoOn = getDropdownValue(settings.calculation.mode.value, CALCULATION_MODES.none) === CALCULATION_MODES.pareto;
     // 1.18 までの「リボン」は、書式の読み込み（applyChartTypeDefaults）で積み上げ＋リボンに読み替える。ここでは積み上げとして扱う
     const chartType: ChartType =
-        chartTypeValue === CHART_TYPES.stacked || chartTypeValue === CHART_TYPES.ribbon
+        chartTypeValue === CHART_TYPES.stacked || chartTypeValue === CHART_TYPES.ribbon || (paretoOn && chartTypeValue === CHART_TYPES.stacked100)
             ? CHART_TYPES.stacked
             : chartTypeValue === CHART_TYPES.stacked100
                 ? CHART_TYPES.stacked100
@@ -973,12 +1134,154 @@ export function transform(
     const stacked = chartType !== CHART_TYPES.clustered;
     const percent = chartType === CHART_TYPES.stacked100;
     // リボン（帯）は積み上げ・100% 積み上げで出せる。積む順が「値の大きい順」なら、カテゴリごとに値の大きい系列を外側に積み替える
-    // （標準のリボン グラフと同じ。凡例の順なら標準の積み上げ＋リボンと同じ、#108）
+    // （標準のリボン グラフと同じ。凡例の順なら標準の積み上げ＋リボンと同じ）
     const ribbonsOn = stacked && (settings.ribbons.show.value ?? false);
     const rankOrder = ribbonsOn && getDropdownValue(settings.ribbons.order.value, RIBBON_ORDERS.legend) === RIBBON_ORDERS.value;
 
     // 複数系列の空白は棒を描かないので数えない（系列 1 本の空白は 1.4 までと同じく 0 として数える）
     const isSkipped = (column: DataViewValueColumn, i: number) => seriesMode && isBlankAt(column, i);
+
+    // --- 並び順 ---------------------------------------------------------------
+    // 表示の順（値順・逆順）は元の値で先に決める。累計はこの順に沿って足し、並べ替えは累計した値ではなく元の値で行う。
+    // 値順は、複数系列ではカテゴリの合計（空白は 0）の大きい順。階層では親の中で並べ替える（同じ親が離れると上のレベルのラベルが割れる）
+    const rawTotalAt = (i: number) => slots.reduce((sum, slot) => sum + (isSkipped(slot.column, i) ? 0 : numberAt(slot.column, i)), 0);
+    // パレートは値の大きい順が図の定義なので、値順の設定によらず大きい順に並べ、逆順にもしない
+    let displayOrder = Array.from({ length: rowCount }, (_, i) => i);
+    if (paretoOn) {
+        // 階層を展開していても、親の中ではなく全体を大きい順に並べる（親の中で並べると、いちばん大きいカテゴリが C になりうる）。
+        // 上のレベルの段は細かく割れるが、並びの意味を優先する
+        displayOrder = [...displayOrder].sort((a, b) => rawTotalAt(b) - rawTotalAt(a));
+    } else if (settings.columns.sortByValue.value ?? false) {
+        displayOrder = sortWithinParents(
+            displayOrder.map((i) => ({ levels: levelsAt(i), levelKeys: levelKeysAt(i), i })),
+            (item) => rawTotalAt(item.i)
+        ).map((item) => item.i);
+    }
+    if (!paretoOn && (settings.columns.reverseOrder.value ?? false)) displayOrder.reverse();
+    // 「その他」は、並べ替えによらずいつも最後に置く
+    if (otherRow >= 0) displayOrder = [...displayOrder.filter((i) => i !== otherRow), otherRow];
+
+    // --- 累計 ------------------------------------------------------------
+    // 表示の順に、系列ごとに値を足していく。区切り（階層のレベル）の値が変わったところで 0 に戻す。
+    // 棒の値そのものを差し替えるので、積み上げ・軸・データラベルは累計した値で描く
+    const calc = settings.calculation;
+    const cumulativeAvailable = getDropdownValue(calc.mode.value, CALCULATION_MODES.none) === CALCULATION_MODES.cumulative;
+    const cumulativeEnabled = cumulativeAvailable && (runtime.cumulative ?? true);
+    const levelItems: powerbi.IEnumMember[] = levelColumns.map((column) => ({
+        value: column.source?.queryName ?? column.source?.displayName ?? "",
+        displayName: column.source?.displayName ?? "",
+    }));
+    const cumulativeReset = runtime.cumulativeReset ?? savedCumulativeReset(dataView, calc);
+    // 区切りは、いま届いているどのレベルでも効かせる。ドリルアップして区切りのレベルがいちばん下になったら、
+    // 棒ごとに 0 に戻る（= 素の値。「FY ごとに 0 に戻す」を FY の棒で見たとき）
+    const resetDepth = levelItems.findIndex((level) => level.value === cumulativeReset);
+    // 選択肢はいちばん下を除くレベル（いちばん下で区切っても素の値になるだけ）。ただし選んである区切りは、
+    // 閲覧者のものも書式のものも残す（書式ペインの区切りが選択肢から消えて「区切らない」に見えないように）
+    const authorResetDepth = levelItems.findIndex((level) => level.value === savedCumulativeReset(dataView, calc));
+    const cumulativeLevels = levelItems.filter((level, k) => k < levelItems.length - 1 || k === resetDepth || k === authorResetDepth);
+    /** 表示の k 番目の手前で 0 に戻すか */
+    const resetBefore = displayOrder.map((i, k) => {
+        if (k === 0 || resetDepth < 0) return false;
+        const groupOf = (row: number) => JSON.stringify(levelKeysAt(row).slice(0, resetDepth + 1));
+        return groupOf(i) !== groupOf(displayOrder[k - 1]);
+    });
+    /**
+     * 行ごとの値を表示の順に足した値にする。空白はそこまでの合計にする。
+     * keepBlank なら、区切りの中で値がまだ 1 つも無いあいだの空白は空白のまま（凡例の系列が途中から始まるときに、0 の棒や線を描かない）
+     */
+    const cumulate = (values: powerbi.PrimitiveValue[], keepBlank: boolean): powerbi.PrimitiveValue[] => {
+        const out = values.slice();
+        let running = 0;
+        let started = false;
+        displayOrder.forEach((i, k) => {
+            if (resetBefore[k]) {
+                running = 0;
+                started = false;
+            }
+            const raw = values[i];
+            if (raw === null || raw === undefined) {
+                out[i] = keepBlank && !started ? raw : running;
+                return;
+            }
+            running += typeof raw === "number" ? raw : Number(raw) || 0;
+            started = true;
+            out[i] = running;
+        });
+        return out;
+    };
+    /** 累計の前の列（ツールヒントに元の値を出すため）。累計でなければ空 */
+    const beforeCumulative = new Map<SeriesSlot, DataViewValueColumn>();
+    /** 累計にした折れ線の key */
+    const cumulativeLineKeys = new Set<string>();
+    if (cumulativeEnabled) {
+        for (const slot of slots) {
+            const column = slot.column;
+            beforeCumulative.set(slot, column);
+            slot.column = {
+                ...column,
+                // 空白の行もそこまでの合計の棒にする。複数系列では、その系列が始まる前の空白は描かない
+                values: cumulate(column.values, seriesMode),
+                // ハイライトは「ここまでの該当分」。該当しない行も、手前までの該当分を残す
+                ...(column.highlights ? { highlights: cumulate(column.highlights, false) } : {}),
+            };
+        }
+        const includeAll = settings.lines.includeCumulative.value ?? false;
+        for (const def of lineDefs) {
+            const own = def.objects?.lines?.includeCumulative;
+            if (!(typeof own === "boolean" ? own : includeAll)) continue;
+            def.values = cumulate(def.values, true) as Array<number | null>;
+            cumulativeLineKeys.add(def.key);
+        }
+    }
+    // 「その他」の行の折れ線は、足しようが無いので空白（「値」と同じ列を「折れ線の値」にも入れたとき・累計で空白が埋まったときも）
+    if (otherRow >= 0) lineDefs.forEach((def) => (def.values[otherRow] = null));
+    /** ツールヒントの値の行。累計なら「値（累計）」と、累計の前の値の行を出す */
+    const measureTooltipOf = (slot: SeriesSlot): { measure: TooltipColumn; before?: TooltipColumn } => {
+        const measure = tooltipColumnOf(slot.column);
+        const before = beforeCumulative.get(slot);
+        return before ? { measure: { ...measure, displayName: `${measure.displayName}（累計）` }, before: tooltipColumnOf(before) } : { measure };
+    };
+    /** 表示の順での位置（行番号 → 何番目か） */
+    const positionOf = new Map(displayOrder.map((i, k) => [i, k]));
+
+    // --- パレート ------------------------------------------
+    // 並んだ順に、カテゴリの合計を足した割合（累積比）。分母は正の合計で、0 以下のカテゴリは数えない
+    // （全体を分け合う図なので、負が混ざると累積比が 100% を超えたり戻ったりする。標準のビジュアル計算はそうなる）
+    const paretoCard = settings.calculation;
+    const percentOf = (raw: number | undefined, fallback: number) =>
+        Math.max(0, Math.min(100, Number.isFinite(raw) ? (raw as number) : fallback)) / 100;
+    const boundaryA = percentOf(paretoCard.boundaryAB.value, 80);
+    const boundaryB = percentOf(paretoCard.boundaryBC.value, 95);
+    // 境目が逆に入っても壊れないよう、小さいほうを A と B の境目にする
+    const paretoThresholds: [number, number] = [Math.min(boundaryA, boundaryB), Math.max(boundaryA, boundaryB)];
+    const paretoRatioByRow = new Array<number | null>(rowCount).fill(null);
+    const paretoRankByRow = new Array<ParetoRank | null>(rowCount).fill(null);
+    if (paretoOn) {
+        // 「その他」は、まとめたカテゴリの正の値の合計で数える（正と負を相殺させない）
+        const paretoValueAt = (i: number) => (i === otherRow ? others.otherPositiveTotal : rawTotalAt(i));
+        const total = displayOrder.reduce((sum, i) => sum + Math.max(0, paretoValueAt(i)), 0);
+        let running = 0;
+        let first = true;
+        const EPS = 1e-9;
+        for (const i of displayOrder) {
+            const value = paretoValueAt(i);
+            if (!(value > 0) || !(total > 0)) continue;
+            running += value;
+            const ratio = running / total;
+            paretoRatioByRow[i] = ratio;
+            // 先頭は必ず A（1 件で境目を越えるデータでも A が 0 件にならないように）。境目ちょうどは A に入れる
+            paretoRankByRow[i] = first || ratio <= paretoThresholds[0] + EPS ? "A" : ratio <= paretoThresholds[1] + EPS ? "B" : "C";
+            first = false;
+        }
+    }
+    const paretoColors: Record<ParetoRank, string> = {
+        A: paretoCard.colorA.value?.value || "#118DFF",
+        B: paretoCard.colorB.value?.value || "#74B9FF",
+        C: paretoCard.colorC.value?.value || "#C4E1FF",
+    };
+    /** ランクで棒を塗るときの色。凡例（系列）があれば系列の色のまま。0 以下のカテゴリは C の色 */
+    const paretoFillAt = (i: number): string | null =>
+        paretoOn && !seriesMode && (paretoCard.colorByRank.value ?? true) ? paretoColors[paretoRankByRow[i] ?? "C"] : null;
 
     // カテゴリごとの正の合計・負の合計・絶対値の合計（積み上げの軸と 100% の割合に使う）
     const positiveSums = new Array<number>(rowCount).fill(0);
@@ -1026,7 +1329,8 @@ export function transform(
     const lineMax = lineNumbers.length ? Math.max(...lineNumbers) : 0;
     const axis2Saved = (dataView?.metadata?.objects?.valueAxis2 as powerbi.DataViewObject | undefined)?.show;
     let onSecondary = false;
-    if (lineDefs.length) {
+    // パレートでは右の軸を累積比（0〜100%）に使うので、「折れ線の値」の線は左の軸を共有する
+    if (lineDefs.length && !paretoOn) {
         if (percent) {
             onSecondary = true;
         } else if (typeof axis2Saved === "boolean") {
@@ -1195,6 +1499,9 @@ export function transform(
 
     // X軸設定の抽出
     const catAxis = settings.categoryAxis;
+    const concatenateLabels = catAxis.concatenateLabels.value ?? false;
+    const levelNames = levelColumns.map((column) => column.source?.displayName ?? "");
+    const autoCategoryTitle = concatenateLabels ? levelNames.join(" ") : levelNames[levelNames.length - 1];
     const categoryAxisSettings: CategoryAxisSettings = {
         show: catAxis.show.value ?? true,
         fontFamily: catAxis.font.fontFamily.value ?? "Segoe UI",
@@ -1205,7 +1512,8 @@ export function transform(
         labelColor: catAxis.labelColor.value?.value || "#605E5C",
         maxHeight: Math.max(0, Math.min(100, catAxis.maxHeight.value ?? 25)),
         titleShow: catAxis.titleShow.value ?? false,
-        titleText: catAxis.titleText.value?.trim() || (categories.source?.displayName ?? ""),
+        // 自動のタイトルは標準と同じ：段に重ねるならいちばん下のレベル、1 行につなぐならレベルの名前を並べる
+        titleText: catAxis.titleText.value?.trim() || autoCategoryTitle,
         titleFontFamily: catAxis.titleFont.fontFamily.value ?? "DIN",
         titleFontSize: Math.max(8, Math.min(32, catAxis.titleFont.fontSize.value ?? 12)),
         titleBold: catAxis.titleFont.bold?.value ?? false,
@@ -1213,6 +1521,9 @@ export function transform(
         titleUnderline: catAxis.titleFont.underline?.value ?? false,
         titleColor: catAxis.titleColor.value?.value || "#252423",
         minCategoryWidth: Math.max(0, Math.min(500, catAxis.minCategoryWidth.value ?? 20)),
+        concatenateLabels,
+        levelCount: levelColumns.length,
+        hierarchyStyle: getDropdownValue(catAxis.hierarchyStyle.value, "lines") === "boxed" ? "boxed" : "lines",
     };
 
     // ユーザー設定の単位ラベル（例: "億円", "円", "bn"）を反映したタイトル生成。
@@ -1377,7 +1688,7 @@ export function transform(
     });
 
     // 合計ラベル（積み上げのときだけ描く）。表示単位は「自動」なら Y 軸に従い（単位ラベルがあるので語は付けない）、
-    // 選んだときはその単位で割って語を付ける（#91）
+    // 選んだときはその単位で割って語を付ける
     const tl = settings.totalLabels;
     const totalPrecisionValue = String(tl.precision.value?.value ?? "auto");
     const totalPrecision = totalPrecisionValue !== "auto" ? totalPrecisionValue : precision;
@@ -1474,10 +1785,13 @@ export function transform(
 
     for (let i = 0; i < rowCount; i++) {
         const category = categoryText(i);
-        const targetObjects = categories.objects?.[i];
+        const targetObjects = categoryObjectsAt(i);
 
         // 系列 1 本のときの、カテゴリごとの見た目（1.4 までと同じ）
-        const categoryFill = customColor(targetObjects, "fill") ?? columnsSettings.fill;
+        const categoryFill =
+            i === otherRow
+                ? settings.columns.otherFill.value?.value || "#A0A0A0"
+                : customColor(targetObjects, "fill") ?? paretoFillAt(i) ?? columnsSettings.fill;
         const categoryTransparency = clampPercent(customNumber(targetObjects, "transparency") ?? columnsSettings.transparency);
         const categoryShowBorder = customFlag(targetObjects, "showBorder") ?? columnsSettings.showBorder;
         const categoryBorderMatchColumn = customFlag(targetObjects, "borderMatchColumn") ?? columnsSettings.borderMatchColumn;
@@ -1535,7 +1849,7 @@ export function transform(
             }
             const end = stacked ? start + amount : val;
             // 系列 1 本の ID はカテゴリだけ（1.4 までと同じ。カテゴリごとの色の保存先がこの ID の selector）
-            const builder = host.createSelectionIdBuilder().withCategory(categories, i);
+            const builder = withCategories(host.createSelectionIdBuilder(), i);
             const selectionId = !seriesMode
                 ? builder.createSelectionId()
                 : legendSource
@@ -1567,6 +1881,10 @@ export function transform(
                 ...formatted(val),
                 detailText: detailTextOf(slot, i, val, skipped),
                 selectionId,
+                // 「その他」の棒を押したら、まとめたカテゴリを全部選ぶ
+                ...(i === otherRow ? { selectionIds: otherSelectionIds } : {}),
+                // パレートのランクの帯はカテゴリで選ぶ。パレートのときだけ持たせる（ほかの計算の選択の見た目を変えない）
+                ...(paretoOn ? { categorySelectionId: seriesMode ? withCategories(host.createSelectionIdBuilder(), i).createSelectionId() : selectionId } : {}),
                 highlight,
                 highlightRatio: highlightEnd === null ? null : calcRatio(highlightEnd),
                 color: seriesMode ? series[s].color : categoryFill,
@@ -1609,9 +1927,10 @@ export function transform(
                 }
                 : null;
 
-        categoryGroups.push({ category, rowIndex: i, points, totals });
+        categoryGroups.push({ category, levels: levelsAt(i), levelKeys: levelKeysAt(i), rowIndex: i, points, totals });
 
-        if (!seriesMode) {
+        // 「その他」は書式の対象にしない（ID はまとめた最初のカテゴリの仮のもので、そこに保存するとそのカテゴリの書式になる）
+        if (!seriesMode && i !== otherRow) {
             columnTargets.push({
                 name: category,
                 selector: points[0].selectionId.getSelector(),
@@ -1652,14 +1971,8 @@ export function transform(
         });
     }
 
-    // レイアウトの並び替え。値順は、複数系列ではカテゴリの合計（空白は 0）の大きい順
-    if (columnsSettings.sortByValue) {
-        const totalOf = (g: CategoryGroup) => g.points.reduce((sum, d) => sum + (d.blank ? 0 : d.value), 0);
-        categoryGroups.sort((a, b) => totalOf(b) - totalOf(a));
-    }
-    if (columnsSettings.reverseOrder) {
-        categoryGroups.reverse();
-    }
+    // レイアウトの並び替え。順は「並び順」で元の値から決めてある（累計した値では並べ替えない）
+    categoryGroups.sort((a, b) => positionOf.get(a.rowIndex)! - positionOf.get(b.rowIndex)!);
     const dataPoints = categoryGroups.flatMap((g) => g.points);
 
     // --- 折れ線と第 2 Y 軸 ---------------------------------------------------
@@ -1685,7 +1998,7 @@ export function transform(
             v2Notation,
             v2Precision
         );
-    // 第 2 Y 軸の範囲：対数目盛り・範囲を丸める・0 を配置する（標準の第 2 Y 軸と同じ項目、#91）。
+    // 第 2 Y 軸の範囲：対数目盛り・範囲を丸める・0 を配置する（標準の第 2 Y 軸と同じ項目）。
     // 対数は、折れ線の値がすべて正かすべて負で、0 を配置しないときだけ効かせる（標準も 0 を配置すると対数は押せない）
     const alignZeros2 = v2.alignZeros.value ?? false;
     const logSign2 = lineMin > 0 ? 1 : lineMax < 0 ? -1 : 0;
@@ -1755,6 +2068,10 @@ export function transform(
             }
             return { value: t, label, ratio: calcRatio2(t) };
         });
+    } else if (paretoOn) {
+        // パレートの累積比の軸。0〜100% に固定する（第 2 Y 軸の範囲の指定は使わない）
+        calcRatio2 = (v: number) => Math.max(0, Math.min(1, v));
+        ticks2 = [0, 0.2, 0.4, 0.6, 0.8, 1].map((t) => ({ value: t, label: `${Math.round(t * 100)}%`, ratio: t }));
     }
 
     // 折れ線の色は、棒の系列の続きのテーマの色（系列 1 本の棒はテーマの 1 番目を使う扱いにして、線は 2 番目から）
@@ -1800,12 +2117,13 @@ export function transform(
                 const value = def.values[g.rowIndex];
                 return {
                     rowIndex: g.rowIndex,
+                    ...(cumulativeLineKeys.has(def.key) && resetBefore[positionOf.get(g.rowIndex)!] ? { breakBefore: true } : {}),
                     value,
                     ratio: value === null ? null : onSecondary ? calcRatio2(value) : calcRatio(value),
-                    selectionId: measureBuilder().withCategory(categories, g.rowIndex).withMeasure(def.key).createSelectionId(),
+                    selectionId: withCategories(measureBuilder(), g.rowIndex).withMeasure(def.key).createSelectionId(),
                 };
             }),
-            tooltip: { displayName: def.name, format: def.format, values: def.values },
+            tooltip: { displayName: cumulativeLineKeys.has(def.key) ? `${def.name}（累計）` : def.name, format: def.format, values: def.values },
         };
     });
     const lineTargets: LineTarget[] = lines.map((line, j) => ({
@@ -1823,10 +2141,48 @@ export function transform(
         stepWidth: line.stepWidth,
         areaShow: typeof lineDefs[j].objects?.areas?.show === "boolean" ? Boolean(lineDefs[j].objects?.areas?.show) : true,
         lineShow: line.lineShow,
+        includeCumulative:
+            typeof lineDefs[j].objects?.lines?.includeCumulative === "boolean"
+                ? Boolean(lineDefs[j].objects?.lines?.includeCumulative)
+                : settings.lines.includeCumulative.value ?? false,
     }));
 
+    if (paretoOn) {
+        const ratioColor = paretoCard.ratioColor.value?.value || "#E66C37";
+        lines.push({
+            name: "累積比",
+            color: ratioColor,
+            width: 2,
+            lineStyle: LINE_STYLES.solid,
+            lineJoin: "round",
+            interpolation: "linear",
+            smoothing: LINE_SHAPE_DEFAULTS.smoothing,
+            tension: LINE_SHAPE_DEFAULTS.tension,
+            stepPosition: LINE_SHAPE_DEFAULTS.stepPosition,
+            stepConnect: true,
+            stepWidth: LINE_SHAPE_DEFAULTS.stepWidth,
+            areaShow: false,
+            lineShow: true,
+            baselineRatio: 0,
+            selectionId: host.createSelectionIdBuilder().createSelectionId(),
+            selectable: false,
+            points: categoryGroups.map((g) => {
+                const value = paretoRatioByRow[g.rowIndex];
+                return {
+                    rowIndex: g.rowIndex,
+                    value,
+                    ratio: value === null ? null : calcRatio2(value),
+                    // 点を押したら、そのカテゴリの棒を選ぶ（「その他」なら、まとめたカテゴリを全部）
+                    selectionId: withCategories(host.createSelectionIdBuilder(), g.rowIndex).createSelectionId(),
+                    ...(g.rowIndex === otherRow ? { selectionIds: otherSelectionIds } : {}),
+                };
+            }),
+            tooltip: { displayName: "累積比", format: "0.0%", values: paretoRatioByRow },
+        });
+    }
+
     const valueAxis2Settings: ValueAxis2Settings = {
-        show: onSecondary,
+        show: onSecondary || paretoOn,
         valueShow: v2.valueShow.value ?? true,
         ticks: ticks2,
         fontFamily: v2.font.fontFamily.value ?? "Segoe UI",
@@ -1838,9 +2194,10 @@ export function transform(
         titleShow: v2.titleShow.value ?? true,
         // 自動のタイトルは折れ線の名前（標準と同じ。複数なら「および」でつなぐ）
         titleText: styledTitle(
-            v2.titleText.value?.trim() || lines.map((l) => l.name).join(" および "),
-            getDropdownValue(v2.titleStyle.value, "showTitleOnly"),
-            composeUnitText(unitWord2, v2UnitText, v2IncludeDisplayUnit)
+            v2.titleText.value?.trim() || (paretoOn ? "累積比" : lines.map((l) => l.name).join(" および ")),
+            // 累積比の軸は % なので、第 2 Y 軸の単位（円など）を付けない
+            paretoOn ? "showTitleOnly" : getDropdownValue(v2.titleStyle.value, "showTitleOnly"),
+            paretoOn ? "" : composeUnitText(unitWord2, v2UnitText, v2IncludeDisplayUnit)
         ),
         titleFontFamily: v2.titleFont.fontFamily.value ?? "DIN",
         titleFontSize: Math.max(8, Math.min(32, v2.titleFont.fontSize.value ?? 12)),
@@ -1863,6 +2220,35 @@ export function transform(
     };
 
     // 凡例：棒の系列のあとに折れ線。系列 1 本の棒も、折れ線があれば凡例に出す（標準と同じ）
+    /** パレートのツールヒントの行（累積比とランク） */
+    const paretoLabels: Record<ParetoRank, string> = {
+        A: paretoCard.labelA.value?.trim() || "A",
+        B: paretoCard.labelB.value?.trim() || "B",
+        C: paretoCard.labelC.value?.trim() || "C",
+    };
+    const paretoTooltipColumns: TooltipColumn[] = paretoOn
+        ? [
+            { displayName: "累積比", format: "0.0%", values: paretoRatioByRow },
+            { displayName: "ランク", format: undefined, values: paretoRankByRow.map((rank) => (rank ? paretoLabels[rank] : null)) },
+        ]
+        : [];
+    const paretoSelectionsOf = (rank: ParetoRank) =>
+        categoryGroups
+            .filter((g) => paretoRankByRow[g.rowIndex] === rank)
+            .flatMap((g) => (g.rowIndex === otherRow ? otherSelectionIds : [withCategories(host.createSelectionIdBuilder(), g.rowIndex).createSelectionId()]));
+    const paretoInfo: ParetoInfo = paretoOn
+        ? {
+            enabled: true,
+            thresholds: paretoThresholds,
+            showThresholds: paretoCard.showThresholds.value ?? true,
+            showRankBand: paretoCard.showRankBand.value ?? true,
+            ranks: categoryGroups.map((g) => paretoRankByRow[g.rowIndex]),
+            labels: paretoLabels,
+            colors: paretoColors,
+            selections: { A: paretoSelectionsOf("A"), B: paretoSelectionsOf("B"), C: paretoSelectionsOf("C") },
+        }
+        : EMPTY_PARETO;
+
     const legendEntries: LegendItemInfo[] = [
         ...(seriesMode
             ? series.map((s, index) => ({
@@ -1893,7 +2279,7 @@ export function transform(
                     },
                 }]
                 : []),
-        ...lines.map((l, index) => ({ kind: "line" as const, index, name: l.name, color: l.color, selectionId: l.selectionId })),
+        ...lines.map((l, index) => ({ kind: "line" as const, index, name: l.name, color: l.color, selectionId: l.selectable === false ? null : l.selectionId })),
     ];
     legendInfo.show = (seriesMode || legendEntries.length > 1) && (lg.show.value ?? true);
 
@@ -1956,18 +2342,34 @@ export function transform(
         hasHighlights: slots.some((slot) => !!slot.column.highlights),
         tooltip: {
             categoryName: categories.source?.displayName ?? "",
-            measure: tooltipColumnOf(slots[0].column),
-            extras: slots[0].tooltips.map(tooltipColumnOf),
+            ...(levelColumns.length > 1
+                ? {
+                    categoryLevels: {
+                        names: levelColumns.map((column) => column.source?.displayName ?? ""),
+                        texts: Array.from({ length: rowCount }, (_, i) => levelsAt(i)),
+                    },
+                }
+                : {}),
+            ...measureTooltipOf(slots[0]),
+            extras: [...paretoTooltipColumns, ...slots[0].tooltips.map(tooltipColumnOf)],
             ...(seriesMode
                 ? {
                     series: slots.map((slot) => ({
                         legendName: legendSource?.displayName ?? null,
                         seriesName: slot.name,
-                        measure: tooltipColumnOf(slot.column),
-                        extras: slot.tooltips.map(tooltipColumnOf),
+                        ...measureTooltipOf(slot),
+                        extras: [...paretoTooltipColumns, ...slot.tooltips.map(tooltipColumnOf)],
                     })),
                 }
                 : {}),
+        },
+        pareto: paretoInfo,
+        cumulative: {
+            available: cumulativeAvailable,
+            enabled: cumulativeEnabled,
+            toggle: cumulativeAvailable && (calc.cumulativeToggle.value ?? false),
+            levels: cumulativeLevels,
+            reset: resetDepth < 0 ? CUMULATIVE_RESET_NONE : cumulativeReset,
         },
         isEmpty: dataPoints.length === 0,
     };

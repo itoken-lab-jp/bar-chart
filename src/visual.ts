@@ -11,8 +11,21 @@ import { FormattingSettingsService } from "powerbi-visuals-utils-formattingmodel
 
 import "./../style/visual.less";
 import { App } from "./App";
-import { VisualFormattingSettingsModel } from "./settings";
-import { transform, tooltipStackOf, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint } from "./viewModel";
+import { VisualFormattingSettingsModel, CALCULATION_MODES } from "./settings";
+import {
+    VisualState,
+    EMPTY_VISUAL_STATE,
+    VISUAL_STATE_OBJECT,
+    readVisualState,
+    serializeVisualState,
+    toPersistedProperties,
+    effectiveCumulative,
+    withoutStale,
+} from "./visualState";
+
+/** 保存の応答（update）を待つ上限 (ms)。過ぎたら、保存に失敗したものとして読み戻しを受け付ける */
+const PENDING_TIMEOUT_MS = 5000;
+import { transform, savedCumulativeReset, tooltipStackOf, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint } from "./viewModel";
 import { tooltipItemsOf, toRootCoordinates } from "./tooltip";
 
 import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructorOptions;
@@ -37,6 +50,18 @@ export class Visual implements IVisual {
     private selectedIds: ISelectionId[] = [];
     /** 最後の update の内容で描き直す（選択が変わったときに使う） */
     private renderLatest: (() => void) | null = null;
+    /** 最後の update（閲覧者が累計を切り替えたときに、同じ内容で作り直す） */
+    private lastOptions: VisualUpdateOptions | null = null;
+    /** 閲覧者が触った累計の状態。ページを移ってもレポートから読み直す */
+    private visualState: VisualState = EMPTY_VISUAL_STATE;
+    /** persistProperties 直後の値。保存が返る前の古い dataView で操作を巻き戻さないための印 */
+    private pendingVisualState: string | null = null;
+    /** pendingVisualState を立てた時刻 */
+    private pendingAt = 0;
+    /** 同じ状態を何度も当て直さないための印 */
+    private lastRestoredVisualState: string | null = null;
+    /** 操作を受け付けるか（ダッシュボードのタイルに固定すると false）。false なら切り替えボタンを出さない */
+    private allowInteractions = true;
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
@@ -46,6 +71,7 @@ export class Visual implements IVisual {
         this.tooltipService = options.host.tooltipService;
         this.formattingSettingsService = new FormattingSettingsService();
         this.root = createRoot(options.element);
+        this.allowInteractions = options.host.hostCapabilities?.allowInteractions !== false;
 
         // ブックマークの適用などで、選択が外から変わったとき
         this.selectionManager.registerOnSelectCallback((ids: ISelectionId[]) => {
@@ -59,62 +85,145 @@ export class Visual implements IVisual {
         this.events.renderingStarted(options);
 
         try {
-            this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(
-                VisualFormattingSettingsModel,
-                options.dataViews?.[0]
-            );
-
-            // グラフの種類による既定（100% 積み上げのデータラベルは値がオフで詳細がオン）は、保存していない項目だけに効かせる
-            this.formattingSettings.applyChartTypeDefaults(options.dataViews?.[0]);
-            const viewModel: ViewModel = transform(options.dataViews?.[0], this.host, this.formattingSettings);
-            this.formattingSettings.applyTargets(viewModel.columnTargets, {
-                seriesMode: viewModel.seriesMode,
-                labelTargets: viewModel.labelTargets,
-                lineTargets: viewModel.lineTargets,
-            });
-            this.formattingSettings.applyCardVisibility(viewModel.lines.length > 0);
-            this.selectedIds = this.selectionManager.getSelectionIds() as ISelectionId[];
-
-            const render = () =>
-                this.root.render(
-                    React.createElement(App, {
-                        viewModel,
-                        viewport: options.viewport,
-                        settings: this.formattingSettings,
-                        selectedIds: this.selectedIds,
-                        onSelect: (id, multiSelect) => {
-                            this.selectionManager.select(id, multiSelect).then((ids) => {
-                                this.selectedIds = ids as ISelectionId[];
-                                render();
-                            });
-                        },
-                        onClearSelection: () => {
-                            if (this.selectedIds.length === 0) return;
-                            this.selectionManager.clear().then(() => {
-                                this.selectedIds = [];
-                                render();
-                            });
-                        },
-                        onContextMenu: (id, x, y) => {
-                            this.selectionManager.showContextMenu(id, { x, y });
-                        },
-                        onTooltipShow: (d, x, y) => this.showTooltip(viewModel, d, x, y, false),
-                        onTooltipMove: (d, x, y) => this.showTooltip(viewModel, d, x, y, true),
-                        onTooltipHide: () => this.tooltipService.hide({ isTouchEvent: false, immediately: false }),
-                        onLineTooltipShow: (j, i, x, y) => this.showLineTooltip(viewModel, j, i, x, y, false),
-                        onLineTooltipMove: (j, i, x, y) => this.showLineTooltip(viewModel, j, i, x, y, true),
-                        onRibbonTooltipShow: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, false),
-                        onRibbonTooltipMove: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, true),
-                    })
-                );
-            this.renderLatest = render;
-            render();
-
+            this.lastOptions = options;
+            this.restoreVisualState(options.dataViews?.[0]);
+            this.build(options);
             this.events.renderingFinished(options);
         } catch (error) {
             console.error("update failed", error);
             this.events.renderingFailed(options, String(error));
         }
+    }
+
+    /** 書式と閲覧者の操作から viewModel を作り、描く。累計は transform の中で効くので、切り替えたら作り直す */
+    private build(options: VisualUpdateOptions): void {
+        this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(
+            VisualFormattingSettingsModel,
+            options.dataViews?.[0]
+        );
+
+        // グラフの種類による既定（100% 積み上げのデータラベルは値がオフで詳細がオン）は、保存していない項目だけに効かせる
+        this.formattingSettings.applyChartTypeDefaults(options.dataViews?.[0]);
+        const calc = this.formattingSettings.calculation;
+        const baseCumulative = String(calc.mode.value?.value ?? CALCULATION_MODES.none) === CALCULATION_MODES.cumulative;
+        const authorReset = savedCumulativeReset(options.dataViews?.[0], calc);
+        // 作成者が書式を変えて古くなった閲覧者の操作は捨て、捨てた状態を保存し直す（保存が返す update では、もう捨てるものが無いので輪にならない）
+        const current = withoutStale(this.visualState, baseCumulative, authorReset);
+        if (current !== this.visualState) this.persistVisualState(current);
+        const viewModel: ViewModel = transform(options.dataViews?.[0], this.host, this.formattingSettings, {
+            cumulative: effectiveCumulative(current, baseCumulative),
+            cumulativeReset: current.cumulativeReset,
+        });
+        // 書式ペインの区切りは書式の値のまま出す（閲覧者の選んだ区切りは書式を書き換えない）
+        calc.applyCumulativeLevels(viewModel.cumulative.levels, authorReset);
+        this.formattingSettings.lines.includeCumulative.visible = viewModel.cumulative.available;
+        this.formattingSettings.applyTargets(viewModel.columnTargets, {
+            seriesMode: viewModel.seriesMode,
+            labelTargets: viewModel.labelTargets,
+            lineTargets: viewModel.lineTargets,
+        });
+        this.formattingSettings.applyCardVisibility(viewModel.lines.length > 0);
+        this.selectedIds = this.selectionManager.getSelectionIds() as ISelectionId[];
+
+        const render = () =>
+            this.root.render(
+                React.createElement(App, {
+                    viewModel,
+                    viewport: options.viewport,
+                    settings: this.formattingSettings,
+                    selectedIds: this.selectedIds,
+                    onSelect: (id, multiSelect) => {
+                        this.selectionManager.select(id, multiSelect).then((ids) => {
+                            this.selectedIds = ids as ISelectionId[];
+                            render();
+                        });
+                    },
+                    onSelectMany: (ids, multiSelect) => {
+                        if (!this.allowInteractions || ids.length === 0) return;
+                        // 同じランクをもう一度押したら外す（旧パレート図と同じ）
+                        const current = this.selectedIds;
+                        const same = !multiSelect && current.length === ids.length && ids.every((id) => current.some((c) => c.equals(id)));
+                        const action = same ? this.selectionManager.clear().then(() => []) : this.selectionManager.select(ids, multiSelect);
+                        action.then((selected) => {
+                            this.selectedIds = selected as ISelectionId[];
+                            render();
+                        });
+                    },
+                    onClearSelection: () => {
+                        if (this.selectedIds.length === 0) return;
+                        this.selectionManager.clear().then(() => {
+                            this.selectedIds = [];
+                            render();
+                        });
+                    },
+                    onContextMenu: (id, x, y) => {
+                        this.selectionManager.showContextMenu(id, { x, y });
+                    },
+                    onTooltipShow: (d, x, y) => this.showTooltip(viewModel, d, x, y, false),
+                    onTooltipMove: (d, x, y) => this.showTooltip(viewModel, d, x, y, true),
+                    onTooltipHide: () => this.tooltipService.hide({ isTouchEvent: false, immediately: false }),
+                    onLineTooltipShow: (j, i, x, y) => this.showLineTooltip(viewModel, j, i, x, y, false),
+                    onLineTooltipMove: (j, i, x, y) => this.showLineTooltip(viewModel, j, i, x, y, true),
+                    onRibbonTooltipShow: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, false),
+                    onRibbonTooltipMove: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, true),
+                    interactive: this.allowInteractions,
+                    onToggleCumulative: () =>
+                        this.changeVisualState({
+                            ...this.visualState,
+                            cumulative: !viewModel.cumulative.enabled,
+                            cumulativeBase: baseCumulative,
+                        }),
+                    onChangeCumulativeReset: (reset) =>
+                        this.changeVisualState({ ...this.visualState, cumulativeReset: reset, cumulativeResetBase: authorReset }),
+                })
+            );
+        this.renderLatest = render;
+        render();
+    }
+
+    /** 閲覧者の操作を保存して作り直す。update() からは呼ばない（保存が update を呼び、また保存する輪になる） */
+    private changeVisualState(next: VisualState): void {
+        if (!this.allowInteractions || !this.lastOptions) return;
+        this.persistVisualState(next);
+        this.build(this.lastOptions);
+    }
+
+    /** 閲覧者の操作をこのセッションに持ち、レポートに保存する */
+    private persistVisualState(next: VisualState): void {
+        this.visualState = next;
+        this.pendingVisualState = serializeVisualState(next);
+        this.pendingAt = Date.now();
+        try {
+            this.host.persistProperties({
+                merge: [{ objectName: VISUAL_STATE_OBJECT, properties: toPersistedProperties(next), selector: null }],
+            });
+        } catch (error) {
+            // 保存に失敗しても、このセッションの見た目は保つ
+            this.pendingVisualState = null;
+            console.error("累計の状態を保存できませんでした", error);
+        }
+    }
+
+    /** 保存済みの閲覧者の操作を読み戻す */
+    private restoreVisualState(dataView: powerbi.DataView | undefined): void {
+        // 保存の応答が来ないまま時間が過ぎたら、保存に失敗したものとして待つのをやめる（ブックマークなどの読み戻しを拒み続けない）
+        if (this.pendingVisualState !== null && Date.now() - this.pendingAt > PENDING_TIMEOUT_MS) this.pendingVisualState = null;
+        const persisted = readVisualState(dataView);
+        if (!persisted) {
+            // 読み戻した保存が消えた（保存の無いブックマークに切り替えたなど）なら、閲覧者の操作は無い状態に戻す。
+            // 一度も読み戻していない（保存に失敗して、このセッションにだけある操作）なら残す
+            if (this.pendingVisualState === null && this.lastRestoredVisualState !== null) {
+                this.visualState = EMPTY_VISUAL_STATE;
+                this.lastRestoredVisualState = null;
+            }
+            return;
+        }
+        // persistProperties の直後に古い dataView が来ても、押したばかりの操作を戻さない
+        if (this.pendingVisualState !== null && persisted.raw !== this.pendingVisualState) return;
+        if (this.pendingVisualState === persisted.raw) this.pendingVisualState = null;
+        if (this.lastRestoredVisualState === persisted.raw) return;
+        this.visualState = persisted.state;
+        this.lastRestoredVisualState = persisted.raw;
     }
 
     /**
@@ -127,7 +236,8 @@ export class Visual implements IVisual {
             coordinates: toRootCoordinates(clientX, clientY, this.element),
             isTouchEvent: false,
             dataItems: tooltipItemsOf(viewModel.tooltip, d.rowIndex, d.category, d.seriesIndex, tooltipStackOf(viewModel, d)),
-            identities: [d.selectionId],
+            // 「その他」は、まとめたカテゴリの ID を全部渡す（ドリルスルーやレポート ページのツールヒントの対象）
+            identities: d.selectionIds ?? [d.selectionId],
         };
         if (move) {
             this.tooltipService.move(options);

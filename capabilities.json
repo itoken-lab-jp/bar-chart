@@ -52,6 +52,117 @@
                 }
             }
         },
+        "calculation": {
+            "displayName": "累計・パレート",
+            "properties": {
+                "mode": {
+                    "displayName": "計算",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "cumulativeReset": {
+                    "displayName": "区切り",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "cumulativeToggle": {
+                    "displayName": "切り替えボタンを出す",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "boundaryAB": {
+                    "displayName": "A と B の境目 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "boundaryBC": {
+                    "displayName": "B と C の境目 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "colorByRank": {
+                    "displayName": "ランクで色分け",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "colorA": {
+                    "displayName": "A の色",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "colorB": {
+                    "displayName": "B の色",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "colorC": {
+                    "displayName": "C の色",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "ratioColor": {
+                    "displayName": "累積比の線の色",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "showThresholds": {
+                    "displayName": "境目に線を引く",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "showRankBand": {
+                    "displayName": "ランクの帯",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "labelA": {
+                    "displayName": "A の名前",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "labelB": {
+                    "displayName": "B の名前",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "labelC": {
+                    "displayName": "C の名前",
+                    "type": {
+                        "text": true
+                    }
+                }
+            }
+        },
         "columns": {
             "displayName": "棒",
             "properties": {
@@ -157,6 +268,28 @@
                     "displayName": "角丸 (px)",
                     "type": {
                         "numeric": true
+                    }
+                },
+                "otherCount": {
+                    "displayName": "上位の件数",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "otherLabel": {
+                    "displayName": "名前",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "otherFill": {
+                    "displayName": "色",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
                     }
                 }
             }
@@ -385,6 +518,12 @@
             "properties": {
                 "show": {
                     "displayName": "すべての系列に表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "includeCumulative": {
+                    "displayName": "累計に含める",
                     "type": {
                         "bool": true
                     }
@@ -1048,6 +1187,18 @@
                         "numeric": true
                     }
                 },
+                "concatenateLabels": {
+                    "displayName": "ラベルの連結",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "hierarchyStyle": {
+                    "displayName": "階層の見せ方",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "titleShow": {
                     "displayName": "タイトル",
                     "type": {
@@ -1421,6 +1572,35 @@
                     }
                 }
             }
+        },
+        "visualState": {
+            "displayName": "内部状態 (保存用)",
+            "properties": {
+                "cumulative": {
+                    "displayName": "累計 (閲覧者)",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "cumulativeBase": {
+                    "displayName": "累計 (押したときの書式)",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "cumulativeReset": {
+                    "displayName": "区切り (閲覧者)",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "cumulativeResetBase": {
+                    "displayName": "区切り (選んだときの書式)",
+                    "type": {
+                        "text": true
+                    }
+                }
+            }
         }
     },
     "dataViewMappings": [
@@ -1492,6 +1672,11 @@
             }
         }
     ],
+    "drilldown": {
+        "roles": [
+            "category"
+        ]
+    },
     "tooltips": {
         "supportedTypes": {
             "default": true,

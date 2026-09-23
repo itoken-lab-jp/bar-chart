@@ -99,7 +99,7 @@ export class AutoNumUpDown extends formattingSettings.NumUpDown {
 
 /**
  * グラフの種類。標準では別々のビジュアルだが、barChart は書式ペインで切り替える。
- * ribbon は 1.18 までの保存値だけ（リボンは種類ではなく「リボン」カードの見せ方にした、#108）
+ * ribbon は 1.18 までの保存値だけ（リボンは種類ではなく「リボン」カードの見せ方にした）
  */
 export const CHART_TYPES = {
     clustered: "clustered",
@@ -151,7 +151,7 @@ class TargetItem extends FormattingSettingsCard {
 }
 
 /**
- * グラフの種類と向き。いちばん最初に選ぶものなので、書式ペインのいちばん上のカードにする（#100）。
+ * グラフの種類と向き。いちばん最初に選ぶものなので、書式ペインのいちばん上のカードにする。
  * 1.14 までは「列」（いまの「棒」）カードにあり、保存先も columns だった。新しいカードに保存が無いレポートは、
  * 古い保存を読んで同じ種類で開く（VisualFormattingSettingsModel.applyChartTypeDefaults）
  */
@@ -176,6 +176,153 @@ export class ChartCardSettings extends FormattingSettingsCard {
     });
 
     slices = [this.chartType, this.orientation];
+}
+
+/** 棒の値の計算。なし（素の値）・累計・パレート */
+export const CALCULATION_MODES = {
+    none: "none",
+    cumulative: "cumulative",
+    pareto: "pareto",
+} as const;
+
+export const CALCULATION_ITEMS: powerbi.IEnumMember[] = [
+    { value: CALCULATION_MODES.none, displayName: "なし" },
+    { value: CALCULATION_MODES.cumulative, displayName: "累計" },
+    { value: CALCULATION_MODES.pareto, displayName: "パレート" },
+];
+
+/** 累計を 0 に戻さない（区切りの選択肢の先頭）。ほかの選択肢は階層のレベルの queryName */
+export const CUMULATIVE_RESET_NONE = "none";
+
+const CUMULATIVE_RESET_NONE_ITEM: powerbi.IEnumMember = { value: CUMULATIVE_RESET_NONE, displayName: "区切らない" };
+
+/**
+ * 累計・パレート。棒の値を並んだ順に足していく。区切り（階層のレベル）が変わったところで 0 に戻す。
+ * 「切り替えボタンを出す」をオンにすると、閲覧者がグラフの上のボタンで累計を切り替えられる（押した状態はレポートに保存する）
+ */
+export class CalculationCardSettings extends FormattingSettingsCard {
+    name = "calculation";
+    displayName = "累計・パレート";
+
+    mode = new formattingSettings.ItemDropdown({
+        name: "mode",
+        displayName: "計算",
+        items: CALCULATION_ITEMS,
+        value: CALCULATION_ITEMS[0],
+    });
+
+    /** 選択肢はデータ次第（X 軸の階層のレベル）なので、update のたびに applyCumulativeLevels で組み直す */
+    cumulativeReset = new formattingSettings.ItemDropdown({
+        name: "cumulativeReset",
+        displayName: "区切り",
+        items: [CUMULATIVE_RESET_NONE_ITEM],
+        value: CUMULATIVE_RESET_NONE_ITEM,
+    });
+
+    cumulativeToggle = new formattingSettings.ToggleSwitch({
+        name: "cumulativeToggle",
+        displayName: "切り替えボタンを出す",
+        value: false,
+    });
+
+    // --- パレート ---
+    // options は付けない（素の numeric に付けると書式ペインが空になった記録がある）。範囲は viewModel でクランプする
+    /** 累積比がここまでを A にする（「上位 2 割で 8 割」の 8 割）。境目ちょうどは A に入れる */
+    boundaryAB = new formattingSettings.NumUpDown({
+        name: "boundaryAB",
+        displayName: "A と B の境目 (%)",
+        value: 80,
+    });
+
+    boundaryBC = new formattingSettings.NumUpDown({
+        name: "boundaryBC",
+        displayName: "B と C の境目 (%)",
+        value: 95,
+    });
+
+    /** 棒をランクの色で塗る。凡例（系列）があるときは系列の色のまま */
+    colorByRank = new formattingSettings.ToggleSwitch({
+        name: "colorByRank",
+        displayName: "ランクで色分け",
+        value: true,
+    });
+
+    colorA = new formattingSettings.ColorPicker({
+        name: "colorA",
+        displayName: "A の色",
+        value: { value: "#118DFF" },
+    });
+
+    colorB = new formattingSettings.ColorPicker({
+        name: "colorB",
+        displayName: "B の色",
+        value: { value: "#74B9FF" },
+    });
+
+    colorC = new formattingSettings.ColorPicker({
+        name: "colorC",
+        displayName: "C の色",
+        value: { value: "#C4E1FF" },
+    });
+
+    ratioColor = new formattingSettings.ColorPicker({
+        name: "ratioColor",
+        displayName: "累積比の線の色",
+        value: { value: "#E66C37" },
+    });
+
+    /** 累積比の軸に、境目の高さの破線を引く */
+    showThresholds = new formattingSettings.ToggleSwitch({
+        name: "showThresholds",
+        displayName: "境目に線を引く",
+        value: true,
+    });
+
+    /** X 軸の下に A・B・C の帯を出す。帯を押すと、そのランクの棒をまとめて選ぶ */
+    showRankBand = new formattingSettings.ToggleSwitch({
+        name: "showRankBand",
+        displayName: "ランクの帯",
+        value: true,
+    });
+
+    labelA = new formattingSettings.TextInput({ name: "labelA", displayName: "A の名前", value: "A", placeholder: "A" });
+    labelB = new formattingSettings.TextInput({ name: "labelB", displayName: "B の名前", value: "B", placeholder: "B" });
+    labelC = new formattingSettings.TextInput({ name: "labelC", displayName: "C の名前", value: "C", placeholder: "C" });
+
+    slices = [
+        this.mode,
+        this.cumulativeReset,
+        this.cumulativeToggle,
+        this.boundaryAB,
+        this.boundaryBC,
+        this.colorByRank,
+        this.colorA,
+        this.colorB,
+        this.colorC,
+        this.ratioColor,
+        this.showThresholds,
+        this.showRankBand,
+        this.labelA,
+        this.labelB,
+        this.labelC,
+    ];
+
+    /** 区切りの選択肢を階層のレベル（いちばん下を除く）で組み直し、累計のときだけ区切りとボタンを出す */
+    applyCumulativeLevels(levels: powerbi.IEnumMember[], current: string): void {
+        const items = [CUMULATIVE_RESET_NONE_ITEM, ...levels];
+        this.cumulativeReset.items = items;
+        this.cumulativeReset.value = items.find((item) => item.value === current) ?? items[0];
+        const mode = String(this.mode.value?.value ?? CALCULATION_MODES.none);
+        const cumulative = mode === CALCULATION_MODES.cumulative;
+        this.cumulativeReset.visible = cumulative && levels.length > 0;
+        this.cumulativeToggle.visible = cumulative;
+        // パレートの項目はパレートのときだけ。色はランクで色分けするときだけ
+        const pareto = mode === CALCULATION_MODES.pareto;
+        [this.boundaryAB, this.boundaryBC, this.colorByRank, this.ratioColor, this.showThresholds, this.showRankBand].forEach((s) => (s.visible = pareto));
+        // 色は棒の色分けにもランクの帯にも使う。名前は帯にもツールヒントにも使うので、パレートならいつも出す
+        [this.colorA, this.colorB, this.colorC].forEach((s) => (s.visible = pareto && ((this.colorByRank.value ?? true) || (this.showRankBand.value ?? true))));
+        [this.labelA, this.labelB, this.labelC].forEach((s) => (s.visible = pareto));
+    }
 }
 
 export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
@@ -319,7 +466,38 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
         ],
     });
 
-    groups = [this.targetGroup, this.layoutGroup];
+    // --- その他にまとめる ---
+    /**
+     * 値の大きい順に上位の件数だけ棒を出し、残りを 1 本の「その他」にまとめて最後に置く。0 ならまとめない。
+     * X 軸の階層を展開しているときは使わない。options は付けない（範囲は viewModel でクランプする）
+     */
+    otherCount = new formattingSettings.NumUpDown({
+        name: "otherCount",
+        displayName: "上位の件数",
+        value: 0,
+    });
+
+    otherLabel = new formattingSettings.TextInput({
+        name: "otherLabel",
+        displayName: "名前",
+        value: "その他",
+        placeholder: "その他",
+    });
+
+    /** 系列が 1 本のときの「その他」の棒の色（系列があれば系列の色） */
+    otherFill = new formattingSettings.ColorPicker({
+        name: "otherFill",
+        displayName: "色",
+        value: { value: "#A0A0A0" },
+    });
+
+    otherGroup = new FormattingSettingsGroup({
+        name: "columnsOther",
+        displayName: "その他にまとめる",
+        slices: [this.otherCount, this.otherLabel, this.otherFill],
+    });
+
+    groups = [this.targetGroup, this.layoutGroup, this.otherGroup];
 
     /**
      * 「設定の適用先」に対象を並べる。系列が 1 本ならカテゴリ、複数なら系列が対象になる
@@ -884,7 +1062,7 @@ export class TotalLabelsCardSettings extends FormattingSettingsCompositeCard {
         value: { value: "#605E5C" },
     });
 
-    /** 「自動」は Y 軸の表示単位に従う。選ぶと、その単位で割って語を付ける（#91） */
+    /** 「自動」は Y 軸の表示単位に従う。選ぶと、その単位で割って語を付ける */
     unitType = new formattingSettings.ItemDropdown({
         name: "unitType",
         displayName: "表示単位",
@@ -983,7 +1161,7 @@ export const STEP_POSITION_ITEMS: powerbi.IEnumMember[] = [
     { value: "after", displayName: "次の値より後" },
 ];
 
-/** 段のつなぎを出さないステップの、値ごとの線の長さ（標準に無い項目、#122） */
+/** 段のつなぎを出さないステップの、値ごとの線の長さ（標準に無い項目） */
 export const STEP_WIDTHS = {
     /** カテゴリの間隔いっぱい（隣のカテゴリとのすき間の真ん中から真ん中まで）。1.21 までと同じ */
     step: "step",
@@ -1021,6 +1199,17 @@ export const TITLE_STYLE_ITEMS: powerbi.IEnumMember[] = [
     { value: TITLE_STYLES.showTitleOnly, displayName: "タイトルのみを表示" },
     { value: TITLE_STYLES.showUnitOnly, displayName: "単位のみを表示" },
     { value: TITLE_STYLES.showBoth, displayName: "両方を表示" },
+];
+
+/** 階層の上のレベルの見せ方。区切り線は標準と同じ、囲みは標準に無い見せ方 */
+export const HIERARCHY_STYLES = {
+    lines: "lines",
+    boxed: "boxed",
+} as const;
+
+export const HIERARCHY_STYLE_ITEMS: powerbi.IEnumMember[] = [
+    { value: HIERARCHY_STYLES.lines, displayName: "区切り線" },
+    { value: HIERARCHY_STYLES.boxed, displayName: "囲み" },
 ];
 
 export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
@@ -1076,8 +1265,26 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
         value: 25,
     });
 
-    // 「ラベルの連結」は階層（複数フィールド）の軸用、タイトルの「スタイル」は表示単位のある値軸用。
-    // このビジュアルのX軸はカテゴリ1列だけで意味を持たないため置かない
+    /**
+     * 階層を全部展開したときのラベルの見せ方。既定（オフ）は標準と同じく、いちばん下のレベルの下に
+     * 上のレベルを段に重ねる。オンなら「FY26 H1 Q1」のように 1 行につなぐ
+     */
+    concatenateLabels = new formattingSettings.ToggleSwitch({
+        name: "concatenateLabels",
+        displayName: "ラベルの連結",
+        value: false,
+    });
+
+    /**
+     * 段に重ねた上のレベルの見せ方。区切り線（既定）は標準と同じく点線で区切る。
+     * 囲みは区切りごとに角の丸い淡い枠で囲む（標準に無い）
+     */
+    hierarchyStyle = new formattingSettings.ItemDropdown({
+        name: "hierarchyStyle",
+        displayName: "階層の見せ方",
+        items: HIERARCHY_STYLE_ITEMS,
+        value: HIERARCHY_STYLE_ITEMS[0],
+    });
 
     // --- タイトルグループ ---
     titleShow = new formattingSettings.ToggleSwitch({
@@ -1129,7 +1336,7 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
         value: { value: "#252423" },
     });
 
-    /** 標準の X 軸と同じ項目。カテゴリの軸には単位が無いので、どれを選んでもタイトルのまま（#91） */
+    /** 標準の X 軸と同じ項目。カテゴリの軸には単位が無いので、どれを選んでもタイトルのまま */
     titleStyle = new formattingSettings.ItemDropdown({
         name: "titleStyle",
         displayName: "スタイル",
@@ -1152,6 +1359,8 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
             this.font,
             this.labelColor,
             this.maxHeight,
+            this.concatenateLabels,
+            this.hierarchyStyle,
         ],
     });
 
@@ -1654,7 +1863,7 @@ export class ValueAxis2CardSettings extends FormattingSettingsCompositeCard {
         value: { value: "#605E5C" },
     });
 
-    // --- 範囲（標準の第 2 Y 軸と同じ項目、#91） ---
+    // --- 範囲（標準の第 2 Y 軸と同じ項目） ---
     logarithmic = new formattingSettings.ToggleSwitch({
         name: "logarithmic",
         displayName: "対数目盛り",
@@ -1725,6 +1934,8 @@ export interface LineTarget {
     areaShow: boolean;
     /** 線を出すか（線の「このシリーズに表示」） */
     lineShow: boolean;
+    /** 棒を累計にしているとき、この線も累計にするか */
+    includeCumulative: boolean;
 }
 
 /** 線の形の値（「すべて」と線ごとに同じ項目） */
@@ -1826,12 +2037,22 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
 
     /**
      * 線を出すか（標準の「すべての系列に表示」）。既定はオンで、横棒では保存していなければオフ
-     * （横棒のカテゴリは順番に意味の無いものが多いので、線でつながずマーカーだけ出す、#103）
+     * （横棒のカテゴリは順番に意味の無いものが多いので、線でつながずマーカーだけ出す）
      */
     show = new formattingSettings.ToggleSwitch({
         name: "show",
         displayName: "すべての系列に表示",
         value: true,
+    });
+
+    /**
+     * 棒を累計にしているとき、線も累計にするか（既定はオフ。累計と実績を並べて見ることが多いため）。
+     * 棒が累計のときだけ出す（applyCardVisibility）
+     */
+    includeCumulative = new formattingSettings.ToggleSwitch({
+        name: "includeCumulative",
+        displayName: "累計に含める",
+        value: false,
     });
 
     /** 線ごとの色の実体。「すべて」には出さない（色は線ごとにテーマの色を割り当てる） */
@@ -1895,7 +2116,7 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
         value: LINE_SHAPE_DEFAULTS.stepConnect,
     });
 
-    /** 段のつなぎを出さないときの線の長さ（#122）。「棒の幅」なら棒ごとの目標の印になる */
+    /** 段のつなぎを出さないときの線の長さ。「棒の幅」なら棒ごとの目標の印になる */
     stepWidth = new formattingSettings.ItemDropdown({
         name: "stepWidth",
         displayName: "段の幅",
@@ -1926,6 +2147,7 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
         this.stepWidth.visible = this.stepPosition.visible && !values.stepConnect;
         return new LineTargetItem("すべて", [
             this.show,
+            this.includeCumulative,
             this.lineStyle,
             this.lineJoin,
             this.width,
@@ -1964,6 +2186,16 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
                             value: target.lineShow,
                             selector: target.selector,
                         }),
+                        ...(this.includeCumulative.visible
+                            ? [
+                                new formattingSettings.ToggleSwitch({
+                                    name: "includeCumulative",
+                                    displayName: "累計に含める",
+                                    value: target.includeCumulative,
+                                    selector: target.selector,
+                                }),
+                            ]
+                            : []),
                         new formattingSettings.ColorPicker({
                             name: "fill",
                             displayName: "カラー",
@@ -1994,7 +2226,7 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
 
 /**
  * リボン。積み上げ・100% 積み上げで、同じ系列を隣のカテゴリの棒と帯でつなぐ（標準の積み上げ縦棒の「リボン」カードと同じく、
- * 見出しのトグルで出す、#108）。「積む順」を値の大きい順にすると、標準のリボン グラフと同じく順位の入れ替わりが帯で見える。
+ * 見出しのトグルで出す）。「積む順」を値の大きい順にすると、標準のリボン グラフと同じく順位の入れ替わりが帯で見える。
  * 標準は系列ごとにも変えられるが、ここでは「すべて」だけ（系列ごとは見送り）
  */
 export class RibbonsCardSettings extends FormattingSettingsCompositeCard {
@@ -2298,7 +2530,7 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
         value: LINE_STYLE_ITEMS[0], // 点線
     });
 
-    /** 点線・破線の模様を線の幅に合わせて伸び縮みさせる（標準の「幅で拡大縮小」、#91） */
+    /** 点線・破線の模様を線の幅に合わせて伸び縮みさせる（標準の「幅で拡大縮小」） */
     horizontalScaleWithWidth = new formattingSettings.ToggleSwitch({
         name: "horizontalScaleWithWidth",
         displayName: "幅で拡大縮小",
@@ -2380,6 +2612,7 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
 
 export class VisualFormattingSettingsModel extends FormattingSettingsModel {
     chart = new ChartCardSettings();
+    calculation = new CalculationCardSettings();
     categoryAxis = new CategoryAxisCardSettings();
     valueAxis = new ValueAxisCardSettings();
     valueAxis2 = new ValueAxis2CardSettings();
@@ -2397,6 +2630,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
     // リボンは標準のリボン グラフと同じく棒のあと
     cards = [
         this.chart,
+        this.calculation,
         this.categoryAxis,
         this.valueAxis,
         this.valueAxis2,
@@ -2445,7 +2679,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
     }
 
     /**
-     * グラフの種類による既定を、レポートに保存していない項目に当てる（#92）。
+     * グラフの種類による既定を、レポートに保存していない項目に当てる。
      * populateFormattingSettingsModel のあと、transform の前に呼ぶ
      */
     applyChartTypeDefaults(dataView: powerbi.DataView | undefined): void {
@@ -2460,7 +2694,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         };
         legacy("chartType", this.chart.chartType);
         legacy("orientation", this.chart.orientation);
-        // 1.18 までは種類に「リボン」があった。積み上げ＋リボン オン＋値の大きい順で開く（見た目は同じ、#108）
+        // 1.18 までは種類に「リボン」があった。積み上げ＋リボン オン＋値の大きい順で開く（見た目は同じ）
         const savedType = objects?.chart?.chartType ?? objects?.columns?.chartType;
         if (String(savedType) === CHART_TYPES.ribbon) {
             this.chart.chartType.value = itemOf(CHART_TYPE_ITEMS, CHART_TYPES.stacked);
@@ -2468,7 +2702,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
             if (objects?.ribbons?.order === undefined) this.ribbons.order.value = itemOf(RIBBON_ORDER_ITEMS, RIBBON_ORDERS.value);
         }
 
-        // 横棒では、線はつながずマーカーだけ出すのを既定にする（保存していなければ、#103）
+        // 横棒では、線はつながずマーカーだけ出すのを既定にする（保存していなければ）
         const horizontal = String(this.chart.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
         if (objects?.lines?.show === undefined) this.lines.show.value = !horizontal;
         if (objects?.markers?.show === undefined) this.markers.show.value = horizontal;
@@ -2480,16 +2714,16 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
     }
 
     /**
-     * グラフの種類とデータに関係ないカードを隠す（標準はその種類で使うカードだけを出す、#90）。
+     * グラフの種類とデータに関係ないカードを隠す（標準はその種類で使うカードだけを出す）。
      * 隠すのは書式ペインの表示だけで、保存済みの値は残る。hasLines は「折れ線の値」にフィールドがあるとき true
      */
     applyCardVisibility(hasLines: boolean): void {
         const chartType = String(this.chart.chartType.value?.value ?? CHART_TYPES.clustered);
         const horizontal = String(this.chart.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
-        // 折れ線の値は、どの種類・向きでも描く（横棒は既定でマーカーだけ、#103）
+        // 折れ線の値は、どの種類・向きでも描く（横棒は既定でマーカーだけ）
         const linesDrawn = hasLines;
         this.totalLabels.visible = chartType === CHART_TYPES.stacked;
-        // リボンは積み上げ・100% 積み上げで出せる（縦棒・横棒とも。集合は棒が横に並ぶので帯でつながない、#108）
+        // リボンは積み上げ・100% 積み上げで出せる（縦棒・横棒とも。集合は棒が横に並ぶので帯でつながない）
         this.ribbons.visible = chartType === CHART_TYPES.stacked || chartType === CHART_TYPES.stacked100;
         this.valueAxis2.visible = linesDrawn;
         this.lines.visible = linesDrawn;
