@@ -5,7 +5,7 @@ import powerbi from "powerbi-visuals-api";
 import IViewport = powerbi.IViewport;
 import ISelectionId = powerbi.visuals.ISelectionId;
 
-import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings, ParetoRank } from "./viewModel";
+import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings, ParetoRank, Tick } from "./viewModel";
 import { VisualFormattingSettingsModel, STEP_WIDTHS } from "./settings";
 import { contrastingText, placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
 import { clusterLayout, spanOf, levelRunsOf } from "./layout";
@@ -106,8 +106,32 @@ function labelTextStyle(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoin
 }
 
 /**
+ * 値の軸の目盛りの本数の上限。標準（powerbi-visuals-utils-chartutils の getRecommendedNumberOfTicksForYAxis・ForXAxis）と同じ。
+ * 縦の軸は高さ、横の軸は幅で決める
+ */
+/**
+ * 目盛りを、数字が重ならない本数まで減らす（「目盛りの本数 (目安)」を多く入れたときなど）。
+ * length は描く範囲の長さ（px）、need は隣り合う目盛りの間に要る長さ（縦の軸は文字の行の高さ、横の軸はいちばん長い数字＋余白）
+ */
+export function fitTicks(ticksFor: (count: number) => Tick[], target: number, length: number, need: (ticks: Tick[]) => number): Tick[] {
+    for (let count = target; count > 2; count--) {
+        const ticks = ticksFor(count);
+        if (ticks.length < 2) return ticks;
+        const gap = Math.min(...ticks.slice(1).map((tick, i) => Math.abs(tick.ratio - ticks[i].ratio))) * length;
+        if (gap >= need(ticks)) return ticks;
+    }
+    return ticksFor(2);
+}
+
+export function recommendedTickCount(length: number, axis: "vertical" | "horizontal"): number {
+    const [small, medium] = axis === "vertical" ? [150, 300] : [300, 500];
+    return length < small ? 3 : length < medium ? 5 : 8;
+}
+
+/**
  * グリッド線の線種。標準に合わせ、点線は細かい点（長さ 1 の線に丸い端）、破線は 4px 刻み。
- * 点線は端を丸めるので crispEdges を掛けない（点がつぶれる）
+ * crispEdges は掛けない（標準・ウォーターフォールと同じ）。画面の拡大率が整数でない（150% など）と、1px の線が
+ * 物理画素 1.5 個ぶんになり、crispEdges では線ごとに 1 個か 2 個に丸められて太さがそろわない（1.29.4.0 まで）
  */
 export function gridLineStroke(style: string, width = 1, scaleWithWidth = false): {
     dashArray?: string;
@@ -120,8 +144,8 @@ export function gridLineStroke(style: string, width = 1, scaleWithWidth = false)
     if (style === "dotted") {
         return { dashArray: scaleWithWidth ? `${w} ${2 * w}` : "1 3", lineCap: "round", shapeRendering: "auto" };
     }
-    if (style === "dashed") return { dashArray: scaleWithWidth ? `${3 * w} ${3 * w}` : "4 4", shapeRendering: "crispEdges" };
-    return { shapeRendering: "crispEdges" };
+    if (style === "dashed") return { dashArray: scaleWithWidth ? `${3 * w} ${3 * w}` : "4 4", shapeRendering: "auto" };
+    return { shapeRendering: "auto" };
 }
 
 /** 棒 (または棒のハイライト部分) の path。r > 0 なら値の向きの端だけ角を丸める */
@@ -352,6 +376,58 @@ export const App: React.FC<AppProps> = ({
                         {text}
                     </text>
                 )}
+            </g>
+        );
+    };
+
+    /**
+     * 階層の区切り（start〜end のカテゴリ）の棒の ID。系列があれば系列ごとの棒の ID（カテゴリ＋系列）、「その他」はまとめたカテゴリ全部。
+     * カテゴリだけの ID にすると、系列があるとき棒の ID と一致せず選んだ棒が薄くなる（棒と同じ ID で選ぶ）
+     */
+    const levelIdsOf = (run: { start: number; end: number }) =>
+        viewModel.categoryGroups.slice(run.start, run.end + 1).flatMap((g) => g.points.flatMap((d) => d.selectionIds ?? [d.selectionId]));
+    /** 区切りの棒が全部選ばれているか（区切りを押したときも、棒を Ctrl で全部選んだときも） */
+    const levelPicked = (run: { start: number; end: number }) => {
+        const points = viewModel.categoryGroups.slice(run.start, run.end + 1).flatMap((g) => g.points);
+        return selectedIds.length > 0 && points.length > 0 && points.every(isPicked);
+    };
+
+    /**
+     * 階層の区切りの当たり。押すか Enter・Space で、その区切りのカテゴリをまとめて選ぶ（Ctrl で足す）。
+     * 見た目は変えない（囲みの濃さは選んだときに少し上げる）。名前はツールヒントに出す。
+     * 読み上げの名前は上のレベルからの道筋（「FY26 H1」）。同じ名前の区切り（別の年の H1）を見分けられるように
+     */
+    const renderLevelHit = (
+        run: { start: number; end: number; text: string },
+        level: number,
+        box: { x: number; y: number; width: number; height: number },
+        key: string
+    ) => {
+        const select = (multi: boolean) => onSelectMany?.(levelIdsOf(run), multi);
+        const path = viewModel.categoryGroups[run.start]?.levels.slice(0, level + 1).join(" ") || run.text;
+        return (
+            <g
+                key={key}
+                className="level-hit"
+                role="button"
+                tabIndex={0}
+                aria-label={path}
+                aria-pressed={levelPicked(run)}
+                style={{ cursor: "pointer" }}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    select(e.ctrlKey || e.metaKey);
+                }}
+                onKeyDown={(e) => {
+                    if (e.key !== "Enter" && e.key !== " ") return;
+                    e.preventDefault();
+                    e.stopPropagation();
+                    // 押しっぱなしのキーの繰り返しでは選び直さない（選ぶ・外すが繰り返される）
+                    if (!e.repeat) select(e.ctrlKey || e.metaKey);
+                }}
+            >
+                <title>{path}</title>
+                <rect x={box.x} y={box.y} width={Math.max(0, box.width)} height={Math.max(0, box.height)} fill="transparent" />
             </g>
         );
     };
@@ -592,7 +668,8 @@ export const App: React.FC<AppProps> = ({
         // Y軸目盛ラベルの文字数
         let maxTickChars = 2;
         if (valAxis.show) {
-            for (const t of viewModel.ticks) {
+            // 目盛りの本数は描く範囲の高さで決まる（下の valueTicks）。いちばん細かい 8 本の数字の幅も見積もりに入れる
+            for (const t of [...viewModel.ticks, ...viewModel.ticksFor(Math.max(8, valAxis.tickCount))]) {
                 if (t.label.length > maxTickChars) {
                     maxTickChars = t.label.length;
                 }
@@ -621,7 +698,7 @@ export const App: React.FC<AppProps> = ({
         const axis2On = axis2.show && viewModel.lines.length > 0;
         const axis2TickFontPx = axis2.fontSize * PT_TO_PX;
         const axis2TickWidth = axis2On && axis2.valueShow
-            ? Math.max(14, Math.max(2, ...axis2.ticks.map((t) => t.label.length)) * axis2TickFontPx * 0.55)
+            ? Math.max(14, Math.max(2, ...[...axis2.ticks, ...axis2.ticksFor(Math.max(8, valAxis.tickCount))].map((t) => t.label.length)) * axis2TickFontPx * 0.55)
             : 0;
         const axis2TitleFontPx = axis2.titleFontSize * PT_TO_PX;
         const hasAxis2Title = axis2On && axis2.titleShow && Boolean(axis2.titleText);
@@ -647,6 +724,13 @@ export const App: React.FC<AppProps> = ({
             : Math.max(24, axis2Width + rightPadding);
         const marginTop = badgeText || axis2BadgeText ? 36 : 22;
 
+        // X軸カテゴリラベルの幅（実測）と回転の判定
+        const catFontSizePx = catAxis.fontSize * PT_TO_PX;
+        const catFont: FontSpec = { family: catAxis.fontFamily, size: catFontSizePx, bold: catAxis.bold, italic: catAxis.italic, underline: catAxis.underline };
+        // 階層を段に重ねるときは、棒のすぐ下にいちばん下のレベルだけを出し、上のレベルはその下の段に出す
+        const stackedLevels = catAxis.show && catAxis.levelCount > 1 && !catAxis.concatenateLabels;
+        const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.category);
+
         // カテゴリ最小幅と横スクロール判定
         const viewWidth = Math.max(10, width - marginLeft - marginRight);
         const groups = viewModel.categoryGroups;
@@ -657,6 +741,23 @@ export const App: React.FC<AppProps> = ({
         const scrolls = minCatWidth > 0 && neededWidth > viewWidth + 1;
         const SCROLLBAR_HEIGHT = scrolls ? 12 : 0;
 
+        // X軸タイトル高さ (タイトル領域は高さ最大値の判定外で独立確保し、重なりを防止)
+        const hasCatTitle = catAxis.titleShow && Boolean(catAxis.titleText);
+        const catTitleFontSizePx = catAxis.titleFontSize * PT_TO_PX;
+        const catTitleHeight = hasCatTitle ? catTitleFontSizePx + 10 : 0;
+        // パレートのランクの帯。カテゴリのラベル（と階層の段）の下に 1 段取る
+        const pareto = viewModel.pareto;
+        const rankBandOn = pareto.enabled && pareto.showRankBand && catAxis.show;
+        const rankBandHeight = rankBandOn ? catFontSizePx + 12 : 0;
+        // 名前の欄（名前と階層の段）に使える高さ。上限を大きくしても（標準は 50% まで、自作は 100% まで入る）、描く範囲を
+        // 押しつぶして名前がビジュアルの下へはみ出さないよう、描く範囲に高さの 4 分の 1 は残す（2026-09-24。1.29 までは 100% で棒がつぶれ、名前の頭が切れた）
+        const labelRoom = Math.max(0, height * 0.75 - marginTop - catTitleHeight - rankBandHeight - SCROLLBAR_HEIGHT - 6);
+        // 名前の縦の広がりの上限 (高さの最大値 % はここだけに効く)
+        // maxHeight は 0〜100% (既定 25%)。標準と同じく、凡例を含むビジュアル全体の高さに対する割合。
+        // 斜めのラベルでは、割合はラベルの縦の広がりに効き、棒との間隔と文字の太さの半分は別に足す
+        // （Desktop で、タイトルありの標準は 8 文字、タイトルなしは 9 文字まで出した。1.13 までは 1 文字早かった）
+        const labelExtentMax = Math.max(16, viewport.height * (catAxis.maxHeight / 100));
+
         const plotWidth = scrolls ? neededWidth : viewWidth;
         const padRatio = Math.max(0, Math.min(0.5, columnsSettings.categorySpacing / 100));
         // 外側のパディング: 最初の棒の前と最後の棒の後ろの余白。カテゴリ 1 つ分の幅
@@ -665,9 +766,32 @@ export const App: React.FC<AppProps> = ({
         const outerRatio = columnsSettings.outerPadding === null
             ? padRatio / 2
             : Math.max(0, Math.min(1, columnsSettings.outerPadding / 100));
-        const step = plotWidth / ((count || 1) - padRatio + 2 * outerRatio);
+        const slots = (count || 1) - padRatio + 2 * outerRatio;
+        // 斜めの名前は棒の中心から左下へ伸びるので、左の端で「…」に省かれないよう、はみ出す分だけ棒の並びの前を空ける
+        // （ウォーターフォールの先頭の余白と同じ考え方。2026-09-24。スクロールするとき・縦に立てるときは今までどおり）
+        const leadIn = (() => {
+            if (!catAxis.show || stackedLevels || scrolls || !count) return 0;
+            const step0 = plotWidth / slots;
+            const widths = groups.map((g) => measureTextWidth(labelOf(g), catFont));
+            if (!(Math.max(...widths) > step0 * 0.92) || step0 < catFontSizePx * 1.45) return 0;
+            // 名前の長さの上限（下の maxAllowedLabelLen と同じ見積もり。名前の欄に使える高さでも頭を打つ）
+            const maxLen = Math.min(labelExtentMax, Math.max(0, labelRoom - ROTATED_LABEL_GAP - catFontSizePx * 0.5)) / Math.SQRT1_2;
+            let need = 0;
+            widths.forEach((w, i) => {
+                // renderCategoryLabel の左端の判定（(cx − 左の余白) / sin45 までの長さなら省かない）を満たす余白。
+                // 余白を足すと帯が狭まり中心も動くので、cx = marginLeft + leadIn + (plotWidth − leadIn) × k / slots として解く（1px の余裕）
+                const k = (outerRatio + (1 - padRatio) / 2 + i) / slots;
+                const deficit = CATEGORY_LABEL_LEFT_SAFE_MARGIN + 1 + Math.min(w, maxLen) * Math.SQRT1_2 - marginLeft - plotWidth * k;
+                if (deficit > 0 && k < 1) need = Math.max(need, deficit / (1 - k));
+            });
+            // 余白を足しても、帯がカテゴリの最小幅と「斜めのまま」の幅（文字の 1.45 倍）を下回らない所で止める
+            // （下回ると最小幅を割る・縦に立つのに余白だけ残る）。極端に長い名前は、ビジュアルの幅の 30% までで省く
+            const keepStep = Math.max(minCatWidth, catFontSizePx * 1.45);
+            return Math.max(0, Math.min(need, plotWidth * 0.3, plotWidth - keepStep * slots));
+        })();
+        const step = (plotWidth - leadIn) / slots;
         /** i 番目のカテゴリの中心 (プロット左端からの x) */
-        const centerOf = (i: number) => step * (outerRatio + (1 - padRatio) / 2 + i);
+        const centerOf = (i: number) => leadIn + step * (outerRatio + (1 - padRatio) / 2 + i);
         // カテゴリ 1 つぶんの帯に、系列の棒を並べる（系列 1 本なら帯いっぱいの 1 本）。
         // 積み上げは系列を 1 本の棒に積むので、帯いっぱいの 1 本ぶんの幅
         const stacked = viewModel.chartType !== "clustered";
@@ -685,12 +809,6 @@ export const App: React.FC<AppProps> = ({
                 ? "insideCenter"
                 : viewModel.dataLabels.position;
 
-        // X軸カテゴリラベルの幅（実測）と回転の判定
-        const catFontSizePx = catAxis.fontSize * PT_TO_PX;
-        const catFont: FontSpec = { family: catAxis.fontFamily, size: catFontSizePx, bold: catAxis.bold, italic: catAxis.italic, underline: catAxis.underline };
-        // 階層を段に重ねるときは、棒のすぐ下にいちばん下のレベルだけを出し、上のレベルはその下の段に出す
-        const stackedLevels = catAxis.show && catAxis.levelCount > 1 && !catAxis.concatenateLabels;
-        const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.category);
         const categoryLabelStyle: React.CSSProperties = {
             fontSize: `${catAxis.fontSize}pt`,
             fontFamily: catAxis.fontFamily,
@@ -706,7 +824,8 @@ export const App: React.FC<AppProps> = ({
             strokeOpacity: 0.35,
             strokeWidth: 1,
             strokeDasharray: "1 2",
-            shapeRendering: "crispEdges",
+            // グリッド線と同じく crispEdges を掛けない（拡大率が整数でない画面で太さがそろわない）
+            shapeRendering: "auto",
         };
         // 囲みの枠。ラベルの色をごく淡く敷き、同じ色の細い線で縁取る
         const levelBoxStyle: React.CSSProperties = {
@@ -720,56 +839,60 @@ export const App: React.FC<AppProps> = ({
 
         // バンド幅に収まらなければ斜め -45 度に回転
         const shouldRotateCat = catAxis.show && widestCat > step * 0.92;
-        // 階層を段に重ねるときは、斜めではなく縦に立てる（標準と同じ。斜めだと左隣の区切りの線をまたぐ）
-        const uprightCat = shouldRotateCat && stackedLevels;
+        // 斜めの名前どうしの間（帯の幅 × sin45）が文字の高さより狭いと重なる（帯の幅が文字の 1.45 倍を切るとき）。
+        // そのときは標準と同じく、斜めではなく縦に立てて全部の名前を出す（2026-09-24 ユーザー決定。1.29 までは斜めのまま重なった）
+        const crowdedCat = shouldRotateCat && step < catFontSizePx * 1.45;
+        // 階層を段に重ねるときも縦に立てる（標準と同じ。斜めだと左隣の区切りの線をまたぐ）
+        const uprightCat = shouldRotateCat && (stackedLevels || crowdedCat);
+        // 縦に立てても帯の幅が文字の高さより狭いと重なるので、そのときだけ間引いて出す（1 つおき、…）
+        const categoryLabelEvery = uprightCat ? Math.max(1, Math.ceil((catFontSizePx * 1.1) / step)) : 1;
 
-        // X軸タイトル高さ (タイトル領域は高さ最大値の判定外で独立確保し、重なりを防止)
-        const hasCatTitle = catAxis.titleShow && Boolean(catAxis.titleText);
-        const catTitleFontSizePx = catAxis.titleFontSize * PT_TO_PX;
-        const catTitleHeight = hasCatTitle ? catTitleFontSizePx + 10 : 0;
-
-        // X軸ラベル領域 (高さの最大値 % はここだけに効く)
-        // maxHeight は 0〜100% (既定 25%)。標準と同じく、凡例を含むビジュアル全体の高さに対する割合。
-        // 斜めのラベルでは、割合はラベルの縦の広がりに効き、棒との間隔と文字の太さの半分は別に足す
-        // （Desktop で、タイトルありの標準は 8 文字、タイトルなしは 9 文字まで出した。1.13 までは 1 文字早かった）
-        const labelExtentMax = Math.max(16, viewport.height * (catAxis.maxHeight / 100));
+        // X軸ラベル領域
         const maxLabelAreaHeight = shouldRotateCat ? ROTATED_LABEL_GAP + labelExtentMax + catFontSizePx * 0.5 : labelExtentMax;
 
+        // 間引くときは、出す名前だけで欄の高さを決める（出さない長い名前のために棒を縮めない）
+        const widestShownCat =
+            categoryLabelEvery > 1
+                ? Math.max(0, ...groups.filter((_, i) => i % categoryLabelEvery === 0).map((g) => measureTextWidth(labelOf(g), catFont)))
+                : widestCat;
         // 必要とされるラベル高さ（斜めは、棒との間隔＋ラベルの縦の広がり＋文字の太さの半分。縦はラベルの長さそのまま）
         const desiredLabelHeight = uprightCat
-            ? ROTATED_LABEL_GAP + widestCat + catFontSizePx * 0.5
+            ? ROTATED_LABEL_GAP + widestShownCat + catFontSizePx * 0.5
             : shouldRotateCat
-                ? ROTATED_LABEL_GAP + widestCat * Math.SQRT1_2 + catFontSizePx * 0.5
+                ? ROTATED_LABEL_GAP + widestShownCat * Math.SQRT1_2 + catFontSizePx * 0.5
                 : catFontSizePx + 10;
 
+        // 最低の高さ（14）も、名前の欄に使える高さに収まるときだけとる（低いビジュアルで描く範囲の 4 分の 1 を割らない）
         const labelAreaHeight = catAxis.show
-            ? Math.max(14, Math.min(desiredLabelHeight, maxLabelAreaHeight))
+            ? Math.max(Math.min(14, labelRoom), Math.min(desiredLabelHeight, maxLabelAreaHeight, labelRoom))
             : 0;
 
         // ラベルの長さの上限 (px)。超えたら末尾を「…」に省略。斜めは、ラベル領域の高さから棒との間隔を除いた分
-        // 領域がいちばん長いラベルちょうどのときに、計算の誤差で省略しないよう 0.5px の余裕を持たせる
+        // 領域がいちばん長いラベルちょうどのときに、計算の誤差で省略しないよう 0.5px の余裕を持たせる。
+        // 斜め・縦は欄の高さで決まるので下限を置かない（欄より長い名前を出すと、下のランクの帯やビジュアルの外にはみ出す）
         const maxAllowedLabelLen = uprightCat
-            ? Math.max(12, labelAreaHeight - ROTATED_LABEL_GAP - catFontSizePx * 0.5 + 0.5)
+            ? Math.max(0, labelAreaHeight - ROTATED_LABEL_GAP - catFontSizePx * 0.5 + 0.5)
             : shouldRotateCat
-                ? Math.max(12, (labelAreaHeight - ROTATED_LABEL_GAP - catFontSizePx * 0.5) / Math.SQRT1_2 + 0.5)
+                ? Math.max(0, (labelAreaHeight - ROTATED_LABEL_GAP - catFontSizePx * 0.5) / Math.SQRT1_2 + 0.5)
                 : Math.max(12, step * 0.92);
 
         // 上のレベルの段。多くてもプロットを潰さないよう、ラベルと合わせてグラフの高さの半分までにする（上のレベルから落とす）
         // 囲みは枠の上下に余白が要るので、段を少し高くする
         const levelRowHeight = catFontSizePx + (boxedLevels ? 12 : 8);
         const levelRows = stackedLevels
-            ? Math.min(catAxis.levelCount - 1, Math.max(0, Math.floor((height * 0.5 - labelAreaHeight) / levelRowHeight)))
+            ? Math.min(catAxis.levelCount - 1, Math.max(0, Math.floor((Math.min(height * 0.5, labelRoom) - labelAreaHeight) / levelRowHeight)))
             : 0;
         const levelAreaHeight = levelRows * levelRowHeight;
-
-        // パレートのランクの帯。カテゴリのラベル（と階層の段）の下に 1 段取る
-        const pareto = viewModel.pareto;
-        const rankBandOn = pareto.enabled && pareto.showRankBand && catAxis.show;
-        const rankBandHeight = rankBandOn ? catFontSizePx + 12 : 0;
 
         // 全体の下部マージン = ラベル領域 + 上のレベルの段 + ランクの帯 + タイトル領域 + スクロールバー高さ + 余白
         const marginBottom = Math.max(20, labelAreaHeight + levelAreaHeight + rankBandHeight + catTitleHeight + SCROLLBAR_HEIGHT + 6);
         const plotHeight = Math.max(10, height - marginTop - marginBottom);
+        // 目盛りの本数は、標準と同じく描く範囲の高さで決める（150px 未満は 3、300px 未満は 5、それ以上は 8 まで）
+        // 「目盛りの本数 (目安)」があればその本数、空なら描く範囲の高さで決める（第 2 Y 軸も同じ上限）。
+        // どちらも、数字の行が重ならない本数までにとどめる
+        const tickTarget = valAxis.tickCount || recommendedTickCount(plotHeight, "vertical");
+        const valueTicks = fitTicks(viewModel.ticksFor, tickTarget, plotHeight, () => valTickFontSizePx * 1.4);
+        const axis2Ticks = fitTicks(axis2.ticksFor, tickTarget, plotHeight, () => axis2TickFontPx * 1.4);
 
         // 横グリッド線 (Y軸目盛線) の線種と透過性
         const hStroke = gridLineStroke(gridlines.horizontalStyle, gridlines.horizontalWidth, gridlines.horizontalScaleWithWidth);
@@ -1044,6 +1167,10 @@ export const App: React.FC<AppProps> = ({
                 levelRunsOf(paths, level, groups.map((g) => g.levelKeys)).forEach((run, k) => {
                     const left = run.start === 0 ? 0 : edgeOf(run.start);
                     const right = run.end === groups.length - 1 ? plotWidth : edgeOf(run.end + 1);
+                    // 区切り（囲み・線の間）を押すか Enter・Space で、その区切りのカテゴリをまとめて選ぶ（Ctrl で足す。2026-09-24）
+                    nodes.push(
+                        renderLevelHit(run, level, { x: xOffset + left, y: top, width: right - left, height: levelRowHeight }, `lv-hit-${r}-${k}`)
+                    );
                     if (boxedLevels) {
                         // 囲み：区切りごとに角の丸い淡い枠。隣の枠とは少し離す
                         nodes.push(
@@ -1055,7 +1182,8 @@ export const App: React.FC<AppProps> = ({
                                 height={Math.max(0, levelRowHeight - LEVEL_BOX_GAP * 2)}
                                 rx={LEVEL_BOX_RADIUS}
                                 className="level-box"
-                                style={levelBoxStyle}
+                                style={{ ...levelBoxStyle, fillOpacity: levelPicked(run) ? 0.18 : levelBoxStyle.fillOpacity }}
+                                pointerEvents="none"
                             />
                         );
                     }
@@ -1085,6 +1213,7 @@ export const App: React.FC<AppProps> = ({
                             className="x-category-level"
                             textAnchor="middle"
                             style={categoryLabelStyle}
+                            pointerEvents="none"
                         >
                             {shown}
                             <title>{run.text}</title>
@@ -1133,7 +1262,8 @@ export const App: React.FC<AppProps> = ({
             return (
                 <g className="pareto-ranks">
                     {rankRuns().map((run) => {
-                        const left = run.start === 0 ? 0 : edgeOf(run.start);
+                        // 最初の帯は、棒の並びの前の余白（leadIn）にはかけない
+                        const left = run.start === 0 ? leadIn : edgeOf(run.start);
                         const right = run.end === last ? plotWidth : edgeOf(run.end);
                         return renderRankRun(run, { x: xOffset + left + 2, y: top, width: right - left - 4, height: rankBandHeight - 4 }, catFont, categoryLabelStyle);
                     })}
@@ -1151,6 +1281,9 @@ export const App: React.FC<AppProps> = ({
                 : maxAllowedLabelLen;
             const effectiveMaxLen = Math.min(maxAllowedLabelLen, maxLenLeft);
             const displayCat = truncateText(category, effectiveMaxLen, catFont);
+            // 斜め・縦の名前は、省いても 1 文字と「…」は残る（truncateText）。省いた名前が欄に入らなければ、その名前だけ出さない
+            // （欄の外へはみ出さない。名前ごとに決めるので、欄に入る短い名前は出す）
+            if (shouldRotateCat && measureTextWidth(displayCat, catFont) > maxAllowedLabelLen + 0.5) return null;
             const labelStyle = categoryLabelStyle;
 
             if (uprightCat) {
@@ -1172,13 +1305,17 @@ export const App: React.FC<AppProps> = ({
                 );
             }
             if (shouldRotateCat) {
-                // 斜め45度回転 (標準準拠: 棒の直下から左下に伸び、Y軸ラベルの下に被さる)
-                const labelTop = marginTop + plotHeight + ROTATED_LABEL_GAP;
+                // 斜め45度回転 (標準準拠: 棒の直下から左下に伸び、Y軸ラベルの下に被さる)。
+                // 文字の高さの中ほど（ベースラインから 0.35 文字）を通る線が棒の中心で終わるように、ベースラインを右下へずらす
+                // （1.29 まではベースラインの端を中心より 4px 左に置き、文字の本体が左上に寄って見えた）
+                const lift = catFontSizePx * 0.35 * Math.SQRT1_2;
+                const labelX = cx + lift;
+                const labelTop = marginTop + plotHeight + ROTATED_LABEL_GAP + lift;
                 return (
                     <text
-                        x={cx - 4}
+                        x={labelX}
                         y={labelTop}
-                        transform={`rotate(-45, ${cx - 4}, ${labelTop})`}
+                        transform={`rotate(-45, ${labelX}, ${labelTop})`}
                         className="x-category-label"
                         textAnchor="end"
                         style={labelStyle}
@@ -1268,7 +1405,7 @@ export const App: React.FC<AppProps> = ({
                     {/* 横グリッド線 (Y軸目盛線 - プロット幅分) */}
                     {gridlines.horizontalShow && (
                         <g className="y-gridlines-group">
-                            {viewModel.ticks.map((tick, i) => {
+                            {valueTicks.map((tick, i) => {
                                 const y = marginTop + plotHeight * (1 - tick.ratio);
                                 return (
                                     <line
@@ -1301,7 +1438,7 @@ export const App: React.FC<AppProps> = ({
                                 <g key={`cat-${i}`} className="category-group">
                                     {g.points.map((d, s) => renderBar(d, cx + (stacked ? 0 : cluster.offsets[s] ?? 0), `${i}-${s}`))}
                                     {renderTotalLabels(g, cx)}
-                                    {catAxis.show && renderCategoryLabel(labelOf(g), cx)}
+                                    {catAxis.show && i % categoryLabelEvery === 0 && renderCategoryLabel(labelOf(g), cx)}
                                 </g>
                             );
                         })}
@@ -1401,7 +1538,7 @@ export const App: React.FC<AppProps> = ({
 
                     {/* Y軸目盛りラベル。軸線は標準と同じく描かない */}
                     <g className="y-axis-group">
-                        {viewModel.ticks.map((tick, i) => {
+                        {valueTicks.map((tick, i) => {
                             const y = marginTop + plotHeight * (1 - tick.ratio);
                             return (
                                 <g key={i} className="y-tick">
@@ -1481,7 +1618,7 @@ export const App: React.FC<AppProps> = ({
                         </text>
                     )}
                     {axis2.valueShow &&
-                        axis2.ticks.map((tick, i) => (
+                        axis2Ticks.map((tick, i) => (
                             <text
                                 key={`y2-${i}`}
                                 x={labelX}
@@ -1625,7 +1762,7 @@ export const App: React.FC<AppProps> = ({
                 {/* X軸タイトル */}
                 {catAxis.titleShow && catAxis.titleText && (
                     <text
-                        x={marginLeft + plotWidth / 2}
+                        x={marginLeft + leadIn + (plotWidth - leadIn) / 2}
                         y={height - 6}
                         className="x-axis-title"
                         textAnchor="middle"
@@ -1701,50 +1838,75 @@ export const App: React.FC<AppProps> = ({
         const stackedLevels = catAxis.show && catAxis.levelCount > 1 && !catAxis.concatenateLabels;
         const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.category);
         const widestLabel = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(labelOf(g), catFont))) : 0;
-        // 標準と同じく、凡例を含むビジュアル全体の幅に対する割合
-        const maxLabelWidth = Math.max(16, viewport.width * (catAxis.maxHeight / 100));
-        const lowestLabelWidth = catAxis.show ? Math.min(widestLabel, maxLabelWidth) + 8 : 0;
-        // 上のレベルの列。棒に近い（下の）レベルから置き、ラベルと合わせてグラフの幅の半分までにする（上のレベルから落とす）
-        const levelColumns: Array<{ level: number; width: number }> = [];
-        if (stackedLevels) {
-            let used = lowestLabelWidth;
-            for (let level = catAxis.levelCount - 2; level >= 0; level--) {
-                const widest = Math.max(0, ...groups.map((g) => measureTextWidth(g.levels[level] ?? "", catFont)));
-                const columnWidth = Math.min(widest, maxLabelWidth) + 12;
-                if (used + columnWidth > width * 0.5) break;
-                levelColumns.push({ level, width: columnWidth });
-                used += columnWidth;
-            }
-        }
+        const catTitleWidth = hasCatTitle ? catTitleFontPx + 8 : 0;
         // パレートのランクの帯。いちばん下のレベルのラベルのすぐ左に 1 列取る
         const pareto = viewModel.pareto;
         const rankBandOn = pareto.enabled && pareto.showRankBand && catAxis.show;
-        // 幅は、帯を出すランクの「名前 N件」のいちばん長いもの。ラベルの最大幅で頭を打つ（長い名前でプロットを押し出さない。入らなければ名前だけ、それも入らなければ文字を出さない）
-        const rankBandWidth = rankBandOn
+        const marginRight = 16;
+        const marginTop = 10 + (valueAtTop ? axisBlockHeight : 0) + (axis2AtTop ? axis2BlockHeight : 0) + (badgeAtTopRight ? badgeFontPx + 6 : 0);
+        const marginBottom = 6 + (valueAtTop ? axis2BlockHeight : axisBlockHeight);
+        const viewHeight = Math.max(10, height - marginTop - marginBottom);
+
+        // 「最小カテゴリの高さ」を下回るなら縦にスクロールする（高さだけで決まるので、名前の欄の幅より先に決める）
+        const minCatHeight = Math.max(0, catAxis.minCategoryWidth || 0);
+        const neededHeight = minCatHeight > 0 ? Math.ceil(count * minCatHeight) : 0;
+        const scrolls = minCatHeight > 0 && neededHeight > viewHeight + 1;
+        const SCROLLBAR_WIDTH = scrolls ? 12 : 0;
+
+        // 名前の欄（名前・ランクの帯・上のレベルの列）に使える幅。上限を大きくしても、描く範囲に幅の 4 分の 1 は残す（縦向きと同じ）。
+        // 左右の余白とスクロールバーを除く
+        const labelRoom = Math.max(0, width * 0.75 - 4 - catTitleWidth - marginRight - SCROLLBAR_WIDTH);
+        // 標準と同じく、凡例を含むビジュアル全体の幅に対する割合
+        const nameCap = Math.max(16, viewport.width * (catAxis.maxHeight / 100));
+        // ランクの帯の幅は、帯を出すランクの「名前 N件」のいちばん長いもの。ラベルの最大幅で頭を打つ（長い名前でプロットを押し出さない。入らなければ名前だけ、それも入らなければ文字を出さない）
+        const rankBandWant = rankBandOn
             ? Math.min(
-                maxLabelWidth,
+                nameCap,
                 Math.max(0, ...(["A", "B", "C"] as ParetoRank[]).map((r) => {
                     const count = pareto.ranks.filter((x) => x === r).length;
                     return count > 0 ? measureTextWidth(`${pareto.labels[r]} ${count}件`, catFont) : 0;
                 }))
             ) + 16
             : 0;
+        // 名前は、名前の欄からランクの帯と名前の右の余白（8）を除いた幅まで。ただし省いても 1 文字と「…」は残る（truncateText）ので、
+        // どの名前も 1 文字は出せる幅（名前ごとに、そのままか「1 文字＋…」の短いほうを実測）は、ランクの帯より先にとる
+        // （とらないと、名前がランクの帯に重なる）。省いた名前が幅に入らなければ、その名前だけ出さない
+        const shortestOf = (text: string) => Math.min(measureTextWidth(text, catFont), measureTextWidth(truncateText(text, 0, catFont), catFont));
+        const minNameWidth = catAxis.show ? Math.max(0, ...groups.map((g) => shortestOf(labelOf(g)))) : 0;
+        const maxLabelWidth = Math.min(nameCap, Math.max(0, labelRoom - 8 - rankBandWant, Math.min(minNameWidth, labelRoom - 8)));
+        const nameOf = (g: CategoryGroup) => {
+            const text = truncateText(labelOf(g), maxLabelWidth, catFont);
+            return measureTextWidth(text, catFont) <= maxLabelWidth + 0.5 ? text : null;
+        };
+        const namesShown = catAxis.show && groups.some((g) => nameOf(g) !== null);
+        const lowestLabelWidth = namesShown ? Math.min(widestLabel, maxLabelWidth) + 8 : 0;
+        const rankBandWidth = rankBandOn ? Math.max(0, Math.min(rankBandWant, labelRoom - lowestLabelWidth)) : 0;
+        // 上のレベルの列。棒に近い（下の）レベルから置き、ラベルと合わせてグラフの幅の半分（と名前の欄）までにする（上のレベルから落とす）
+        const levelColumns: Array<{ level: number; width: number }> = [];
+        if (stackedLevels) {
+            let used = lowestLabelWidth;
+            for (let level = catAxis.levelCount - 2; level >= 0; level--) {
+                const widest = Math.max(0, ...groups.map((g) => measureTextWidth(g.levels[level] ?? "", catFont)));
+                const columnWidth = Math.min(widest, maxLabelWidth) + 12;
+                if (used + columnWidth > Math.min(width * 0.5, labelRoom - rankBandWidth)) break;
+                levelColumns.push({ level, width: columnWidth });
+                used += columnWidth;
+            }
+        }
         const labelAreaWidth = lowestLabelWidth + rankBandWidth + levelColumns.reduce((sum, c) => sum + c.width, 0);
-        const catTitleWidth = hasCatTitle ? catTitleFontPx + 8 : 0;
 
         const marginLeft = 4 + catTitleWidth + labelAreaWidth;
-        const marginRight = 16;
-        const marginTop = 10 + (valueAtTop ? axisBlockHeight : 0) + (axis2AtTop ? axis2BlockHeight : 0) + (badgeAtTopRight ? badgeFontPx + 6 : 0);
-        const marginBottom = 6 + (valueAtTop ? axis2BlockHeight : axisBlockHeight);
-        const viewHeight = Math.max(10, height - marginTop - marginBottom);
-
-        // 「最小カテゴリの高さ」を下回るなら縦にスクロールする
-        const minCatHeight = Math.max(0, catAxis.minCategoryWidth || 0);
-        const neededHeight = minCatHeight > 0 ? Math.ceil(count * minCatHeight) : 0;
-        const scrolls = minCatHeight > 0 && neededHeight > viewHeight + 1;
-        const SCROLLBAR_WIDTH = scrolls ? 12 : 0;
         const plotHeight = scrolls ? neededHeight : viewHeight;
         const plotWidth = Math.max(10, width - marginLeft - marginRight - SCROLLBAR_WIDTH);
+        // 目盛りの本数は、標準と同じく描く範囲の幅で決める（300px 未満は 3、500px 未満は 5、それ以上は 8 まで）
+        // 「目盛りの本数 (目安)」があればその本数、空なら描く範囲の幅で決める（第 2 X 軸も同じ上限）。
+        // どちらも、いちばん長い数字＋ 8px が隣とぶつからない本数までにとどめる
+        const tickTarget = valAxis.tickCount || recommendedTickCount(plotWidth, "horizontal");
+        const valTickSpec: FontSpec = { family: valAxis.fontFamily, size: valTickFontPx, bold: valAxis.bold, italic: valAxis.italic, underline: valAxis.underline };
+        const axis2TickSpec: FontSpec = { family: axis2.fontFamily, size: axis2TickFontPx, bold: axis2.bold, italic: axis2.italic, underline: false };
+        const widest = (spec: FontSpec) => (ticks: Tick[]) => Math.max(0, ...ticks.map((tick) => measureTextWidth(tick.label, spec))) + 8;
+        const valueTicks = fitTicks(viewModel.ticksFor, tickTarget, plotWidth, widest(valTickSpec));
+        const axis2Ticks = fitTicks(axis2.ticksFor, tickTarget, plotWidth, widest(axis2TickSpec));
 
         const padRatio = Math.max(0, Math.min(0.5, columnsSettings.categorySpacing / 100));
         const outerRatio = columnsSettings.outerPadding === null
@@ -1986,7 +2148,7 @@ export const App: React.FC<AppProps> = ({
                 strokeOpacity: 0.35,
                 strokeWidth: 1,
                 strokeDasharray: "1 2",
-                shapeRendering: "crispEdges",
+                shapeRendering: "auto",
             };
             const boxed = catAxis.hierarchyStyle === "boxed";
             const nodes: React.ReactNode[] = [];
@@ -2001,6 +2163,8 @@ export const App: React.FC<AppProps> = ({
                 levelRunsOf(paths, level, groups.map((g) => g.levelKeys)).forEach((run, k) => {
                     const top = run.start === 0 ? 0 : edgeOf(run.start);
                     const bottom = run.end === groups.length - 1 ? plotHeight : edgeOf(run.end + 1);
+                    // 区切りを押すと、その区切りのカテゴリをまとめて選ぶ（縦棒と同じ）
+                    nodes.push(renderLevelHit(run, level, { x: left, y: yOffset + top, width: columnWidth, height: bottom - top }, `lv-hit-${c}-${k}`));
                     if (boxed) {
                         // 囲み：区切りごとに角の丸い淡い枠。隣の枠とは少し離す
                         nodes.push(
@@ -2014,11 +2178,12 @@ export const App: React.FC<AppProps> = ({
                                 className="level-box"
                                 style={{
                                     fill: catAxis.labelColor,
-                                    fillOpacity: 0.06,
+                                    fillOpacity: levelPicked(run) ? 0.18 : 0.06,
                                     stroke: catAxis.labelColor,
                                     strokeOpacity: 0.3,
                                     strokeWidth: 1,
                                 }}
+                                pointerEvents="none"
                             />
                         );
                     }
@@ -2037,6 +2202,7 @@ export const App: React.FC<AppProps> = ({
                             y={yOffset + (top + bottom) / 2 + catFontPx * 0.35}
                             className="x-category-level"
                             textAnchor={boxed ? "middle" : "end"}
+                            pointerEvents="none"
                             style={{
                                 fontSize: `${catAxis.fontSize}pt`,
                                 fontFamily: catAxis.fontFamily,
@@ -2061,7 +2227,7 @@ export const App: React.FC<AppProps> = ({
             <>
                 {gridlines.horizontalShow && (
                     <g className="y-gridlines-group">
-                        {viewModel.ticks.map((tick, i) => {
+                        {valueTicks.map((tick, i) => {
                             const x = xOffset + plotWidth * tick.ratio;
                             return (
                                 <line
@@ -2123,7 +2289,7 @@ export const App: React.FC<AppProps> = ({
                                     renderHBar(d, cy + (stacked ? 0 : cluster.offsets[s] ?? 0), `${i}-${s}`, xOffset, yOffset)
                                 )}
                                 {renderHTotals(g, cy, xOffset, yOffset)}
-                                {catAxis.show && (
+                                {namesShown && nameOf(g) !== null && (
                                     <text
                                         x={labelRightX}
                                         y={yOffset + cy + catFontPx * 0.35}
@@ -2138,7 +2304,7 @@ export const App: React.FC<AppProps> = ({
                                             fill: catAxis.labelColor,
                                         }}
                                     >
-                                        {truncateText(labelOf(g), maxLabelWidth, catFont)}
+                                        {nameOf(g)}
                                         <title>{g.category}</title>
                                     </text>
                                 )}
@@ -2214,7 +2380,7 @@ export const App: React.FC<AppProps> = ({
             return (
                 <g className="y2-axis-container">
                     {axis2.valueShow &&
-                        axis2.ticks.map((tick, i) => (
+                        axis2Ticks.map((tick, i) => (
                             <text
                                 key={`x2-${i}`}
                                 x={marginLeft + plotWidth * tick.ratio}
@@ -2289,7 +2455,7 @@ export const App: React.FC<AppProps> = ({
                 <g className="y-axis-container">
                     {valAxis.show && (
                         <g className="y-axis-group">
-                            {viewModel.ticks.map((tick, i) => (
+                            {valueTicks.map((tick, i) => (
                                 <text
                                     key={i}
                                     x={marginLeft + plotWidth * tick.ratio}

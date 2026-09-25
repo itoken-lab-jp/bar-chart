@@ -791,7 +791,104 @@
                 "position": {
                     "displayName": "位置",
                     "type": {
-                        "enumeration": []
+                        "enumeration": [
+                            {
+                                "value": "Top",
+                                "displayName": "上詰め (左)"
+                            },
+                            {
+                                "value": "TopCenter",
+                                "displayName": "上詰め (中央)"
+                            },
+                            {
+                                "value": "TopRight",
+                                "displayName": "上詰め (右)"
+                            },
+                            {
+                                "value": "Bottom",
+                                "displayName": "下詰め (左)"
+                            },
+                            {
+                                "value": "BottomCenter",
+                                "displayName": "下詰め (中央)"
+                            },
+                            {
+                                "value": "BottomRight",
+                                "displayName": "下詰め (右)"
+                            },
+                            {
+                                "value": "Left",
+                                "displayName": "左上"
+                            },
+                            {
+                                "value": "LeftCenter",
+                                "displayName": "左中央"
+                            },
+                            {
+                                "value": "LeftBottom",
+                                "displayName": "左下"
+                            },
+                            {
+                                "value": "Right",
+                                "displayName": "右上"
+                            },
+                            {
+                                "value": "RightCenter",
+                                "displayName": "右中央"
+                            },
+                            {
+                                "value": "RightBottom",
+                                "displayName": "右下"
+                            },
+                            {
+                                "value": "topLeft",
+                                "displayName": "上詰め (左)（旧）"
+                            },
+                            {
+                                "value": "topCenter",
+                                "displayName": "上詰め (中央)（旧）"
+                            },
+                            {
+                                "value": "topRight",
+                                "displayName": "上詰め (右)（旧）"
+                            },
+                            {
+                                "value": "bottomLeft",
+                                "displayName": "下詰め (左)（旧）"
+                            },
+                            {
+                                "value": "bottomCenter",
+                                "displayName": "下詰め (中央)（旧）"
+                            },
+                            {
+                                "value": "bottomRight",
+                                "displayName": "下詰め (右)（旧）"
+                            },
+                            {
+                                "value": "leftTop",
+                                "displayName": "左上（旧）"
+                            },
+                            {
+                                "value": "leftCenter",
+                                "displayName": "左中央（旧）"
+                            },
+                            {
+                                "value": "leftBottom",
+                                "displayName": "左下（旧）"
+                            },
+                            {
+                                "value": "rightTop",
+                                "displayName": "右上（旧）"
+                            },
+                            {
+                                "value": "rightCenter",
+                                "displayName": "右中央（旧）"
+                            },
+                            {
+                                "value": "rightBottom",
+                                "displayName": "右下（旧）"
+                            }
+                        ]
                     }
                 },
                 "fontFamily": {
@@ -840,6 +937,12 @@
                 },
                 "titleShow": {
                     "displayName": "タイトル",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "showTitle": {
+                    "displayName": "タイトル（テーマの値）",
                     "type": {
                         "bool": true
                     }
@@ -1187,6 +1290,12 @@
                         "numeric": true
                     }
                 },
+                "maxMarginFactor": {
+                    "displayName": "高さの最大値（テーマの値）",
+                    "type": {
+                        "numeric": true
+                    }
+                },
                 "concatenateLabels": {
                     "displayName": "ラベルの連結",
                     "type": {
@@ -1201,6 +1310,12 @@
                 },
                 "titleShow": {
                     "displayName": "タイトル",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "showAxisTitle": {
+                    "displayName": "タイトル（テーマの値）",
                     "type": {
                         "bool": true
                     }
@@ -1260,6 +1375,51 @@
                     "type": {
                         "numeric": true
                     }
+                },
+                "gridlineShow": {
+                    "displayName": "グリッド線（テーマの値）",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "gridlineColor": {
+                    "displayName": "グリッド線の色（テーマの値）",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "gridlineStyle": {
+                    "displayName": "グリッド線の線種（テーマの値）",
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "solid",
+                                "displayName": "実線"
+                            },
+                            {
+                                "value": "dashed",
+                                "displayName": "破線"
+                            },
+                            {
+                                "value": "dotted",
+                                "displayName": "点線"
+                            },
+                            {
+                                "value": "custom",
+                                "displayName": "カスタム"
+                            }
+                        ]
+                    }
+                },
+                "gridlineThickness": {
+                    "displayName": "グリッド線の幅（テーマの値）",
+                    "type": {
+                        "numeric": true
+                    }
                 }
             }
         },
@@ -1294,6 +1454,12 @@
                     "displayName": "範囲を丸める",
                     "type": {
                         "bool": true
+                    }
+                },
+                "tickCount": {
+                    "displayName": "目盛りの本数 (目安)",
+                    "type": {
+                        "text": true
                     }
                 },
                 "show": {
@@ -1378,6 +1544,12 @@
                 },
                 "titleShow": {
                     "displayName": "タイトル",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "showAxisTitle": {
+                    "displayName": "タイトル（テーマの値）",
                     "type": {
                         "bool": true
                     }
@@ -1485,6 +1657,51 @@
                             }
                         }
                     }
+                },
+                "gridlineShow": {
+                    "displayName": "グリッド線（テーマの値）",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "gridlineColor": {
+                    "displayName": "グリッド線の色（テーマの値）",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "gridlineStyle": {
+                    "displayName": "グリッド線の線種（テーマの値）",
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "solid",
+                                "displayName": "実線"
+                            },
+                            {
+                                "value": "dashed",
+                                "displayName": "破線"
+                            },
+                            {
+                                "value": "dotted",
+                                "displayName": "点線"
+                            },
+                            {
+                                "value": "custom",
+                                "displayName": "カスタム"
+                            }
+                        ]
+                    }
+                },
+                "gridlineThickness": {
+                    "displayName": "グリッド線の幅（テーマの値）",
+                    "type": {
+                        "numeric": true
+                    }
                 }
             }
         },
@@ -1528,7 +1745,20 @@
                 "horizontalStyle": {
                     "displayName": "線のスタイル",
                     "type": {
-                        "enumeration": []
+                        "enumeration": [
+                            {
+                                "value": "solid",
+                                "displayName": "実線"
+                            },
+                            {
+                                "value": "dashed",
+                                "displayName": "破線"
+                            },
+                            {
+                                "value": "dotted",
+                                "displayName": "点線"
+                            }
+                        ]
                     }
                 },
                 "horizontalWidth": {
@@ -1562,7 +1792,20 @@
                 "verticalStyle": {
                     "displayName": "線のスタイル",
                     "type": {
-                        "enumeration": []
+                        "enumeration": [
+                            {
+                                "value": "solid",
+                                "displayName": "実線"
+                            },
+                            {
+                                "value": "dashed",
+                                "displayName": "破線"
+                            },
+                            {
+                                "value": "dotted",
+                                "displayName": "点線"
+                            }
+                        ]
                     }
                 },
                 "verticalWidth": {

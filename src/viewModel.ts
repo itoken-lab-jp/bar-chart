@@ -27,6 +27,7 @@ import {
     Orientation,
     CALCULATION_MODES,
     CUMULATIVE_RESET_NONE,
+    legendPlacementValue,
 } from "./settings";
 import {
     resolveUnit,
@@ -181,6 +182,8 @@ export interface ValueAxis2Settings {
     show: boolean;
     valueShow: boolean;
     ticks: Tick[];
+    /** 目盛りを Y 軸と同じ本数の上限で作り直す（viewModel の ticksFor と同じ） */
+    ticksFor: (count: number) => Tick[];
     fontFamily: string;
     fontSize: number;
     bold: boolean;
@@ -359,6 +362,8 @@ export interface ValueAxisSettings {
     logarithmicFallback: boolean;
     invertRange: boolean;
     roundRange: boolean;
+    /** 目盛りの本数の目安。0 なら自動（描く範囲の長さで決める） */
+    tickCount: number;
     show: boolean;
     fontFamily: string;
     fontSize: number;
@@ -434,6 +439,11 @@ export interface ViewModel {
     niceMax: number;
     zeroRatio: number;
     ticks: Tick[];
+    /**
+     * 目盛りの本数を決め直す（範囲は変えない）。標準と同じく、描く範囲の長さで本数の上限を決めるために、長さが決まった後で呼ぶ。
+     * 対数の軸は本数を変えない
+     */
+    ticksFor: (count: number) => Tick[];
     unitInfo: UnitInfo;
     columns: ColumnsSettings;
     /** 書式ペインの「設定の適用先」。系列 1 本ならカテゴリ、複数なら系列 */
@@ -514,6 +524,28 @@ function log10Snap(v: number): number {
  * 対数軸の目盛り（正の大きさ、lower < upper）。10 の冪を基本にし、3 本以上取れるときは
  * MAX_LOG_TICKS 以下になるよう桁を間引く。10 の冪が 2 本以下しか入らない狭い範囲では 1・2・5 を足す。
  */
+/**
+ * 目盛りの値。本数が max を超えず、数字が同じ表示にならない（丸めで 0.005 と 0.01 がどちらも 0.01 になる、など）ように、
+ * d3 の ticks の目安を max から下げていく（ticks の引数は目安で、0〜4 に 3 を渡すと 5 本返る）
+ */
+export function ticksUpTo(domain: [number, number], max: number, labelsOf: (values: number[]) => string[]): number[] {
+    let values: number[] = [];
+    for (let count = Math.max(1, max); count >= 1; count--) {
+        values = scaleLinear().domain(domain).ticks(count);
+        const labels = labelsOf(values);
+        if (values.length <= max && new Set(labels).size === labels.length) return values;
+    }
+    return values;
+}
+
+/** 「目盛りの本数 (目安)」の入力を本数にする。空・数でない・1 以下は 0（自動）。多すぎる指定は 20 本まで */
+export function tickCountOf(text: string | undefined): number {
+    // 全角の数字も読む（「５」など）
+    const ascii = String(text ?? "").trim().replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xfee0));
+    const n = Math.round(Number(ascii));
+    return Number.isFinite(n) && n >= 2 ? Math.min(20, n) : 0;
+}
+
 export function logAxisTicks(lower: number, upper: number): number[] {
     const eps = 1e-9;
     const inRange = (v: number) => v >= lower * (1 - eps) && v <= upper * (1 + eps);
@@ -548,7 +580,7 @@ const EMPTY_CATEGORY_AXIS: CategoryAxisSettings = {
     underline: false,
     labelColor: "#605E5C",
     maxHeight: 25,
-    titleShow: true,
+    titleShow: false,
     titleText: "",
     titleFontFamily: "DIN",
     titleFontSize: 12,
@@ -569,6 +601,7 @@ const EMPTY_VALUE_AXIS: ValueAxisSettings = {
     logarithmicFallback: false,
     invertRange: false,
     roundRange: true,
+    tickCount: 0,
     show: true,
     fontFamily: "Segoe UI",
     fontSize: 9,
@@ -682,6 +715,7 @@ const EMPTY: ViewModel = {
     niceMax: 1,
     zeroRatio: 0,
     ticks: [],
+    ticksFor: () => [],
     unitInfo: {
         unitDef: UNIT_DEFINITIONS["0"],
         badgeText: "",
@@ -719,6 +753,7 @@ const EMPTY: ViewModel = {
         show: false,
         valueShow: true,
         ticks: [],
+        ticksFor: () => [],
         fontFamily: "Segoe UI",
         fontSize: 9,
         bold: false,
@@ -1478,7 +1513,7 @@ export function transform(
     const zeroRatio = isLogScaleActive ? (logSign > 0 ? 0 : 1) : calcRatio(0);
 
     // 目盛りラベルの生成
-    const ticks: Tick[] = rawTicks.map((t: number) => {
+    const tickOf = (t: number): Tick => {
         let label: string;
         if (percent) {
             label = `${Math.round(t * 100)}%`;
@@ -1495,7 +1530,10 @@ export function transform(
             label,
             ratio: invertRange ? 1 - normRatio : normRatio,
         };
-    });
+    };
+    const ticks: Tick[] = rawTicks.map(tickOf);
+    const ticksFor = (count: number): Tick[] =>
+        isLogScaleActive ? ticks : ticksUpTo([niceMin, niceMax], count, (values) => values.map((v) => tickOf(v).label)).map(tickOf);
 
     // X軸設定の抽出
     const catAxis = settings.categoryAxis;
@@ -1550,6 +1588,7 @@ export function transform(
         logarithmicFallback,
         invertRange,
         roundRange,
+        tickCount: tickCountOf(valAxis.tickCount.value),
         show: valAxis.show.value ?? true,
         fontFamily: valAxis.font.fontFamily.value ?? "Segoe UI",
         fontSize: Math.max(8, Math.min(32, valAxis.font.fontSize.value ?? 9)),
@@ -1617,8 +1656,12 @@ export function transform(
 
     // 列（columns）設定の抽出
     const col = settings.columns;
+    // 系列 1 本の棒の色：保存が無ければ、標準と同じくテーマのデータの色の 1 番目（1.28 までは #118DFF 固定で、
+    // テーマの 1 番目を変えたレポートでも従わなかった）。getColor は同じ key なら同じ色を返すので、下の折れ線の色の取り方とずれない
+    const singleSeriesFill =
+        seriesMode || !slots.length ? null : customColor(dataView?.metadata?.objects, "fill") ?? host.colorPalette.getColor(slots[0].key).value;
     const columnsSettings: ColumnsSettings = {
-        fill: col.fill.value?.value || "#118DFF",
+        fill: singleSeriesFill || col.fill.value?.value || "#118DFF",
         transparency: Math.max(0, Math.min(100, col.transparency.value ?? 0)),
         showBorder: col.showBorder.value ?? false,
         borderMatchColumn: col.borderMatchColumn.value ?? false,
@@ -1643,7 +1686,7 @@ export function transform(
     const lg = settings.legend;
     const legendInfo: LegendInfo = {
         show: seriesMode && (lg.show.value ?? true),
-        position: getDropdownValue(lg.position.value, "topLeft"),
+        position: legendPlacementValue(lg.position.value?.value),
         title: (lg.titleShow.value ?? true) ? (lg.titleText.value?.trim() || (legendSource?.displayName ?? "")) : "",
         fontFamily: lg.font.fontFamily.value ?? "Segoe UI",
         fontSize: Math.max(8, Math.min(32, lg.font.fontSize.value ?? 10)),
@@ -2007,6 +2050,8 @@ export function transform(
     const unitWord2 = log2Active ? "" : unitDef2.unitWord;
     let calcRatio2 = calcRatio;
     let ticks2: Tick[] = [];
+    /** 第 2 Y 軸の目盛りを、Y 軸と同じ本数の上限で作り直す（対数は変えない） */
+    let ticks2For: (count: number) => Tick[] = () => ticks2;
     if (onSecondary) {
         const start2 = parseOptional(v2.start.value);
         const end2 = parseOptional(v2.end.value);
@@ -2051,10 +2096,15 @@ export function transform(
             const span2 = hi2 - lo2;
             calcRatio2 = (v: number) => (span2 > 0 ? Math.max(0, Math.min(1, (v - lo2) / span2)) : 0);
             raw2 = scaleLinear().domain([lo2, hi2]).ticks(5);
+            const domain2: [number, number] = [lo2, hi2];
+            ticks2For = (count) => ticks2Of(ticksUpTo(domain2, count, (values) => ticks2Of(values).map((tick) => tick.label)));
         }
-        const step2 = raw2.length > 1 ? Math.abs(raw2[1] - raw2[0]) : 1;
+        ticks2 = ticks2Of(raw2);
+    }
+    function ticks2Of(raw: number[]): Tick[] {
+        const step2 = raw.length > 1 ? Math.abs(raw[1] - raw[0]) : 1;
         const percentDigits = v2Precision !== "auto" ? Number(v2Precision) : step2 * 100 < 1 ? 1 : 0;
-        ticks2 = raw2.map((t) => {
+        return raw.map((t) => {
             let label: string;
             if (isPercentLine) {
                 label = `${(t * 100).toFixed(percentDigits)}%`;
@@ -2068,10 +2118,13 @@ export function transform(
             }
             return { value: t, label, ratio: calcRatio2(t) };
         });
-    } else if (paretoOn) {
+    }
+    if (!onSecondary && paretoOn) {
         // パレートの累積比の軸。0〜100% に固定する（第 2 Y 軸の範囲の指定は使わない）
         calcRatio2 = (v: number) => Math.max(0, Math.min(1, v));
-        ticks2 = [0, 0.2, 0.4, 0.6, 0.8, 1].map((t) => ({ value: t, label: `${Math.round(t * 100)}%`, ratio: t }));
+        const percentTicks = (values: number[]) => values.map((t) => ({ value: t, label: `${Math.round(t * 100)}%`, ratio: t }));
+        ticks2 = percentTicks([0, 0.2, 0.4, 0.6, 0.8, 1]);
+        ticks2For = (count) => percentTicks(ticksUpTo([0, 1], count, (values) => values.map((v) => `${Math.round(v * 100)}%`)));
     }
 
     // 折れ線の色は、棒の系列の続きのテーマの色（系列 1 本の棒はテーマの 1 番目を使う扱いにして、線は 2 番目から）
@@ -2185,6 +2238,7 @@ export function transform(
         show: onSecondary || paretoOn,
         valueShow: v2.valueShow.value ?? true,
         ticks: ticks2,
+        ticksFor: ticks2For,
         fontFamily: v2.font.fontFamily.value ?? "Segoe UI",
         fontSize: Math.max(8, Math.min(32, v2.font.fontSize.value ?? 9)),
         bold: v2.font.bold?.value ?? false,
@@ -2300,6 +2354,7 @@ export function transform(
         niceMax,
         zeroRatio,
         ticks,
+        ticksFor,
         unitInfo: {
             unitDef: isLogScaleActive ? { ...unitDef, unitWord: "" } : unitDef,
             badgeText,

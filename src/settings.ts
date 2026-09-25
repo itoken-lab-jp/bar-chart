@@ -631,21 +631,53 @@ export const LEGEND_POSITIONS = {
     rightBottom: "rightBottom",
 } as const;
 
-/** 標準の凡例の「位置」と同じ 12 通り。既定は上詰め (左) */
+/**
+ * 凡例の位置の保存値は、標準のビジュアルとレポートテーマと同じ値（Top・Bottom など）にする。
+ * 基本テーマ（Fluent 2 は "Bottom"）やカスタムテーマの値がそのまま届く。左下・右下は標準に無いので独自の値。
+ * 描画は LEGEND_POSITIONS（辺と寄せ）で扱う
+ */
+const LEGEND_POSITION_PLACEMENTS: Record<string, string> = {
+    Top: LEGEND_POSITIONS.topLeft,
+    TopCenter: LEGEND_POSITIONS.topCenter,
+    TopRight: LEGEND_POSITIONS.topRight,
+    Bottom: LEGEND_POSITIONS.bottomLeft,
+    BottomCenter: LEGEND_POSITIONS.bottomCenter,
+    BottomRight: LEGEND_POSITIONS.bottomRight,
+    Left: LEGEND_POSITIONS.leftTop,
+    LeftCenter: LEGEND_POSITIONS.leftCenter,
+    LeftBottom: LEGEND_POSITIONS.leftBottom,
+    Right: LEGEND_POSITIONS.rightTop,
+    RightCenter: LEGEND_POSITIONS.rightCenter,
+    RightBottom: LEGEND_POSITIONS.rightBottom,
+};
+
+/** 12 通り。既定は上詰め (左) */
 export const LEGEND_POSITION_ITEMS: powerbi.IEnumMember[] = [
-    { value: LEGEND_POSITIONS.topLeft, displayName: "上詰め (左)" },
-    { value: LEGEND_POSITIONS.topCenter, displayName: "上詰め (中央)" },
-    { value: LEGEND_POSITIONS.topRight, displayName: "上詰め (右)" },
-    { value: LEGEND_POSITIONS.bottomLeft, displayName: "下詰め (左)" },
-    { value: LEGEND_POSITIONS.bottomCenter, displayName: "下詰め (中央)" },
-    { value: LEGEND_POSITIONS.bottomRight, displayName: "下詰め (右)" },
-    { value: LEGEND_POSITIONS.leftTop, displayName: "左上" },
-    { value: LEGEND_POSITIONS.leftCenter, displayName: "左中央" },
-    { value: LEGEND_POSITIONS.leftBottom, displayName: "左下" },
-    { value: LEGEND_POSITIONS.rightTop, displayName: "右上" },
-    { value: LEGEND_POSITIONS.rightCenter, displayName: "右中央" },
-    { value: LEGEND_POSITIONS.rightBottom, displayName: "右下" },
+    { value: "Top", displayName: "上詰め (左)" },
+    { value: "TopCenter", displayName: "上詰め (中央)" },
+    { value: "TopRight", displayName: "上詰め (右)" },
+    { value: "Bottom", displayName: "下詰め (左)" },
+    { value: "BottomCenter", displayName: "下詰め (中央)" },
+    { value: "BottomRight", displayName: "下詰め (右)" },
+    { value: "Left", displayName: "左上" },
+    { value: "LeftCenter", displayName: "左中央" },
+    { value: "LeftBottom", displayName: "左下" },
+    { value: "Right", displayName: "右上" },
+    { value: "RightCenter", displayName: "右中央" },
+    { value: "RightBottom", displayName: "右下" },
 ];
+
+/** 保存値を標準の値にする。1.26 までの保存値（topLeft など）も読み替える。知らない値は undefined */
+export function standardLegendPosition(value: unknown): string | undefined {
+    if (typeof value !== "string") return undefined;
+    if (value in LEGEND_POSITION_PLACEMENTS) return value;
+    return Object.keys(LEGEND_POSITION_PLACEMENTS).find((k) => LEGEND_POSITION_PLACEMENTS[k] === value);
+}
+
+/** 保存値を、描画で使う位置（topLeft など）にする。知らない値は上詰め (左) */
+export function legendPlacementValue(value: unknown): string {
+    return LEGEND_POSITION_PLACEMENTS[standardLegendPosition(value) ?? "Top"];
+}
 
 /** 凡例。系列が複数のとき（値が 2 つ以上か、凡例にフィールドがあるとき）だけ描く */
 export class LegendCardSettings extends FormattingSettingsCompositeCard {
@@ -1287,10 +1319,14 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
     });
 
     // --- タイトルグループ ---
+    /**
+     * カテゴリの軸のタイトルは初期オフ（2026-09-23 決定）。項目名で何の軸か読めることが多く、
+     * 縦横どちらの向きでもカテゴリの軸（この card）に当てる。数値の軸のタイトルは初期オンのまま
+     */
     titleShow = new formattingSettings.ToggleSwitch({
         name: "titleShow",
         displayName: "タイトル",
-        value: true,
+        value: false,
     });
 
     titleText = new formattingSettings.TextInput({
@@ -1426,6 +1462,18 @@ export class ValueAxisCardSettings extends FormattingSettingsCompositeCard {
         name: "roundRange",
         displayName: "範囲を丸める",
         value: true,
+    });
+
+    /**
+     * 目盛り（グリッド線）の本数の目安。空なら自動（描く範囲の長さで決める。標準と同じ）。
+     * 数を入れると、その本数以内で切りのいい目盛りを選ぶ。データが変わっても間隔が追従する
+     */
+    tickCount = new formattingSettings.TextInput({
+        name: "tickCount",
+        displayName: "目盛りの本数 (目安)",
+        description: "空なら自動。数を入れると、その本数以内で切りのいい目盛りにする（数字が重なるなら減らす）。第 2 Y 軸も同じ上限。対数の軸では効かない（10 の累乗で決まる）",
+        value: "",
+        placeholder: "自動",
     });
 
     // --- 値グループ ---
@@ -1616,6 +1664,7 @@ export class ValueAxisCardSettings extends FormattingSettingsCompositeCard {
             this.logarithmic,
             this.invertRange,
             this.roundRange,
+            this.tickCount,
         ],
     });
 
@@ -2644,6 +2693,58 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.dataLabels,
         this.totalLabels,
     ];
+
+    /**
+     * 系列 1 本の棒の色は、保存が無ければテーマの 1 番目で塗る。書式ペインの「カラー」にも実際に塗る色を出す（保存はしない）。
+     * null も保存なしとして扱う（viewModel の customColor と同じ）
+     */
+    applySingleSeriesFill(seriesMode: boolean, fill: string, objects: powerbi.DataViewObjects | undefined): void {
+        if (!seriesMode && objects?.columns?.fill == null) this.columns.fill.value = { value: fill };
+    }
+
+    /**
+     * 基本テーマ・カスタムテーマに合わせる。テーマは標準のビジュアルの名前（showAxisTitle・showTitle）で値を持つので、
+     * capabilities にその名前も置いて受け取り、作り手が自作の設定（titleShow）を保存していないときの既定にする。
+     * 書式ペインにも同じ値を出す（「既定値にリセット」でテーマの値に戻る）。populate の直後に呼ぶ。
+     * 凡例の位置は 1.26 までの保存値（topLeft など）を標準の値に読み替える
+     */
+    applyThemeDefaults(objects: powerbi.DataViewObjects | undefined): void {
+        const raw = (card: string, prop: string): unknown => objects?.[card]?.[prop];
+        const inherit = (slice: formattingSettings.ToggleSwitch, card: string, own: string, standard: string) => {
+            const themeValue = raw(card, standard);
+            if (raw(card, own) == null && typeof themeValue === "boolean") slice.value = themeValue;
+        };
+        inherit(this.categoryAxis.titleShow, "categoryAxis", "titleShow", "showAxisTitle");
+        inherit(this.valueAxis.titleShow, "valueAxis", "titleShow", "showAxisTitle");
+        inherit(this.legend.titleShow, "legend", "titleShow", "showTitle");
+        const position = standardLegendPosition(raw("legend", "position"));
+        if (position) this.legend.position.value = LEGEND_POSITION_ITEMS.find((i) => i.value === position)!;
+
+        // 項目名の欄の上限：標準は categoryAxis の maxMarginFactor で持つ（Fluent 2 は 50）。描画と同じ 0〜100 に丸める
+        const marginFactor = raw("categoryAxis", "maxMarginFactor");
+        if (raw("categoryAxis", "maxHeight") == null && typeof marginFactor === "number") {
+            this.categoryAxis.maxHeight.value = Math.max(0, Math.min(100, marginFactor));
+        }
+
+        // グリッド線：標準は軸のカードの中（gridlineShow・gridlineColor・gridlineStyle・gridlineThickness）。
+        // 自作の「グリッド線」カードの横（horizontal*）は数値の軸の線、縦（vertical*）はカテゴリの軸の線（縦棒・横棒で入れ替わらない）
+        const gridlines: Array<[axis: string, prefix: "horizontal" | "vertical"]> = [
+            ["valueAxis", "horizontal"],
+            ["categoryAxis", "vertical"],
+        ];
+        for (const [axis, prefix] of gridlines) {
+            const own = (prop: string) => raw("gridlines", `${prefix}${prop}`) != null;
+            const show = raw(axis, "gridlineShow");
+            if (!own("Show") && typeof show === "boolean") this.gridlines[`${prefix}Show`].value = show;
+            const color = (raw(axis, "gridlineColor") as powerbi.Fill | undefined)?.solid?.color;
+            if (!own("Color") && typeof color === "string" && color) this.gridlines[`${prefix}Color`].value = { value: color };
+            const style = LINE_STYLE_ITEMS.find((i) => i.value === raw(axis, "gridlineStyle"));
+            if (!own("Style") && style) this.gridlines[`${prefix}Style`].value = style;
+            const thickness = raw(axis, "gridlineThickness");
+            // 描画と同じ 1〜10 に丸める（書式ペインの値と描画の幅をずらさない）
+            if (!own("Width") && typeof thickness === "number" && thickness > 0) this.gridlines[`${prefix}Width`].value = Math.max(1, Math.min(10, thickness));
+        }
+    }
 
     /**
      * データが来たあとで「設定の適用先」を作る。seriesMode は複数系列のとき true

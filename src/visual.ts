@@ -102,6 +102,8 @@ export class Visual implements IVisual {
             options.dataViews?.[0]
         );
 
+        // 軸のタイトル・凡例のタイトルと位置は、保存が無ければテーマ（基本テーマの Fluent 2 など）の値に従う
+        this.formattingSettings.applyThemeDefaults(options.dataViews?.[0]?.metadata?.objects);
         // グラフの種類による既定（100% 積み上げのデータラベルは値がオフで詳細がオン）は、保存していない項目だけに効かせる
         this.formattingSettings.applyChartTypeDefaults(options.dataViews?.[0]);
         const calc = this.formattingSettings.calculation;
@@ -122,6 +124,7 @@ export class Visual implements IVisual {
             labelTargets: viewModel.labelTargets,
             lineTargets: viewModel.lineTargets,
         });
+        this.formattingSettings.applySingleSeriesFill(viewModel.seriesMode, viewModel.columns.fill, options.dataViews?.[0]?.metadata?.objects);
         this.formattingSettings.applyCardVisibility(viewModel.lines.length > 0);
         this.selectedIds = this.selectionManager.getSelectionIds() as ISelectionId[];
 

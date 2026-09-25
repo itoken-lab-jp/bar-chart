@@ -105,3 +105,14 @@
     }
 }
 
+
+/* 押せる帯（階層の区切り・パレートのランク）は、マウスで押したときはフォーカスの枠を出さない。キーボードで移ったときだけ出す */
+.level-hit:focus:not(:focus-visible),
+.pareto-rank:focus:not(:focus-visible) {
+    outline: none;
+}
+
+/* 階層の区切りの線は当たりの上に描くので、押しても当たり（区切りを選ぶ）に届くようにする */
+.level-separator {
+    pointer-events: none;
+}
