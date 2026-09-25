@@ -114,7 +114,10 @@ export interface StackTotals {
 
 /** カテゴリ 1 つぶんの棒（系列の順＝凡例の順） */
 export interface CategoryGroup {
+    /** 名前（ツールヒント・読み上げ・書式の適用先）。階層は上のレベルから全部つなぐ（ドリルした共通の親も入れる） */
     category: string;
+    /** 軸に 1 行で出す名前（「ラベルの連結」）。ドリルした共通の親は外す */
+    label: string;
     /** 階層のレベルごとの表示（上のレベルから）。1 列なら [category] */
     levels: string[];
     /** レベルごとの元の値を見分けるキー。親の区切りと並べ替えは表示ではなくこれで見る */
@@ -445,6 +448,10 @@ export interface ViewModel {
      */
     ticksFor: (count: number) => Tick[];
     unitInfo: UnitInfo;
+    /** ドリルダウンした位置（「事業A ＞ 製品A1」）。ドリルしていない・出さないときは空 */
+    drillPath: string;
+    /** どのカテゴリでも同じ上の階層の値（軸の段から外したもの。読み上げの名前に使う）。書式でドリルの位置を消しても入る */
+    commonLevels: string[];
     columns: ColumnsSettings;
     /** 書式ペインの「設定の適用先」。系列 1 本ならカテゴリ、複数なら系列 */
     columnTargets: ColumnTarget[];
@@ -497,6 +504,11 @@ const clampBorderWidth = (v: number): number => Math.max(1, Math.min(5, v));
 
 /** 対数目盛りの本数の上限。標準の値軸と同程度（5〜8 本）に収める */
 export const MAX_LOG_TICKS = 8;
+
+/** ドリルダウンした位置の区切り（ウォーターフォールと同じ） */
+export const DRILL_PATH_SEPARATOR = " ＞ ";
+/** ドリルした親が空白のときに出す文字（ウォーターフォールと同じ） */
+export const BLANK_LEVEL_TEXT = "(空白)";
 
 /** Math.log10 の丸め誤差を吸収する（10 の冪ならちょうどの整数を返す） */
 /**
@@ -716,6 +728,8 @@ const EMPTY: ViewModel = {
     zeroRatio: 0,
     ticks: [],
     ticksFor: () => [],
+    drillPath: "",
+    commonLevels: [],
     unitInfo: {
         unitDef: UNIT_DEFINITIONS["0"],
         badgeText: "",
@@ -1082,6 +1096,29 @@ export function transform(
             if (raw === null || raw === undefined) return "blank";
             return raw instanceof Date ? `date:${raw.getTime()}` : `${typeof raw}:${String(raw)}`;
         });
+    /**
+     * 上の階層のうち、どのカテゴリでも同じレベル（ウォーターフォールと同じ）。ドリルダウンすると親のレベルも届くが
+     * （事業A → 製品A1 に入ると、どの行も「事業A / 製品A1 / …」）、全部同じ親を軸の段に繰り返しても読めない。
+     * 軸の段・名前からは外し、ドリルの位置に出す。「すべて展開」で親が混ざるレベルから下は今までどおり段に出す。
+     * いちばん下のレベルは外さない（1 行だけでも名前は出す）
+     */
+    const commonDepth = (() => {
+        if (levelColumns.length < 2 || rowCount === 0) return 0;
+        const first = levelKeysAt(0);
+        let depth = 0;
+        while (depth < levelColumns.length - 1 && Array.from({ length: rowCount }, (_, i) => i).every((i) => levelKeysAt(i)[depth] === first[depth])) depth++;
+        return depth;
+    })();
+    /**
+     * ドリルダウンした位置。どのカテゴリでも同じ上の階層の値を「＞」でつなぐ（事業A に入り、製品A1 に入ると「事業A ＞ 製品A1」）。
+     * ドリルと、絞り込みで親が 1 つに決まった「すべて展開」は区別しない（どちらも、表示している項目がその親の下にあることは正しい）
+     */
+    const commonLevels =
+        rowCount > 0 ? levelsAt(0).slice(0, commonDepth).map((text, level) => (levelKeysAt(0)[level] === "blank" || text === "" ? BLANK_LEVEL_TEXT : text)) : [];
+    const drillPath = commonLevels.length && (settings.chart.drillPathShow?.value ?? true) ? commonLevels.join(DRILL_PATH_SEPARATOR) : "";
+    /** 軸に出すレベル（共通の親を外したもの） */
+    const shownLevelsAt = (i: number): string[] => levelsAt(i).slice(commonDepth);
+    const shownLevelKeysAt = (i: number): string[] => levelKeysAt(i).slice(commonDepth);
     /** 1 行で読むときの名前。階層は上のレベルから空白でつなぐ（標準の「ラベルの連結」と同じ） */
     const categoryText = (i: number): string => levelsAt(i).join(" ");
     /**
@@ -1538,7 +1575,7 @@ export function transform(
     // X軸設定の抽出
     const catAxis = settings.categoryAxis;
     const concatenateLabels = catAxis.concatenateLabels.value ?? false;
-    const levelNames = levelColumns.map((column) => column.source?.displayName ?? "");
+    const levelNames = levelColumns.map((column) => column.source?.displayName ?? "").slice(commonDepth);
     const autoCategoryTitle = concatenateLabels ? levelNames.join(" ") : levelNames[levelNames.length - 1];
     const categoryAxisSettings: CategoryAxisSettings = {
         show: catAxis.show.value ?? true,
@@ -1560,7 +1597,7 @@ export function transform(
         titleColor: catAxis.titleColor.value?.value || "#252423",
         minCategoryWidth: Math.max(0, Math.min(500, catAxis.minCategoryWidth.value ?? 20)),
         concatenateLabels,
-        levelCount: levelColumns.length,
+        levelCount: levelColumns.length - commonDepth,
         hierarchyStyle: getDropdownValue(catAxis.hierarchyStyle.value, "lines") === "boxed" ? "boxed" : "lines",
     };
 
@@ -1970,7 +2007,7 @@ export function transform(
                 }
                 : null;
 
-        categoryGroups.push({ category, levels: levelsAt(i), levelKeys: levelKeysAt(i), rowIndex: i, points, totals });
+        categoryGroups.push({ category, label: shownLevelsAt(i).join(" "), levels: shownLevelsAt(i), levelKeys: shownLevelKeysAt(i), rowIndex: i, points, totals });
 
         // 「その他」は書式の対象にしない（ID はまとめた最初のカテゴリの仮のもので、そこに保存するとそのカテゴリの書式になる）
         if (!seriesMode && i !== otherRow) {
@@ -2355,6 +2392,8 @@ export function transform(
         zeroRatio,
         ticks,
         ticksFor,
+        drillPath,
+        commonLevels,
         unitInfo: {
             unitDef: isLogScaleActive ? { ...unitDef, unitWord: "" } : unitDef,
             badgeText,

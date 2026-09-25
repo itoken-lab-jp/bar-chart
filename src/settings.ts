@@ -175,7 +175,15 @@ export class ChartCardSettings extends FormattingSettingsCard {
         value: ORIENTATION_ITEMS[0],
     });
 
-    slices = [this.chartType, this.orientation];
+    /** ドリルダウンしたとき、今いる位置（事業A ＞ 製品A1 など）を左上に出す（ウォーターフォールと同じ）。標準に無い項目 */
+    drillPathShow = new formattingSettings.ToggleSwitch({
+        name: "drillPathShow",
+        displayName: "ドリルの位置",
+        description: "ドリルダウンや絞り込みで、表示している項目の上の階層が 1 つに決まるとき、その位置（事業A ＞ 製品A1 など）を左上に出す",
+        value: true,
+    });
+
+    slices = [this.chartType, this.orientation, this.drillPathShow];
 }
 
 /** 棒の値の計算。なし（素の値）・累計・パレート */

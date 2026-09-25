@@ -404,7 +404,8 @@ export const App: React.FC<AppProps> = ({
         key: string
     ) => {
         const select = (multi: boolean) => onSelectMany?.(levelIdsOf(run), multi);
-        const path = viewModel.categoryGroups[run.start]?.levels.slice(0, level + 1).join(" ") || run.text;
+        // 読み上げ・ツールヒントの名前は、軸から外したドリルの共通の親も上に付ける
+        const path = [...viewModel.commonLevels, ...(viewModel.categoryGroups[run.start]?.levels.slice(0, level + 1) ?? [])].join(" ") || run.text;
         return (
             <g
                 key={key}
@@ -657,6 +658,55 @@ export const App: React.FC<AppProps> = ({
         return nodes;
     };
 
+    /**
+     * ドリルダウンした位置（事業A ＞ 製品A1）。カテゴリの軸と同じ文字で、左端から maxWidth まで。
+     * 入りきらなければ末尾を「…」で省き、マウスを乗せると全部出す（省かないときも出す。ウォーターフォールと同じ）
+     */
+    const drillPathFont = (): FontSpec => ({
+        family: viewModel.categoryAxis.fontFamily,
+        size: viewModel.categoryAxis.fontSize * PT_TO_PX,
+        bold: viewModel.categoryAxis.bold,
+        italic: viewModel.categoryAxis.italic,
+        underline: viewModel.categoryAxis.underline,
+    });
+    /** maxWidth に収まるドリルの位置の文字。1 文字と「…」も入らなければ空（出さず、行もとらない） */
+    const fittedDrillPath = (maxWidth: number): string => {
+        const path = viewModel.drillPath;
+        if (!path || maxWidth < 1) return "";
+        const font = drillPathFont();
+        const shown = truncateText(path, maxWidth, font);
+        return measureTextWidth(shown, font) <= maxWidth + 0.5 ? shown : "";
+    };
+    const renderDrillPath = (x: number, y: number, maxWidth: number) => {
+        const path = viewModel.drillPath;
+        const font = drillPathFont();
+        const shown = fittedDrillPath(maxWidth);
+        if (!shown) return null;
+        return (
+            <text
+                x={x}
+                y={y}
+                className="drill-path"
+                textAnchor="start"
+                pointerEvents="visiblePainted"
+                style={{
+                    fontSize: `${viewModel.categoryAxis.fontSize}pt`,
+                    fontFamily: font.family,
+                    fontWeight: font.bold ? "bold" : "normal",
+                    fontStyle: font.italic ? "italic" : "normal",
+                    textDecoration: font.underline ? "underline" : undefined,
+                    fill: viewModel.categoryAxis.labelColor,
+                }}
+            >
+                {shown}
+                <title>{path}</title>
+            </text>
+        );
+    };
+    /** 単位のラベルの幅（ドリルの位置を並べるときに空ける）。文字はカテゴリの軸の書体で見積もる */
+    const badgeWidthOf = (text: string, fontPt: number) =>
+        text ? measureTextWidth(text, { ...drillPathFont(), size: fontPt * PT_TO_PX, bold: false, italic: false, underline: false }) : 0;
+
     /** グラフ本体（軸・棒・ラベル）。width・height は凡例を除いた領域 */
     const renderChart = (width: number, height: number) => {
         const badgeText = viewModel.unitInfo.badgeText;
@@ -722,14 +772,29 @@ export const App: React.FC<AppProps> = ({
                 ? axisContentWidth + gapTitleToTicks + valTitleFontSizePx + rightPadding
                 : Math.max(24, axisContentWidth + rightPadding))
             : Math.max(24, axis2Width + rightPadding);
-        const marginTop = badgeText || axis2BadgeText ? 36 : 22;
+        const marginTopBase = badgeText || axis2BadgeText ? 36 : 22;
+        // ドリルの位置（左上）。単位のラベルと同じ行に出す（行を積まない。ウォーターフォールと同じく、描く範囲を狭めない）。
+        // 単位のラベルが無くても同じ高さの行をとり、文字が大きければ行を広げる。
+        // 描く範囲の上にはみ出したデータラベル・合計ラベルとは、描いたラベルの枠で重なりを見て、その手前で省く（renderVerticalDrillPath）
+        const drillFontPx = catAxis.fontSize * PT_TO_PX;
+        const marginTopWithDrill = Math.max(36, Math.ceil(drillFontPx) + 16);
+        const drillY = marginTopWithDrill - 12;
+        // 左の列に単位（Y 軸の単位、Y 軸を右にしたときは第 2 Y 軸の単位）があれば、その右端（描く範囲の 6px 手前）から 10px 空ける
+        // （6px だと「(千円) FY26」が 1 つの文字に見えた）。「プロット エリアの右上」の単位があれば、その手前 8px まで
+        const leftColumnBadge = (isTopBadge && !isRightAxis) || (Boolean(axis2BadgeText) && isRightAxis);
+        const drillX = leftColumnBadge ? marginLeft + 4 : marginLeft;
+        const topRightBadgeRoom = badgeText && viewModel.unitInfo.unitPosition === "plotTopRight" ? badgeWidthOf(badgeText, viewModel.unitInfo.fontSize) + 8 : 0;
+        const drillMaxWidth = width - marginRight - topRightBadgeRoom - drillX;
+        // 低い図で行をとると描く範囲が潰れ、軸がビジュアルの外へ押し出される。足す高さが図の 12% を超えるなら出さない
+        const drillPathOn = Boolean(fittedDrillPath(drillMaxWidth)) && marginTopWithDrill - marginTopBase <= height * 0.12;
+        const marginTop = drillPathOn ? marginTopWithDrill : marginTopBase;
 
         // X軸カテゴリラベルの幅（実測）と回転の判定
         const catFontSizePx = catAxis.fontSize * PT_TO_PX;
         const catFont: FontSpec = { family: catAxis.fontFamily, size: catFontSizePx, bold: catAxis.bold, italic: catAxis.italic, underline: catAxis.underline };
         // 階層を段に重ねるときは、棒のすぐ下にいちばん下のレベルだけを出し、上のレベルはその下の段に出す
         const stackedLevels = catAxis.show && catAxis.levelCount > 1 && !catAxis.concatenateLabels;
-        const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.category);
+        const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.label);
 
         // カテゴリ最小幅と横スクロール判定
         const viewWidth = Math.max(10, width - marginLeft - marginRight);
@@ -927,6 +992,8 @@ export const App: React.FC<AppProps> = ({
         };
 
         /** 棒 1 本（系列 1 本ぶん）。cx は棒の中心の x */
+        /** 描いたデータラベル・合計ラベルの枠（プロットの座標）。ドリルの位置を重ねないために集める */
+        const labelBoxes: Array<{ x0: number; x1: number; y0: number; y1: number }> = [];
         const renderBar = (d: DataPoint, cx: number, key: string) => {
             if (d.blank) return null;
             const barLeft = cx - barWidth / 2;
@@ -1047,6 +1114,13 @@ export const App: React.FC<AppProps> = ({
                         if (!placed.fitsVertically && !placed.outside) return null;
                         if (!placed.fitsAlongBar && !dl.overflow) return null;
 
+                        // 縦向きのラベルは rotate(-90)：(x, y) → (y, −x)
+                        const bx = placed.box;
+                        labelBoxes.push(
+                            isVertical
+                                ? { x0: cx + bx.y, x1: cx + bx.y + bx.height, y0: placed.y - bx.x - bx.width, y1: placed.y - bx.x }
+                                : { x0: cx + bx.x, x1: cx + bx.x + bx.width, y0: placed.y + bx.y, y1: placed.y + bx.y + bx.height }
+                        );
                         const autoColor = placed.outside || dl.backgroundShow ? "#252423" : contrastingText(d.color);
                         const bgOpacity = (100 - dl.backgroundTransparency) / 100;
 
@@ -1111,6 +1185,8 @@ export const App: React.FC<AppProps> = ({
                 const edgeY = yOfRatio(label.ratio);
                 const baseline = outwardUp ? edgeY - 4 : edgeY + fontPx * 0.85 + 4;
                 const width = measureTextWidth(label.text, font);
+                const boxTop = baseline - fontPx * 0.85 - LABEL_PADDING / 2;
+                labelBoxes.push({ x0: cx - width / 2 - LABEL_PADDING, x1: cx + width / 2 + LABEL_PADDING, y0: boxTop, y1: boxTop + fontPx + LABEL_PADDING });
                 return (
                     <g key={`total-${label.key}`} className="total-label-group" pointerEvents="none">
                         {tl.backgroundShow && (
@@ -1491,6 +1567,25 @@ export const App: React.FC<AppProps> = ({
                 </text>
             ) : null;
 
+        /**
+         * ドリルの位置。描いたデータラベル・合計ラベル（labelBoxes）のうち、文字の行に掛かるものがあれば、いちばん左のものの 6px 手前で省く
+         * （入らなければ出さない）。renderPlot のあとに呼ぶ。スクロールする図では、ドリルの位置は固定でラベルが流れるので、
+         * スクロールの端まで動かしたときにラベルが来る位置で見る（右の棒のラベルも、スクロールすればドリルの位置の下を通る）
+         */
+        const renderVerticalDrillPath = () => {
+            if (!drillPathOn) return null;
+            const top = drillY - drillFontPx * 0.85;
+            const bottom = drillY + drillFontPx * 0.25;
+            const shift = scrolls ? marginLeft : 0;
+            const maxScroll = scrolls ? Math.max(0, plotWidth - viewWidth) : 0;
+            let right = drillX + drillMaxWidth;
+            for (const b of labelBoxes) {
+                if (b.y1 <= top || b.y0 >= bottom || b.x1 + shift <= drillX) continue;
+                right = Math.min(right, b.x0 + shift - maxScroll - 6);
+            }
+            return renderDrillPath(drillX, drillY, right - drillX);
+        };
+
         const renderYAxis = () => {
             return (
                 <g className="y-axis-container">
@@ -1697,6 +1792,7 @@ export const App: React.FC<AppProps> = ({
                     aria-label="単位つき棒グラフ（Y軸）"
                 >
                     {renderPlotTopRightBadge()}
+                {renderVerticalDrillPath()}
                     {renderYAxis()}
                     {renderY2Axis()}
                 </svg>
@@ -1754,6 +1850,8 @@ export const App: React.FC<AppProps> = ({
 
                 {/* プロット描画 (オフセット marginLeft) */}
                 {renderPlot(marginLeft)}
+                {/* ドリルの位置は、描いたラベルの枠を見るのでプロットのあと */}
+                {renderVerticalDrillPath()}
 
                 {/* Y軸（目盛・線・タイトル・軸上バッジ）と第 2 Y 軸 */}
                 {renderYAxis()}
@@ -1836,14 +1934,23 @@ export const App: React.FC<AppProps> = ({
         const catFont = { family: catAxis.fontFamily, size: catFontPx, bold: catAxis.bold, italic: catAxis.italic, underline: catAxis.underline };
         // 階層を段に重ねるときは、棒のすぐ左にいちばん下のレベルだけを出し、上のレベルはさらに左の列に出す
         const stackedLevels = catAxis.show && catAxis.levelCount > 1 && !catAxis.concatenateLabels;
-        const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.category);
+        const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.label);
         const widestLabel = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(labelOf(g), catFont))) : 0;
         const catTitleWidth = hasCatTitle ? catTitleFontPx + 8 : 0;
         // パレートのランクの帯。いちばん下のレベルのラベルのすぐ左に 1 列取る
         const pareto = viewModel.pareto;
         const rankBandOn = pareto.enabled && pareto.showRankBand && catAxis.show;
         const marginRight = 16;
-        const marginTop = 10 + (valueAtTop ? axisBlockHeight : 0) + (axis2AtTop ? axis2BlockHeight : 0) + (badgeAtTopRight ? badgeFontPx + 6 : 0);
+        // いちばん上の行：「プロット エリアの右上」の単位（右）とドリルの位置（左）。どちらか大きい文字に合わせる
+        const badgeRowFontPx = badgeAtTopRight ? badgeFontPx : 0;
+        const drillRowFontPx = Math.max(badgeRowFontPx, catAxis.fontSize * PT_TO_PX);
+        // 幅は、縦のスクロールバー（12px）が出ても収まるように見積もる
+        const drillMaxWidth = (badgeAtTopRight ? width - marginRight - 12 - badgeWidthOf(badgeText, viewModel.unitInfo.fontSize) - 8 : width - marginRight - 12) - 4;
+        // 低い図で行を足すと描く範囲が潰れ、軸がビジュアルの外へ押し出される。足す高さが図の 12% を超えるなら出さない
+        const drillExtra = drillRowFontPx + 6 - (badgeRowFontPx ? badgeRowFontPx + 6 : 0);
+        const drillPathOn = Boolean(fittedDrillPath(drillMaxWidth)) && drillExtra <= height * 0.12;
+        const topRowFontPx = drillPathOn ? drillRowFontPx : badgeRowFontPx;
+        const marginTop = 10 + (valueAtTop ? axisBlockHeight : 0) + (axis2AtTop ? axis2BlockHeight : 0) + (topRowFontPx ? topRowFontPx + 6 : 0);
         const marginBottom = 6 + (valueAtTop ? axis2BlockHeight : axisBlockHeight);
         const viewHeight = Math.max(10, height - marginTop - marginBottom);
 
@@ -2496,7 +2603,7 @@ export const App: React.FC<AppProps> = ({
                     {badgeText && (
                         <text
                             x={plotRightX}
-                            y={badgeAtTopRight ? 10 + badgeFontPx * 0.85 : badgeY}
+                            y={badgeAtTopRight ? 10 + topRowFontPx * 0.85 : badgeY}
                             className="unit-axis-badge"
                             textAnchor="end"
                             style={{ fontSize: `${viewModel.unitInfo.fontSize}pt`, fill: viewModel.unitInfo.color }}
@@ -2504,6 +2611,8 @@ export const App: React.FC<AppProps> = ({
                             {badgeText}
                         </text>
                     )}
+                    {drillPathOn &&
+                        renderDrillPath(4, 10 + topRowFontPx * 0.85, drillMaxWidth)}
                     {renderH2Axis()}
                     {hasCatTitle && (
                         <text

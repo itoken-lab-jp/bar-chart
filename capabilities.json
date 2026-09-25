@@ -49,6 +49,12 @@
                     "type": {
                         "enumeration": []
                     }
+                },
+                "drillPathShow": {
+                    "displayName": "ドリルの位置",
+                    "type": {
+                        "bool": true
+                    }
                 }
             }
         },
