@@ -40,6 +40,10 @@ import {
 } from "./unitUtils";
 import { collapseOthers, lineIndependenceOf } from "./others";
 import { TooltipSource, TooltipStack, TooltipColumn, tooltipColumnOf, formatTooltipValue, categoryTooltipRows, BLANK_TEXT } from "./tooltip";
+import { ticksUpTo, tickCountOf, boundOf } from "./shared/ticks";
+import { formatSigned, NEGATIVE_STYLES, SignStyle, ZERO_STYLES } from "./shared/numberFormat";
+
+export { tickCountOf };
 
 export interface DataPoint {
     category: string;
@@ -505,9 +509,9 @@ const clampBorderWidth = (v: number): number => Math.max(1, Math.min(5, v));
 /** 対数目盛りの本数の上限。標準の値軸と同程度（5〜8 本）に収める */
 export const MAX_LOG_TICKS = 8;
 
-/** ドリルダウンした位置の区切り（ウォーターフォールと同じ） */
+/** ドリルダウンした位置の区切り */
 export const DRILL_PATH_SEPARATOR = " ＞ ";
-/** ドリルした親が空白のときに出す文字（ウォーターフォールと同じ） */
+/** ドリルした親が空白のときに出す文字（ツールヒントの空白の表記と同じ） */
 export const BLANK_LEVEL_TEXT = "(空白)";
 
 /** Math.log10 の丸め誤差を吸収する（10 の冪ならちょうどの整数を返す） */
@@ -536,28 +540,6 @@ function log10Snap(v: number): number {
  * 対数軸の目盛り（正の大きさ、lower < upper）。10 の冪を基本にし、3 本以上取れるときは
  * MAX_LOG_TICKS 以下になるよう桁を間引く。10 の冪が 2 本以下しか入らない狭い範囲では 1・2・5 を足す。
  */
-/**
- * 目盛りの値。本数が max を超えず、数字が同じ表示にならない（丸めで 0.005 と 0.01 がどちらも 0.01 になる、など）ように、
- * d3 の ticks の目安を max から下げていく（ticks の引数は目安で、0〜4 に 3 を渡すと 5 本返る）
- */
-export function ticksUpTo(domain: [number, number], max: number, labelsOf: (values: number[]) => string[]): number[] {
-    let values: number[] = [];
-    for (let count = Math.max(1, max); count >= 1; count--) {
-        values = scaleLinear().domain(domain).ticks(count);
-        const labels = labelsOf(values);
-        if (values.length <= max && new Set(labels).size === labels.length) return values;
-    }
-    return values;
-}
-
-/** 「目盛りの本数 (目安)」の入力を本数にする。空・数でない・1 以下は 0（自動）。多すぎる指定は 20 本まで */
-export function tickCountOf(text: string | undefined): number {
-    // 全角の数字も読む（「５」など）
-    const ascii = String(text ?? "").trim().replace(/[０-９]/g, (d) => String.fromCharCode(d.charCodeAt(0) - 0xfee0));
-    const n = Math.round(Number(ascii));
-    return Number.isFinite(n) && n >= 2 ? Math.min(20, n) : 0;
-}
-
 export function logAxisTicks(lower: number, upper: number): number[] {
     const eps = 1e-9;
     const inRange = (v: number) => v >= lower * (1 - eps) && v <= upper * (1 + eps);
@@ -1097,7 +1079,7 @@ export function transform(
             return raw instanceof Date ? `date:${raw.getTime()}` : `${typeof raw}:${String(raw)}`;
         });
     /**
-     * 上の階層のうち、どのカテゴリでも同じレベル（ウォーターフォールと同じ）。ドリルダウンすると親のレベルも届くが
+     * 上の階層のうち、どのカテゴリでも同じレベル。ドリルダウンすると親のレベルも届くが
      * （事業A → 製品A1 に入ると、どの行も「事業A / 製品A1 / …」）、全部同じ親を軸の段に繰り返しても読めない。
      * 軸の段・名前からは外し、ドリルの位置に出す。「すべて展開」で親が混ざるレベルから下は今までどおり段に出す。
      * いちばん下のレベルは外さない（1 行だけでも名前は出す）
@@ -1443,14 +1425,9 @@ export function transform(
 
     let userStart: number | undefined = undefined;
     let userEnd: number | undefined = undefined;
-    if (valAxis.start.value != null && valAxis.start.value.trim() !== "") {
-        const parsed = Number(valAxis.start.value.trim());
-        if (!isNaN(parsed)) userStart = parsed;
-    }
-    if (valAxis.end.value != null && valAxis.end.value.trim() !== "") {
-        const parsed = Number(valAxis.end.value.trim());
-        if (!isNaN(parsed)) userEnd = parsed;
-    }
+    // 桁区切りのカンマ（1,000）も読む。1.30 までは読めずに自動になっていた
+    userStart = boundOf(valAxis.start.value) ?? undefined;
+    userEnd = boundOf(valAxis.end.value) ?? undefined;
 
     let niceMin = 0;
     let niceMax = 1;
@@ -1617,6 +1594,10 @@ export function transform(
         return title;
     };
     const formattedValueTitle = styledTitle(rawValueTitle, valueTitleStyle, composedUnit);
+    /** タイトルに単位を入れる（単位のみ・両方）ときは、単位のラベルを出さない（同じ単位を 2 か所に出さない。1.30 までは両方に出た） */
+    const unitInTitle = (titleShow: boolean, style: string, composed: string): boolean =>
+        titleShow && composed !== "" && (style === "showUnitOnly" || style === "showBoth");
+    const valueUnitInTitle = unitInTitle(valAxis.titleShow.value ?? true, valueTitleStyle, composedUnit);
 
     const valueAxisSettings: ValueAxisSettings = {
         start: valAxis.start.value ?? "",
@@ -1808,16 +1789,22 @@ export function transform(
     };
 
     const labelPrecision = dataLabelsSettings.precision !== "auto" ? dataLabelsSettings.precision : precision;
+    // データラベルのマイナスと 0 の書き方（▲・±0 など）
+    const labelSign: Partial<SignStyle> = {
+        negative: getDropdownValue(dl.negativeStyle.value, NEGATIVE_STYLES.minus),
+        zero: getDropdownValue(dl.zeroStyle.value, ZERO_STYLES.zero),
+        negativeZero: dl.negativeZero.value ?? true,
+    };
     const formatted = (val: number) =>
         // 100% 積み上げの軸は割合なので、データラベルは値ごとに単位を付ける（1,250億 など）
         isLogScaleActive || percent
             ? {
                 formattedValue: formatDynamicValue(val, unitNotation, precision, true),
-                dataLabelText: formatDynamicValue(val, unitNotation, labelPrecision, true),
+                dataLabelText: formatDynamicValue(val, unitNotation, labelPrecision, true, labelSign),
             }
             : {
                 formattedValue: formatValue(val, unitDef.divisor, precision),
-                dataLabelText: formatValue(val, unitDef.divisor, labelPrecision),
+                dataLabelText: formatSigned(val, unitDef.divisor, labelPrecision, labelSign),
             };
 
     // データラベルの詳細の行。全体に対する割合は、100% 積み上げと複数系列ではカテゴリの合計（正と負の絶対値）に対する割合、
@@ -2057,11 +2044,7 @@ export function transform(
 
     // --- 折れ線と第 2 Y 軸 ---------------------------------------------------
     const v2 = settings.valueAxis2;
-    const parseOptional = (raw: string | undefined | null): number | undefined => {
-        if (raw == null || raw.trim() === "") return undefined;
-        const n = Number(raw.trim());
-        return isNaN(n) ? undefined : n;
-    };
+    const parseOptional = (raw: string | undefined | null): number | undefined => boundOf(raw) ?? undefined;
     const v2Precision = getDropdownValue(v2.precision.value, "auto");
     // 表示単位・単位ラベル・タイトルのスタイルは Y 軸と同じ。率のメジャー（書式に % がある）は、
     // 100% 積み上げの Y 軸と同じく表示単位によらず % で出し、単位の語を付けない
@@ -2271,6 +2254,10 @@ export function transform(
         });
     }
 
+    // 累積比の軸は % なので、第 2 Y 軸の単位（円など）を付けない
+    const v2TitleStyle = paretoOn ? "showTitleOnly" : getDropdownValue(v2.titleStyle.value, "showTitleOnly");
+    const v2ComposedUnit = paretoOn ? "" : composeUnitText(unitWord2, v2UnitText, v2IncludeDisplayUnit);
+    const v2UnitInTitle = unitInTitle(v2.titleShow.value ?? true, v2TitleStyle, v2ComposedUnit);
     const valueAxis2Settings: ValueAxis2Settings = {
         show: onSecondary || paretoOn,
         valueShow: v2.valueShow.value ?? true,
@@ -2286,9 +2273,8 @@ export function transform(
         // 自動のタイトルは折れ線の名前（標準と同じ。複数なら「および」でつなぐ）
         titleText: styledTitle(
             v2.titleText.value?.trim() || (paretoOn ? "累積比" : lines.map((l) => l.name).join(" および ")),
-            // 累積比の軸は % なので、第 2 Y 軸の単位（円など）を付けない
-            paretoOn ? "showTitleOnly" : getDropdownValue(v2.titleStyle.value, "showTitleOnly"),
-            paretoOn ? "" : composeUnitText(unitWord2, v2UnitText, v2IncludeDisplayUnit)
+            v2TitleStyle,
+            v2ComposedUnit
         ),
         titleFontFamily: v2.titleFont.fontFamily.value ?? "DIN",
         titleFontSize: Math.max(8, Math.min(32, v2.titleFont.fontSize.value ?? 12)),
@@ -2296,7 +2282,7 @@ export function transform(
         titleItalic: v2.titleFont.italic?.value ?? false,
         titleUnderline: v2.titleFont.underline?.value ?? false,
         titleColor: v2.titleColor.value?.value || "#252423",
-        badgeText: onSecondary
+        badgeText: onSecondary && !v2UnitInTitle
             ? resolveBadgeText({
                 unitShow: v2.unitShow.value ?? true,
                 unitPosition: "valueAxisTop",
@@ -2396,7 +2382,7 @@ export function transform(
         commonLevels,
         unitInfo: {
             unitDef: isLogScaleActive ? { ...unitDef, unitWord: "" } : unitDef,
-            badgeText,
+            badgeText: valueUnitInTitle ? "" : badgeText,
             unitPosition,
             precision,
             fontSize: unitFontSize,

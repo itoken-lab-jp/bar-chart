@@ -1133,6 +1133,24 @@
                     "type": {
                         "enumeration": []
                     }
+                },
+                "negativeStyle": {
+                    "displayName": "マイナス",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "zeroStyle": {
+                    "displayName": "0",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "negativeZero": {
+                    "displayName": "丸めて 0 のマイナスに符号",
+                    "type": {
+                        "bool": true
+                    }
                 }
             }
         },

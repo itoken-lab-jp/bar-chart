@@ -135,7 +135,9 @@ export class Visual implements IVisual {
                     viewport: options.viewport,
                     settings: this.formattingSettings,
                     selectedIds: this.selectedIds,
+                    // 操作できない場所（ダッシュボードのタイルなど）では、選択・右クリックのメニューを送らない
                     onSelect: (id, multiSelect) => {
+                        if (!this.allowInteractions) return;
                         this.selectionManager.select(id, multiSelect).then((ids) => {
                             this.selectedIds = ids as ISelectionId[];
                             render();
@@ -153,13 +155,14 @@ export class Visual implements IVisual {
                         });
                     },
                     onClearSelection: () => {
-                        if (this.selectedIds.length === 0) return;
+                        if (!this.allowInteractions || this.selectedIds.length === 0) return;
                         this.selectionManager.clear().then(() => {
                             this.selectedIds = [];
                             render();
                         });
                     },
                     onContextMenu: (id, x, y) => {
+                        if (!this.allowInteractions) return;
                         this.selectionManager.showContextMenu(id, { x, y });
                     },
                     onTooltipShow: (d, x, y) => this.showTooltip(viewModel, d, x, y, false),

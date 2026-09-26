@@ -6,6 +6,8 @@ import VisualTooltipDataItem = powerbi.extensibility.VisualTooltipDataItem;
 import PrimitiveValue = powerbi.PrimitiveValue;
 import DataViewValueColumn = powerbi.DataViewValueColumn;
 
+import { BLANK_TEXT, toRootCoordinates } from "./shared/tooltip";
+
 /** ツールヒントに出す 1 列。values は DataView の配列をそのまま持ち、行番号で引く */
 export interface TooltipColumn {
     displayName: string;
@@ -52,10 +54,7 @@ export function tooltipColumnOf(column: DataViewValueColumn): TooltipColumn {
     };
 }
 
-/**
- * 空白の表記。valueFormatter の既定は英語の "(Blank)" なので、日本語の Power BI の表記に合わせる
- */
-export const BLANK_TEXT = "(空白)";
+export { BLANK_TEXT };
 
 /**
  * 標準の集合縦棒グラフと同じく、表示単位（億・百万など）で丸めず、
@@ -123,15 +122,4 @@ export function tooltipItemsOf(
     ];
 }
 
-/**
- * クライアント座標を、ビジュアルのルート要素の内側の座標に直す。
- * tooltipService はルート基準の座標を受け取る（powerbi-visuals-utils-tooltiputils と同じ計算）
- */
-export function toRootCoordinates(
-    clientX: number,
-    clientY: number,
-    root: Pick<HTMLElement, "getBoundingClientRect" | "clientLeft" | "clientTop">
-): [number, number] {
-    const rect = root.getBoundingClientRect();
-    return [clientX - rect.left - root.clientLeft, clientY - rect.top - root.clientTop];
-}
+export { toRootCoordinates };

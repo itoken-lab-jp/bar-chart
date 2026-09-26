@@ -11,6 +11,11 @@ import FormattingSettingsContainerItem = formattingSettings.ContainerItem;
 import FormattingSettingsSlice = formattingSettings.Slice;
 import FormattingSettingsModel = formattingSettings.Model;
 
+import { UNIT_TYPES, UNIT_NOTATIONS, PRECISIONS } from "./shared/units";
+import { LEGEND_POSITIONS, LEGEND_POSITION_ITEMS, standardLegendPosition, legendPlacementValue } from "./shared/legend";
+import { AUTO_PLACEHOLDER, AutoNumUpDown, itemOf } from "./shared/formatting";
+import { NEGATIVE_STYLE_ITEMS, ZERO_STYLE_ITEMS } from "./shared/numberFormat";
+
 export interface ColumnTarget {
     name: string;
     selector: powerbi.data.Selector;
@@ -30,27 +35,7 @@ export interface ColumnTarget {
  */
 export const MAX_COLUMN_TARGETS = 30;
 
-/**
- * 表示単位。value (0〜12 の桁数) はレポートに保存されるので変えない。表示名だけを単位の語にする。
- * 英語表記に K/M/bn/T の語が無い桁（万・億など）は、1 つ下の K/M/bn/T（十・百は単位なし）に
- * 読み替える（unitUtils.toStandardUnitKey）。
- */
-export const UNIT_TYPES = [
-    { value: "auto", displayName: "自動" },
-    { value: "0", displayName: "なし" },
-    { value: "1", displayName: "十" },
-    { value: "2", displayName: "百" },
-    { value: "3", displayName: "千" },
-    { value: "4", displayName: "万" },
-    { value: "5", displayName: "十万" },
-    { value: "6", displayName: "百万" },
-    { value: "7", displayName: "千万" },
-    { value: "8", displayName: "億" },
-    { value: "9", displayName: "十億" },
-    { value: "10", displayName: "百億" },
-    { value: "11", displayName: "千億" },
-    { value: "12", displayName: "兆" },
-];
+export { UNIT_TYPES, UNIT_NOTATIONS, PRECISIONS, AUTO_PLACEHOLDER, AutoNumUpDown };
 
 export const UNIT_POSITIONS = [
     { value: "valueAxisTop", displayName: "Y 軸の上 (左上)" },
@@ -58,44 +43,11 @@ export const UNIT_POSITIONS = [
     { value: "none", displayName: "非表示" },
 ];
 
-/** value は保存済みレポートとの互換のため変えない（"standard" = K・M・bn・T の表記） */
-export const UNIT_NOTATIONS = [
-    { value: "japanese", displayName: "日本語（万・億）" },
-    { value: "standard", displayName: "英語（K・M・bn）" },
-];
-
 /** 表示される形そのものを選択肢の名前にする。value は保存済みレポートとの互換のため変えない */
 export const UNIT_STYLES = [
     { value: "parentheses", displayName: "(百万円)" },
     { value: "withPrefix", displayName: "(単位: 百万円)" },
 ];
-
-export const PRECISIONS = [
-    { value: "auto", displayName: "自動" },
-    { value: "0", displayName: "0" },
-    { value: "1", displayName: "1" },
-    { value: "2", displayName: "2" },
-    { value: "3", displayName: "3" },
-];
-
-
-/** 値が空のとき入力欄に出す文字。標準の「外側のパディング」と同じ */
-export const AUTO_PLACEHOLDER = "自動";
-
-/**
- * 値を空（undefined）にでき、空のとき入力欄に「自動」と出す NumUpDown。
- * API の visuals.NumUpDown は placeholderText を持つが、formattingmodel 6.0.4 の
- * NumUpDown は options しか渡さないので、ここで足す。
- * 空のまま = 保存値なし = 自動。書式ペインの「既定値に戻す」でも空に戻る。
- */
-export class AutoNumUpDown extends formattingSettings.NumUpDown {
-    getFormattingComponent(objectName: string): powerbi.visuals.NumUpDown {
-        return {
-            ...super.getFormattingComponent(objectName),
-            placeholderText: AUTO_PLACEHOLDER,
-        };
-    }
-}
 
 /**
  * グラフの種類。標準では別々のビジュアルだが、barChart は書式ペインで切り替える。
@@ -175,7 +127,7 @@ export class ChartCardSettings extends FormattingSettingsCard {
         value: ORIENTATION_ITEMS[0],
     });
 
-    /** ドリルダウンしたとき、今いる位置（事業A ＞ 製品A1 など）を左上に出す（ウォーターフォールと同じ）。標準に無い項目 */
+    /** ドリルダウンしたとき、今いる位置（事業A ＞ 製品A1 など）を左上に出す。標準に無い項目 */
     drillPathShow = new formattingSettings.ToggleSwitch({
         name: "drillPathShow",
         displayName: "ドリルの位置",
@@ -624,68 +576,7 @@ class LabelTargetItem extends FormattingSettingsCard {
     }
 }
 
-export const LEGEND_POSITIONS = {
-    topLeft: "topLeft",
-    topCenter: "topCenter",
-    topRight: "topRight",
-    bottomLeft: "bottomLeft",
-    bottomCenter: "bottomCenter",
-    bottomRight: "bottomRight",
-    leftTop: "leftTop",
-    leftCenter: "leftCenter",
-    leftBottom: "leftBottom",
-    rightTop: "rightTop",
-    rightCenter: "rightCenter",
-    rightBottom: "rightBottom",
-} as const;
-
-/**
- * 凡例の位置の保存値は、標準のビジュアルとレポートテーマと同じ値（Top・Bottom など）にする。
- * 基本テーマ（Fluent 2 は "Bottom"）やカスタムテーマの値がそのまま届く。左下・右下は標準に無いので独自の値。
- * 描画は LEGEND_POSITIONS（辺と寄せ）で扱う
- */
-const LEGEND_POSITION_PLACEMENTS: Record<string, string> = {
-    Top: LEGEND_POSITIONS.topLeft,
-    TopCenter: LEGEND_POSITIONS.topCenter,
-    TopRight: LEGEND_POSITIONS.topRight,
-    Bottom: LEGEND_POSITIONS.bottomLeft,
-    BottomCenter: LEGEND_POSITIONS.bottomCenter,
-    BottomRight: LEGEND_POSITIONS.bottomRight,
-    Left: LEGEND_POSITIONS.leftTop,
-    LeftCenter: LEGEND_POSITIONS.leftCenter,
-    LeftBottom: LEGEND_POSITIONS.leftBottom,
-    Right: LEGEND_POSITIONS.rightTop,
-    RightCenter: LEGEND_POSITIONS.rightCenter,
-    RightBottom: LEGEND_POSITIONS.rightBottom,
-};
-
-/** 12 通り。既定は上詰め (左) */
-export const LEGEND_POSITION_ITEMS: powerbi.IEnumMember[] = [
-    { value: "Top", displayName: "上詰め (左)" },
-    { value: "TopCenter", displayName: "上詰め (中央)" },
-    { value: "TopRight", displayName: "上詰め (右)" },
-    { value: "Bottom", displayName: "下詰め (左)" },
-    { value: "BottomCenter", displayName: "下詰め (中央)" },
-    { value: "BottomRight", displayName: "下詰め (右)" },
-    { value: "Left", displayName: "左上" },
-    { value: "LeftCenter", displayName: "左中央" },
-    { value: "LeftBottom", displayName: "左下" },
-    { value: "Right", displayName: "右上" },
-    { value: "RightCenter", displayName: "右中央" },
-    { value: "RightBottom", displayName: "右下" },
-];
-
-/** 保存値を標準の値にする。1.26 までの保存値（topLeft など）も読み替える。知らない値は undefined */
-export function standardLegendPosition(value: unknown): string | undefined {
-    if (typeof value !== "string") return undefined;
-    if (value in LEGEND_POSITION_PLACEMENTS) return value;
-    return Object.keys(LEGEND_POSITION_PLACEMENTS).find((k) => LEGEND_POSITION_PLACEMENTS[k] === value);
-}
-
-/** 保存値を、描画で使う位置（topLeft など）にする。知らない値は上詰め (左) */
-export function legendPlacementValue(value: unknown): string {
-    return LEGEND_POSITION_PLACEMENTS[standardLegendPosition(value) ?? "Top"];
-}
+export { LEGEND_POSITIONS, LEGEND_POSITION_ITEMS, standardLegendPosition, legendPlacementValue };
 
 /** 凡例。系列が複数のとき（値が 2 つ以上か、凡例にフィールドがあるとき）だけ描く */
 export class LegendCardSettings extends FormattingSettingsCompositeCard {
@@ -847,6 +738,29 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
         value: PRECISIONS[0],
     });
 
+    /** マイナスの書き方（-・▲・△・括弧）。既定は - */
+    negativeStyle = new formattingSettings.ItemDropdown({
+        name: "negativeStyle",
+        displayName: "マイナス",
+        items: NEGATIVE_STYLE_ITEMS,
+        value: NEGATIVE_STYLE_ITEMS[0],
+    });
+
+    /** 0（丸めて 0 になる値を含む）の書き方（0・±0・-）。既定は 0 */
+    zeroStyle = new formattingSettings.ItemDropdown({
+        name: "zeroStyle",
+        displayName: "0",
+        items: ZERO_STYLE_ITEMS,
+        value: ZERO_STYLE_ITEMS[0],
+    });
+
+    /** 丸めて 0 になるマイナスに符号を残す（▲0）。切ると 0 の書き方にそろえる */
+    negativeZero = new formattingSettings.ToggleSwitch({
+        name: "negativeZero",
+        displayName: "丸めて 0 のマイナスに符号",
+        value: true,
+    });
+
     /** 値の行を出すか。既定はオンで、100% 積み上げでは保存していなければオフ（標準と同じ、applyChartTypeDefaults） */
     valueShow = new formattingSettings.ToggleSwitch({
         name: "valueShow",
@@ -965,6 +879,9 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
             this.italic,
             this.color,
             this.precision,
+            this.negativeStyle,
+            this.zeroStyle,
+            this.negativeZero,
         ],
     });
 
@@ -1225,9 +1142,6 @@ export const MARKER_SHAPE_ITEMS: powerbi.IEnumMember[] = [
     { value: "longDash", displayName: "― 長いダッシュ" },
     { value: "plus", displayName: "＋ プラス" },
 ];
-
-const itemOf = (items: powerbi.IEnumMember[], value: string): powerbi.IEnumMember =>
-    items.find((i) => i.value === value) ?? items[0];
 
 export const TITLE_STYLES = {
     showTitleOnly: "showTitleOnly",

@@ -1,22 +1,15 @@
 "use strict";
 
 import { FontSpec, measureTextWidth } from "./unitUtils";
+import { LegendSide, LegendAlign, legendPlacement } from "./shared/legend";
 
 /**
  * 凡例の配置。グラフの外側（上下左右のどれか）に置き、グラフに使えない幅を reserve で返す。
  * 座標はすべて凡例の枠 (box) の左上が原点。
  */
 
-export type LegendSide = "top" | "bottom" | "left" | "right";
-export type LegendAlign = "start" | "center" | "end";
-
-/** "topLeft" のような位置の値を、置く辺と寄せ方に分ける。知らない値は上詰め (左) */
-export function legendPlacement(position: string): { side: LegendSide; align: LegendAlign } {
-    const m = /^(top|bottom|left|right)(Left|Center|Right|Top|Bottom)$/.exec(position);
-    if (!m) return { side: "top", align: "start" };
-    const align: LegendAlign = m[2] === "Center" ? "center" : m[2] === "Left" || m[2] === "Top" ? "start" : "end";
-    return { side: m[1] as LegendSide, align };
-}
+export type { LegendSide, LegendAlign };
+export { legendPlacement };
 
 export interface LegendEntry {
     name: string;

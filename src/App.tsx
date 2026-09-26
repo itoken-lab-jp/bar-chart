@@ -11,6 +11,10 @@ import { contrastingText, placeLabel, labelBlock, measureTextWidth, LABEL_PADDIN
 import { clusterLayout, spanOf, levelRunsOf } from "./layout";
 import { layoutLegend, LegendLayout, LegendItemBox, LEGEND_MARKER_GAP } from "./legend";
 import { linePath, areaPath, markerPath, XY } from "./linePath";
+import { recommendedTickCount } from "./shared/ticks";
+import { gridDashOf } from "./shared/gridlines";
+import { blend } from "./shared/color";
+import { PT_TO_PX } from "./shared/text";
 
 /** 長ければ末尾を省略した文字（軸のタイトル用）。省略したときは、マウスを乗せると全体が出る */
 function fittedText(text: string, maxWidthPx: number, font: FontSpec): React.ReactNode {
@@ -42,6 +46,21 @@ function truncateText(text: string, maxWidthPx: number, font: FontSpec): string 
     return (lo > 0 ? text.slice(0, lo).trimEnd() : text.charAt(0)) + ellipsis;
 }
 
+/** データラベルを棒の外に置いたときの、文字の下の色（ビジュアルの背景） */
+const CHART_BACKGROUND = "#FFFFFF";
+
+/**
+ * データラベルの自動の文字色。文字のすぐ下の色で決める：背景を出すなら背景（透過性があれば下の色と混ぜた色）、
+ * 出さないなら置いた場所の色（棒の中は棒の色）。背景を出さずに棒の外に置いた文字は濃い灰色。
+ * 1.30 までは背景を出すと濃い灰色に固定していて、濃い背景に濃い文字が載った
+ */
+export function labelAutoColor(inside: boolean, barColor: string, dl: Pick<DataLabelsSettings, "backgroundShow" | "backgroundColor" | "backgroundTransparency">): string {
+    if (!dl.backgroundShow && !inside) return "#252423";
+    const underneath = inside ? barColor : CHART_BACKGROUND;
+    const base = dl.backgroundShow ? blend(dl.backgroundColor, underneath, dl.backgroundTransparency / 100) : underneath;
+    return contrastingText(base);
+}
+
 /** 斜めのカテゴリ名を、棒の下端から離す間隔 (px) */
 const ROTATED_LABEL_GAP = 8;
 /** 階層の「囲み」の枠：隣の枠とのすき間の半分と、角の丸み (px) */
@@ -58,8 +77,6 @@ const CATEGORY_LABEL_LEFT_SAFE_MARGIN = 20;
 /** ハイライトで該当しない部分（棒全体）の不透明度の係数 */
 const HIGHLIGHT_DIM_FACTOR = 0.35;
 
-/** pt -> px 換算比率 (1pt = 4/3 px = 1.3333...px) */
-const PT_TO_PX = 4 / 3;
 
 interface DataLabelLine extends LabelLine {
     kind: "value" | "detail";
@@ -123,14 +140,11 @@ export function fitTicks(ticksFor: (count: number) => Tick[], target: number, le
     return ticksFor(2);
 }
 
-export function recommendedTickCount(length: number, axis: "vertical" | "horizontal"): number {
-    const [small, medium] = axis === "vertical" ? [150, 300] : [300, 500];
-    return length < small ? 3 : length < medium ? 5 : 8;
-}
+export { recommendedTickCount };
 
 /**
  * グリッド線の線種。標準に合わせ、点線は細かい点（長さ 1 の線に丸い端）、破線は 4px 刻み。
- * crispEdges は掛けない（標準・ウォーターフォールと同じ）。画面の拡大率が整数でない（150% など）と、1px の線が
+ * crispEdges は掛けない（標準と同じ）。画面の拡大率が整数でない（150% など）と、1px の線が
  * 物理画素 1.5 個ぶんになり、crispEdges では線ごとに 1 個か 2 個に丸められて太さがそろわない（1.29.4.0 まで）
  */
 export function gridLineStroke(style: string, width = 1, scaleWithWidth = false): {
@@ -138,14 +152,10 @@ export function gridLineStroke(style: string, width = 1, scaleWithWidth = false)
     lineCap?: "round";
     shapeRendering: "crispEdges" | "auto";
 } {
-    // 「幅で拡大縮小」がオンなら、点線・破線の模様を線の幅に比例させる（標準と同じく、細い線では模様が細かくなる）。
-    // オフなら、幅によらず 1.10 までと同じ模様
-    const w = Math.max(1, width);
-    if (style === "dotted") {
-        return { dashArray: scaleWithWidth ? `${w} ${2 * w}` : "1 3", lineCap: "round", shapeRendering: "auto" };
-    }
-    if (style === "dashed") return { dashArray: scaleWithWidth ? `${3 * w} ${3 * w}` : "4 4", shapeRendering: "auto" };
-    return { shapeRendering: "auto" };
+    // 模様は gridDashOf（「幅で拡大縮小」がオンなら線の幅に比例、オフなら幅によらず同じ模様）。点線は丸い端で細かい点にする
+    const dashArray = gridDashOf(style, width, scaleWithWidth);
+    if (!dashArray) return { shapeRendering: "auto" };
+    return style === "dotted" ? { dashArray, lineCap: "round", shapeRendering: "auto" } : { dashArray, shapeRendering: "auto" };
 }
 
 /** 棒 (または棒のハイライト部分) の path。r > 0 なら値の向きの端だけ角を丸める */
@@ -660,7 +670,7 @@ export const App: React.FC<AppProps> = ({
 
     /**
      * ドリルダウンした位置（事業A ＞ 製品A1）。カテゴリの軸と同じ文字で、左端から maxWidth まで。
-     * 入りきらなければ末尾を「…」で省き、マウスを乗せると全部出す（省かないときも出す。ウォーターフォールと同じ）
+     * 入りきらなければ末尾を「…」で省き、マウスを乗せると全部出す（省かないときも出す）
      */
     const drillPathFont = (): FontSpec => ({
         family: viewModel.categoryAxis.fontFamily,
@@ -773,7 +783,7 @@ export const App: React.FC<AppProps> = ({
                 : Math.max(24, axisContentWidth + rightPadding))
             : Math.max(24, axis2Width + rightPadding);
         const marginTopBase = badgeText || axis2BadgeText ? 36 : 22;
-        // ドリルの位置（左上）。単位のラベルと同じ行に出す（行を積まない。ウォーターフォールと同じく、描く範囲を狭めない）。
+        // ドリルの位置（左上）。単位のラベルと同じ行に出す（行を積まず、描く範囲を狭めない）。
         // 単位のラベルが無くても同じ高さの行をとり、文字が大きければ行を広げる。
         // 描く範囲の上にはみ出したデータラベル・合計ラベルとは、描いたラベルの枠で重なりを見て、その手前で省く（renderVerticalDrillPath）
         const drillFontPx = catAxis.fontSize * PT_TO_PX;
@@ -833,7 +843,7 @@ export const App: React.FC<AppProps> = ({
             : Math.max(0, Math.min(1, columnsSettings.outerPadding / 100));
         const slots = (count || 1) - padRatio + 2 * outerRatio;
         // 斜めの名前は棒の中心から左下へ伸びるので、左の端で「…」に省かれないよう、はみ出す分だけ棒の並びの前を空ける
-        // （ウォーターフォールの先頭の余白と同じ考え方。2026-09-24。スクロールするとき・縦に立てるときは今までどおり）
+        // （スクロールするとき・縦に立てるときは空けない）
         const leadIn = (() => {
             if (!catAxis.show || stackedLevels || scrolls || !count) return 0;
             const step0 = plotWidth / slots;
@@ -1121,7 +1131,7 @@ export const App: React.FC<AppProps> = ({
                                 ? { x0: cx + bx.y, x1: cx + bx.y + bx.height, y0: placed.y - bx.x - bx.width, y1: placed.y - bx.x }
                                 : { x0: cx + bx.x, x1: cx + bx.x + bx.width, y0: placed.y + bx.y, y1: placed.y + bx.y + bx.height }
                         );
-                        const autoColor = placed.outside || dl.backgroundShow ? "#252423" : contrastingText(d.color);
+                        const autoColor = labelAutoColor(!placed.outside, d.color, dl);
                         const bgOpacity = (100 - dl.backgroundTransparency) / 100;
 
                         return (
@@ -2132,7 +2142,7 @@ export const App: React.FC<AppProps> = ({
                 // 積み上げでは隣が別の棒なので、値の向きに入りきらないラベルは出さない
                 if (inside && stacked && !fitsLength) return null;
                 if (inside && !(fitsLength && fitsThickness) && !dl.overflow) return null;
-                const autoColor = !inside || dl.backgroundShow ? "#252423" : contrastingText(d.color);
+                const autoColor = labelAutoColor(inside, d.color, dl);
                 const midY = top + thickness / 2;
                 // 背景は 1 行なら 1.10 までと同じ高さ、複数行ならまとまりの上端から下端
                 const firstPx = lines[0].font.size;
