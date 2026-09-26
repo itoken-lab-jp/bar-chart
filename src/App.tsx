@@ -15,6 +15,9 @@ import { recommendedTickCount } from "./shared/ticks";
 import { gridDashOf } from "./shared/gridlines";
 import { blend } from "./shared/color";
 import { PT_TO_PX } from "./shared/text";
+import { useScrollStart } from "./shared/scrollStart";
+import { CopyImageButton } from "./shared/CopyImageButton";
+import { TEXT_ATTRIBUTE } from "./shared/copyImage";
 
 /** 長ければ末尾を省略した文字（軸のタイトル用）。省略したときは、マウスを乗せると全体が出る */
 function fittedText(text: string, maxWidthPx: number, font: FontSpec): React.ReactNode {
@@ -236,6 +239,8 @@ export interface AppProps {
     onChangeCumulativeReset?: (reset: string) => void;
     /** 操作を受け付けるか（ダッシュボードのタイルでは false）。false なら切り替えボタンを出さない */
     interactive?: boolean;
+    /** 画像のコピーのボタンの右クリックで、ブラウザーのメニュー（「画像をコピー」）を出すか（Desktop では出ないので false） */
+    browserMenu?: boolean;
 }
 
 /** 閲覧者向けの累計の切り替えボタンの行の高さ (px)。出すときだけグラフの上に取る */
@@ -261,8 +266,23 @@ export const App: React.FC<AppProps> = ({
     onToggleCumulative,
     onChangeCumulativeReset,
     interactive = true,
+    browserMenu = false,
 }) => {
     const [hoveredKey, setHoveredKey] = React.useState<string | null>(null);
+
+    // はみ出したときの最初の位置。縦棒は横に、横棒は縦にスクロールする。末尾なら、カテゴリの数・両端が変わったら当て直す
+    const horizontalBars = viewModel.orientation === "horizontal";
+    const scrollGroups = viewModel.categoryGroups;
+    const scrollStart = useScrollStart<HTMLDivElement>({
+        axis: horizontalBars ? "y" : "x",
+        target: viewModel.categoryAxis.scrollStart === "end" ? "end" : "start",
+        shape: JSON.stringify([
+            viewModel.orientation,
+            scrollGroups.length,
+            scrollGroups[0]?.levelKeys ?? null,
+            scrollGroups[scrollGroups.length - 1]?.levelKeys ?? null,
+        ]),
+    });
 
     if (viewModel.isEmpty) {
         return (
@@ -1758,6 +1778,8 @@ export const App: React.FC<AppProps> = ({
                         Y軸の目盛り・タイトルの下に潜り込まない */}
                 <div
                     className="unit-bar-scroll"
+                    ref={scrollStart.ref}
+                    onScroll={scrollStart.onScroll}
                     style={{
                         position: "absolute",
                         left: marginLeft,
@@ -1829,6 +1851,7 @@ export const App: React.FC<AppProps> = ({
                     >
                         <span
                             className="x-axis-title"
+                            {...{ [TEXT_ATTRIBUTE]: "" }}
                             style={{
                                 fontSize: `${catAxis.titleFontSize}pt`,
                                 fontFamily: catAxis.titleFontFamily,
@@ -2664,6 +2687,8 @@ export const App: React.FC<AppProps> = ({
                     {/* 縦にスクロールする領域。カテゴリ名も棒と一緒に流れる */}
                     <div
                         className="unit-bar-vscroll"
+                        ref={scrollStart.ref}
+                        onScroll={scrollStart.onScroll}
                         style={{
                             position: "absolute",
                             left: marginLeft - labelAreaWidth,
@@ -2986,6 +3011,7 @@ export const App: React.FC<AppProps> = ({
                     {viewModel.notice}
                 </div>
             )}
+            {interactive && viewModel.copyButton && <CopyImageButton alt="グラフの画像" stamp={[viewModel, viewport.width, viewport.height, selectedIds]} browserMenu={browserMenu} />}
         </div>
     );
 };

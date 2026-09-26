@@ -14,6 +14,7 @@ import FormattingSettingsModel = formattingSettings.Model;
 import { UNIT_TYPES, UNIT_NOTATIONS, PRECISIONS } from "./shared/units";
 import { LEGEND_POSITIONS, LEGEND_POSITION_ITEMS, standardLegendPosition, legendPlacementValue } from "./shared/legend";
 import { AUTO_PLACEHOLDER, AutoNumUpDown, itemOf } from "./shared/formatting";
+import { SCROLL_START_ITEMS } from "./shared/scrollStart";
 import { NEGATIVE_STYLE_ITEMS, ZERO_STYLE_ITEMS, SIGN_TONE_MODE_ITEMS, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR } from "./shared/numberFormat";
 
 export interface ColumnTarget {
@@ -135,7 +136,15 @@ export class ChartCardSettings extends FormattingSettingsCard {
         value: true,
     });
 
-    slices = [this.chartType, this.orientation, this.drillPathShow];
+    /** マウスを乗せたとき、右下に「画像としてコピー」のボタンを出す。標準に無い項目 */
+    copyButton = new formattingSettings.ToggleSwitch({
+        name: "copyButton",
+        displayName: "画像のコピー",
+        description: "マウスを乗せたとき、右下に「画像としてコピー」のボタンを出す。押すと、見えているグラフを画像としてクリップボードに入れ、PowerPoint などに貼れる",
+        value: true,
+    });
+
+    slices = [this.chartType, this.orientation, this.drillPathShow, this.copyButton];
 }
 
 /** 棒の値の計算。なし（素の値）・累計・パレート */
@@ -1333,6 +1342,14 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
         value: 20,
     });
 
+    /** はみ出してスクロールするとき、開いたときにどこから見せるか。末尾は最後のカテゴリの側 */
+    scrollStart = new formattingSettings.ItemDropdown({
+        name: "scrollStart",
+        displayName: "スクロールの最初の位置",
+        items: SCROLL_START_ITEMS,
+        value: SCROLL_START_ITEMS[0],
+    });
+
     valuesGroup = new FormattingSettingsGroup({
         name: "categoryValues",
         displayName: "値",
@@ -1363,6 +1380,7 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
         displayName: "レイアウト",
         slices: [
             this.minCategoryWidth,
+            this.scrollStart,
         ],
     });
 

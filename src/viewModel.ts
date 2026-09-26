@@ -356,6 +356,8 @@ export interface CategoryAxisSettings {
     titleUnderline: boolean;
     titleColor: string;
     minCategoryWidth: number;
+    /** はみ出してスクロールするとき、開いたときにどこから見せるか（start・end） */
+    scrollStart: string;
     /** 階層のラベルを 1 行につなぐか（標準の「ラベルの連結」）。1 列のときは使わない */
     concatenateLabels: boolean;
     /** 階層のレベルの数。1 なら階層なし */
@@ -459,6 +461,8 @@ export interface ViewModel {
     unitInfo: UnitInfo;
     /** ドリルダウンした位置（「事業A ＞ 製品A1」）。ドリルしていない・出さないときは空 */
     drillPath: string;
+    /** 「画像としてコピー」のボタンを出すか */
+    copyButton: boolean;
     /** どのカテゴリでも同じ上の階層の値（軸の段から外したもの。読み上げの名前に使う）。書式でドリルの位置を消しても入る */
     commonLevels: string[];
     columns: ColumnsSettings;
@@ -588,6 +592,7 @@ const EMPTY_CATEGORY_AXIS: CategoryAxisSettings = {
     titleUnderline: false,
     titleColor: "#252423",
     minCategoryWidth: 20,
+    scrollStart: "start",
     concatenateLabels: false,
     levelCount: 1,
     hierarchyStyle: "lines",
@@ -716,6 +721,7 @@ const EMPTY: ViewModel = {
     ticks: [],
     ticksFor: () => [],
     drillPath: "",
+    copyButton: false,
     commonLevels: [],
     unitInfo: {
         unitDef: UNIT_DEFINITIONS["0"],
@@ -1578,6 +1584,7 @@ export function transform(
         titleUnderline: catAxis.titleFont.underline?.value ?? false,
         titleColor: catAxis.titleColor.value?.value || "#252423",
         minCategoryWidth: Math.max(0, Math.min(500, catAxis.minCategoryWidth.value ?? 20)),
+        scrollStart: getDropdownValue(catAxis.scrollStart.value, "start"),
         concatenateLabels,
         levelCount: levelColumns.length - commonDepth,
         hierarchyStyle: getDropdownValue(catAxis.hierarchyStyle.value, "lines") === "boxed" ? "boxed" : "lines",
@@ -2396,6 +2403,7 @@ export function transform(
         ticks,
         ticksFor,
         drillPath,
+        copyButton: settings.chart.copyButton?.value ?? true,
         commonLevels,
         unitInfo: {
             unitDef: isLogScaleActive ? { ...unitDef, unitWord: "" } : unitDef,

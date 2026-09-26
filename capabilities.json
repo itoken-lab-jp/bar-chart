@@ -50,6 +50,12 @@
                         "enumeration": []
                     }
                 },
+                "copyButton": {
+                    "displayName": "画像のコピー",
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "drillPathShow": {
                     "displayName": "ドリルの位置",
                     "type": {
@@ -1426,6 +1432,12 @@
                         "numeric": true
                     }
                 },
+                "scrollStart": {
+                    "displayName": "スクロールの最初の位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "gridlineShow": {
                     "displayName": "グリッド線（テーマの値）",
                     "type": {
@@ -1983,5 +1995,6 @@
         "default": {}
     },
     "supportsHighlight": true,
+    "supportsKeyboardFocus": true,
     "privileges": []
 }

@@ -11,6 +11,7 @@ import { FormattingSettingsService } from "powerbi-visuals-utils-formattingmodel
 
 import "./../style/visual.less";
 import { App } from "./App";
+import { hasBrowserMenu } from "./shared/copyImage";
 import { VisualFormattingSettingsModel, CALCULATION_MODES } from "./settings";
 import {
     VisualState,
@@ -188,6 +189,7 @@ export class Visual implements IVisual {
                     onRibbonTooltipShow: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, false),
                     onRibbonTooltipMove: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, true),
                     interactive: this.allowInteractions,
+                    browserMenu: hasBrowserMenu(this.host.hostEnv),
                     onToggleCumulative: () =>
                         this.changeVisualState({
                             ...this.visualState,
