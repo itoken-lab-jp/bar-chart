@@ -33,6 +33,7 @@ import {
     resolveUnit,
     formatValue,
     formatDynamicValue,
+    dynamicShownSign,
     resolveBadgeText,
     composeUnitText,
     UnitDefinition,
@@ -41,7 +42,7 @@ import {
 import { collapseOthers, lineIndependenceOf } from "./others";
 import { TooltipSource, TooltipStack, TooltipColumn, tooltipColumnOf, formatTooltipValue, categoryTooltipRows, BLANK_TEXT } from "./tooltip";
 import { ticksUpTo, tickCountOf, boundOf } from "./shared/ticks";
-import { formatSigned, NEGATIVE_STYLES, SignStyle, ZERO_STYLES } from "./shared/numberFormat";
+import { formatSigned, shownSignOf, toneOf, NEGATIVE_STYLES, SignStyle, ZERO_STYLES, TONE_MODES, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR } from "./shared/numberFormat";
 
 export { tickCountOf };
 
@@ -66,6 +67,8 @@ export interface DataPoint {
     rank: number | null;
     formattedValue: string;
     dataLabelText: string;
+    /** 値の行を符号で塗る色（「符号の色」）。塗らなければ空 */
+    labelToneColor: string;
     /** データラベルの詳細の行（全体に対する割合か、ラベルの詳細のフィールドの値）。無ければ空 */
     detailText: string;
     selectionId: ISelectionId;
@@ -428,6 +431,8 @@ export interface ColumnsSettings {
 }
 
 export interface ViewModel {
+    /** 読み込み中などの知らせ（左下に重ねる）。無ければ空か無し */
+    notice?: string;
     /** すべての棒。カテゴリの順（並べ替え後）→ 系列の順 */
     dataPoints: DataPoint[];
     /** カテゴリごとにまとめた棒。描画はこちらを使う */
@@ -1795,16 +1800,28 @@ export function transform(
         zero: getDropdownValue(dl.zeroStyle.value, ZERO_STYLES.zero),
         negativeZero: dl.negativeZero.value ?? true,
     };
+    // 値の行を符号で塗る（見える符号で決める。▲0 はマイナス、±0 は塗らない）
+    const toneMode = getDropdownValue(dl.toneMode.value, TONE_MODES.none);
+    const toneColors = {
+        good: dl.positiveColor.value?.value || DEFAULT_GOOD_COLOR,
+        bad: dl.negativeColor.value?.value || DEFAULT_BAD_COLOR,
+    };
+    const toneColorOf = (sign: number): string => {
+        const tone = toneOf(sign, 1, toneMode);
+        return tone ? toneColors[tone] : "";
+    };
     const formatted = (val: number) =>
         // 100% 積み上げの軸は割合なので、データラベルは値ごとに単位を付ける（1,250億 など）
         isLogScaleActive || percent
             ? {
                 formattedValue: formatDynamicValue(val, unitNotation, precision, true),
                 dataLabelText: formatDynamicValue(val, unitNotation, labelPrecision, true, labelSign),
+                labelToneColor: toneColorOf(dynamicShownSign(val, unitNotation, labelPrecision, labelSign)),
             }
             : {
                 formattedValue: formatValue(val, unitDef.divisor, precision),
                 dataLabelText: formatSigned(val, unitDef.divisor, labelPrecision, labelSign),
+                labelToneColor: toneColorOf(shownSignOf(val, unitDef.divisor, labelPrecision, labelSign)),
             };
 
     // データラベルの詳細の行。全体に対する割合は、100% 積み上げと複数系列ではカテゴリの合計（正と負の絶対値）に対する割合、
@@ -2454,3 +2471,10 @@ export function transform(
         isEmpty: dataPoints.length === 0,
     };
 }
+
+/** カテゴリが 30,000 件を超えて、続きを読み込んでいるあいだの知らせ */
+export const LOADING_NOTICE = "続きのカテゴリを読み込んでいます…";
+/** 続きを読み込めなかった（Power BI の読み込みの上限）ときの警告 */
+export const TRUNCATED_TITLE = "すべてのカテゴリを読み込めていません";
+export const TRUNCATED_NOTICE =
+    "Power BI の読み込みの上限で、すべてのカテゴリを読み込めていません。「その他」と積み上げの合計、パレートの累積比は、読み込めたカテゴリで計算しています。";

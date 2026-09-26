@@ -25,7 +25,7 @@ import {
 
 /** 保存の応答（update）を待つ上限 (ms)。過ぎたら、保存に失敗したものとして読み戻しを受け付ける */
 const PENDING_TIMEOUT_MS = 5000;
-import { transform, savedCumulativeReset, tooltipStackOf, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint } from "./viewModel";
+import { transform, savedCumulativeReset, tooltipStackOf, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint, LOADING_NOTICE, TRUNCATED_TITLE, TRUNCATED_NOTICE } from "./viewModel";
 import { tooltipItemsOf, toRootCoordinates } from "./tooltip";
 
 import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructorOptions;
@@ -52,6 +52,11 @@ export class Visual implements IVisual {
     private renderLatest: (() => void) | null = null;
     /** 最後の update（閲覧者が累計を切り替えたときに、同じ内容で作り直す） */
     private lastOptions: VisualUpdateOptions | null = null;
+    /**
+     * 続きの読み込み。カテゴリが 30,000 件を超えると、Power BI は続きを残して届ける（metadata.segment）。
+     * update() でだけ決める（閲覧者の操作で描き直すときに、もう一度読みに行かない）
+     */
+    private loadState: "complete" | "loading" | "truncated" = "complete";
     /** 閲覧者が触った累計の状態。ページを移ってもレポートから読み直す */
     private visualState: VisualState = EMPTY_VISUAL_STATE;
     /** persistProperties 直後の値。保存が返る前の古い dataView で操作を巻き戻さないための印 */
@@ -86,6 +91,13 @@ export class Visual implements IVisual {
 
         try {
             this.lastOptions = options;
+            // 続きがあれば全部読む（「その他」や積み上げの合計を、読み込めた分だけで計算しないため）。
+            // 読めない（100 MB の上限など）ときは、読めた分で描いて警告を出す
+            this.loadState = !options.dataViews?.[0]?.metadata?.segment
+                ? "complete"
+                : this.host.fetchMoreData(true)
+                  ? "loading"
+                  : "truncated";
             this.restoreVisualState(options.dataViews?.[0]);
             this.build(options);
             this.events.renderingFinished(options);
@@ -116,6 +128,9 @@ export class Visual implements IVisual {
             cumulative: effectiveCumulative(current, baseCumulative),
             cumulativeReset: current.cumulativeReset,
         });
+        if (this.loadState === "loading") viewModel.notice = LOADING_NOTICE;
+        // 警告は描き直すたびに消えるので、そのたびに出し直す
+        if (this.loadState === "truncated") this.host.displayWarningIcon(TRUNCATED_TITLE, TRUNCATED_NOTICE);
         // 書式ペインの区切りは書式の値のまま出す（閲覧者の選んだ区切りは書式を書き換えない）
         calc.applyCumulativeLevels(viewModel.cumulative.levels, authorReset);
         this.formattingSettings.lines.includeCumulative.visible = viewModel.cumulative.available;

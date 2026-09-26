@@ -14,7 +14,7 @@ import FormattingSettingsModel = formattingSettings.Model;
 import { UNIT_TYPES, UNIT_NOTATIONS, PRECISIONS } from "./shared/units";
 import { LEGEND_POSITIONS, LEGEND_POSITION_ITEMS, standardLegendPosition, legendPlacementValue } from "./shared/legend";
 import { AUTO_PLACEHOLDER, AutoNumUpDown, itemOf } from "./shared/formatting";
-import { NEGATIVE_STYLE_ITEMS, ZERO_STYLE_ITEMS } from "./shared/numberFormat";
+import { NEGATIVE_STYLE_ITEMS, ZERO_STYLE_ITEMS, SIGN_TONE_MODE_ITEMS, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR } from "./shared/numberFormat";
 
 export interface ColumnTarget {
     name: string;
@@ -761,6 +761,27 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
         value: true,
     });
 
+    /** 値の文字を符号で塗る（色なし・マイナスだけ・プラスとマイナス）。既定は色なし（今までの色） */
+    toneMode = new formattingSettings.ItemDropdown({
+        name: "toneMode",
+        displayName: "符号の色",
+        description: "棒の外のラベルと、背景を付けたラベルに効く。棒の中のラベルは、棒の色に合わせて読める色を自動で選ぶ",
+        items: SIGN_TONE_MODE_ITEMS,
+        value: SIGN_TONE_MODE_ITEMS[0],
+    });
+
+    positiveColor = new formattingSettings.ColorPicker({
+        name: "positiveColor",
+        displayName: "プラスの色",
+        value: { value: DEFAULT_GOOD_COLOR },
+    });
+
+    negativeColor = new formattingSettings.ColorPicker({
+        name: "negativeColor",
+        displayName: "マイナスの色",
+        value: { value: DEFAULT_BAD_COLOR },
+    });
+
     /** 値の行を出すか。既定はオンで、100% 積み上げでは保存していなければオフ（標準と同じ、applyChartTypeDefaults） */
     valueShow = new formattingSettings.ToggleSwitch({
         name: "valueShow",
@@ -882,6 +903,9 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
             this.negativeStyle,
             this.zeroStyle,
             this.negativeZero,
+            this.toneMode,
+            this.positiveColor,
+            this.negativeColor,
         ],
     });
 

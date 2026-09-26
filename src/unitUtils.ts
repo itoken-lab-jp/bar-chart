@@ -1,5 +1,5 @@
 import { pickUnitIndex } from "./shared/units";
-import { formatSigned, SignStyle } from "./shared/numberFormat";
+import { formatSigned, shownSignOf, SignStyle } from "./shared/numberFormat";
 
 /**
  * 日本語ビジネスレポート向け単位ユーティリティ
@@ -49,9 +49,21 @@ export function formatDynamicValue(
         return formatSigned(value, 1, precision, style);
     }
 
-    const ladder = notation === "standard" ? DYNAMIC_LADDER_STD : DYNAMIC_LADDER_JA;
-    const rung = ladder[pickUnitIndex(abs, ladder.map((r) => r.divisor), precision)];
+    const rung = dynamicRungOf(abs, notation, precision);
     return formatSigned(value, rung.divisor, precision, style, rung.word);
+}
+
+/** 値ごとに選ぶ単位の段（formatDynamicValue と同じ選び方） */
+function dynamicRungOf(abs: number, notation: string, precision: string): { divisor: number; word: string } {
+    const ladder = notation === "standard" ? DYNAMIC_LADDER_STD : DYNAMIC_LADDER_JA;
+    return ladder[pickUnitIndex(abs, ladder.map((r) => r.divisor), precision)];
+}
+
+/** formatDynamicValue（単位を付ける）で書いた文字の見える符号（-1・0・1）。色を決めるのに使う */
+export function dynamicShownSign(value: number, notation: string = "japanese", precision: string = "auto", style: Partial<SignStyle> = {}): -1 | 0 | 1 {
+    const abs = Math.abs(value);
+    if (abs === 0) return shownSignOf(0, 1, "0", style);
+    return shownSignOf(value, dynamicRungOf(abs, notation, precision).divisor, precision, style);
 }
 
 /**

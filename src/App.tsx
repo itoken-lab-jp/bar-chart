@@ -108,11 +108,15 @@ function labelLinesOf(dl: DataLabelsSettings, d: DataPoint): DataLabelLine[] {
     return lines;
 }
 
-/** データラベルの行の文字の見た目。色が空なら autoColor（棒の色に合わせた白か黒） */
-function labelTextStyle(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoint, autoColor: string): React.CSSProperties {
+/**
+ * データラベルの行の文字の見た目。色が空なら autoColor（棒の色に合わせた白か黒）。
+ * 「符号の色」は棒の外か背景を付けたラベルだけに効かせる（toneHere）。棒の中の文字を棒と別の色にすると読めなくなるので、
+ * 中は今までどおり読める色（標準も棒の中のラベルは白）
+ */
+function labelTextStyle(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoint, autoColor: string, toneHere: boolean): React.CSSProperties {
     const detail = line.kind === "detail";
     return {
-        fill: (detail ? dl.detailColor : d.labelColor) || autoColor,
+        fill: (detail ? dl.detailColor : (toneHere && d.labelToneColor) || d.labelColor) || autoColor,
         ...(detail && dl.detailTransparency > 0 ? { fillOpacity: 1 - dl.detailTransparency / 100 } : {}),
         fontSize: `${line.font.size / PT_TO_PX}pt`,
         fontFamily: line.font.family,
@@ -1132,6 +1136,7 @@ export const App: React.FC<AppProps> = ({
                                 : { x0: cx + bx.x, x1: cx + bx.x + bx.width, y0: placed.y + bx.y, y1: placed.y + bx.y + bx.height }
                         );
                         const autoColor = labelAutoColor(!placed.outside, d.color, dl);
+                        const toneHere = placed.outside || dl.backgroundShow;
                         const bgOpacity = (100 - dl.backgroundTransparency) / 100;
 
                         return (
@@ -1159,7 +1164,7 @@ export const App: React.FC<AppProps> = ({
                                         y={placed.baselines[k]}
                                         className={line.kind === "value" ? "data-label" : "data-label-detail"}
                                         textAnchor="middle"
-                                        style={labelTextStyle(dl, line, d, autoColor)}
+                                        style={labelTextStyle(dl, line, d, autoColor, toneHere)}
                                     >
                                         {line.text}
                                     </text>
@@ -2143,6 +2148,7 @@ export const App: React.FC<AppProps> = ({
                 if (inside && stacked && !fitsLength) return null;
                 if (inside && !(fitsLength && fitsThickness) && !dl.overflow) return null;
                 const autoColor = labelAutoColor(inside, d.color, dl);
+                const toneHere = !inside || dl.backgroundShow;
                 const midY = top + thickness / 2;
                 // 背景は 1 行なら 1.10 までと同じ高さ、複数行ならまとまりの上端から下端
                 const firstPx = lines[0].font.size;
@@ -2169,7 +2175,7 @@ export const App: React.FC<AppProps> = ({
                                 y={midY + block.baselines[k]}
                                 className={line.kind === "value" ? "data-label" : "data-label-detail"}
                                 textAnchor={anchor}
-                                style={labelTextStyle(dl, line, d, autoColor)}
+                                style={labelTextStyle(dl, line, d, autoColor, toneHere)}
                             >
                                 {line.text}
                             </text>
@@ -2961,6 +2967,24 @@ export const App: React.FC<AppProps> = ({
                 </div>
             ) : (
                 renderLegendAndBody()
+            )}
+            {viewModel.notice && (
+                <div
+                    className="unit-bar-notice"
+                    style={{
+                        position: "absolute",
+                        left: 4,
+                        bottom: 2,
+                        padding: "0 4px",
+                        fontFamily: viewModel.categoryAxis.fontFamily,
+                        fontSize: "8pt",
+                        color: viewModel.categoryAxis.labelColor,
+                        background: "rgba(255, 255, 255, 0.85)",
+                        pointerEvents: "none",
+                    }}
+                >
+                    {viewModel.notice}
+                </div>
             )}
         </div>
     );

@@ -1151,6 +1151,32 @@
                     "type": {
                         "bool": true
                     }
+                },
+                "toneMode": {
+                    "displayName": "符号の色",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "positiveColor": {
+                    "displayName": "プラスの色",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "negativeColor": {
+                    "displayName": "マイナスの色",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -1899,8 +1925,8 @@
                         "in": "category"
                     },
                     "dataReductionAlgorithm": {
-                        "top": {
-                            "count": 1000
+                        "window": {
+                            "count": 30000
                         }
                     }
                 },
