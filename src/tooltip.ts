@@ -99,7 +99,9 @@ export function tooltipItemsOf(
     rowIndex: number,
     category: string,
     seriesIndex = 0,
-    stack: TooltipStack = {}
+    stack: TooltipStack = {},
+    /** 比較レイヤーの行（「比較の列」の名前と値）。カテゴリの行のすぐ後に出す */
+    layerRow?: VisualTooltipDataItem
 ): VisualTooltipDataItem[] {
     const series = source.series?.[seriesIndex];
     const measure = series?.measure ?? source.measure;
@@ -109,6 +111,7 @@ export function tooltipItemsOf(
     const hasShare = stack.share !== null && stack.share !== undefined && measure.values[rowIndex] !== null && measure.values[rowIndex] !== undefined;
     return [
         ...categoryTooltipRows(source, rowIndex, category),
+        ...(layerRow ? [layerRow] : []),
         ...(series?.legendName ? [{ displayName: series.legendName, value: series.seriesName }] : []),
         { displayName: measure.displayName, value: hasShare ? `${measureText} (${formatShare(stack.share!)})` : measureText },
         ...(before ? [{ displayName: before.displayName, value: formatTooltipValue(before.values[rowIndex], before.format) }] : []),

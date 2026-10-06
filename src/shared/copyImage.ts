@@ -131,7 +131,7 @@ export function withResolution(png: Uint8Array, dpi: number): Uint8Array {
     return out;
 }
 
-function dataUrlWithResolution(url: string, dpi: number): string {
+export function dataUrlWithResolution(url: string, dpi: number): string {
     const prefix = "data:image/png;base64,";
     if (!url.startsWith(prefix)) return url;
     const bin = atob(url.slice(prefix.length));
@@ -143,13 +143,13 @@ function dataUrlWithResolution(url: string, dpi: number): string {
     return prefix + btoa(text);
 }
 
-const rectOf = (el: Element): Rect => {
+export const rectOf = (el: Element): Rect => {
     const r = el.getBoundingClientRect();
     return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
 };
 
 /** 要素から root までの、はみ出しを切る箱で切った見えている範囲 */
-function visibleRect(el: Element, root: HTMLElement): Rect | null {
+export function visibleRect(el: Element, root: HTMLElement): Rect | null {
     let rect: Rect | null = rectOf(el);
     for (let node = el.parentElement; node && rect; node = node.parentElement) {
         const style = getComputedStyle(node);
@@ -172,7 +172,7 @@ function inlineStyles(source: SVGSVGElement, copy: SVGSVGElement): void {
     });
 }
 
-async function drawSvg(ctx: CanvasRenderingContext2D, svg: SVGSVGElement, root: HTMLElement, origin: Rect): Promise<void> {
+export async function drawSvg(ctx: CanvasRenderingContext2D, svg: SVGSVGElement, root: HTMLElement, origin: Rect): Promise<void> {
     const box = rectOf(svg);
     const visible = visibleRect(svg, root);
     const width = box.right - box.left;

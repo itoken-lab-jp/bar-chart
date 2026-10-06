@@ -2,7 +2,7 @@
  * 「画像としてコピー」のボタン。グラフの入れ物（position を持つ要素）の直下に置く。
  *
  * - マウスを乗せたとき・キーボードで来たときだけ、右下に小さく出す。入れ物の中のスクロールバーが右下にあれば、その内側に避ける
- * - 押すと、入れ物の中の見えているグラフを画像にしてクリップボードに入れ、「コピーしました」を短く出す
+ * - 押すと、入れ物の中の見えているグラフを画像にしてクリップボードに入れ、「コピーしました」を短く出す（HTML で描いたものは capture に htmlImage）
  * - クリップボードに書けるのはクリックの操作の中だけなので、画像は入れ物にマウスが入ったとき（とボタンに来たとき）に作っておき、
  *   押したらその場で書く。中身が変わったとき（stamp が変わったとき）とスクロールしたときに捨てる。作っておけなかったときは
  *   押してから作って書き、ブラウザーが止めたら作った画像を覚えて「もう一度押してください」と出す（次に押せばその場で書く）
@@ -28,6 +28,8 @@ export interface CopyImageButtonProps {
     colors?: { foreground: string; background: string };
     /** ボタンの右クリックでブラウザーのメニュー（「画像をコピー」）を出すか。false なら入れ物に任せる（Power BI のメニュー） */
     browserMenu?: boolean;
+    /** 画像の作り方。既定は SVG で描いたグラフ（chartImage）。HTML で描いたものは htmlImage を渡す */
+    capture?: (root: HTMLElement, background: string) => Promise<ChartImage | null>;
 }
 
 type Status = "idle" | "done" | "again" | "failed";
@@ -81,7 +83,7 @@ function scrollbarInsets(root: HTMLElement): { right: number; bottom: number } {
     return { right, bottom };
 }
 
-export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, browserMenu = false }: CopyImageButtonProps): React.JSX.Element {
+export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, browserMenu = false, capture = chartImage }: CopyImageButtonProps): React.JSX.Element {
     const ref = React.useRef<HTMLButtonElement>(null);
     const cache = React.useRef(new PreparedImage());
     const pending = React.useRef<{ started: number; promise: Promise<ChartImage | null> } | null>(null);
@@ -103,7 +105,7 @@ export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, br
         if (ready) return Promise.resolve(ready);
         const started = cache.current.begin();
         if (pending.current && pending.current.started === started) return pending.current.promise;
-        const promise = chartImage(root, background).then(
+        const promise = capture(root, background).then(
             (image) => {
                 if (cache.current.store(started, image)) setImageUrl(image?.url ?? null);
                 // 作れなかったら、次に頼まれたときに作り直す
@@ -117,7 +119,7 @@ export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, br
         );
         pending.current = { started, promise };
         return promise;
-    }, [background]);
+    }, [background, capture]);
 
     /** 失敗しても何もしない（押したときに作り直す） */
     const prepareQuietly = React.useCallback((): void => {

@@ -5,7 +5,7 @@
  *
  * DataView を読む前に、値（「値」のロールの列の合計）の大きい順に上位 N 件のカテゴリを残し、残りを 1 行の「その他」に畳む。
  * 畳んだ DataView をそのまま transform に渡すので、描画・積み上げ・累計・パレートは今の仕組みで動く。
- * 「値」の列は足し、ほかの列（折れ線の値・ツールヒント・ラベルの詳細）は足しようが無いので空白にする。
+ * 「値」と、折れ線の率の分子・分母の列は足し、ほかの列（折れ線の値・ツールヒント・ラベルの詳細）は足しようが無いので空白にする。
  * X 軸の階層を展開しているとき（カテゴリの列が 2 つ以上）は、どのレベルで上位を数えるか決まらないので畳まない。
  */
 import powerbi from "powerbi-visuals-api";
@@ -29,6 +29,11 @@ export interface CollapsedOthers {
 }
 
 const isMeasure = (column: DataViewValueColumn) => !!column.source?.roles?.measure;
+/** 「その他」の行で足す列。率の分子・分母は足してから割れば、まとめたカテゴリの率になる */
+const isSummable = (column: DataViewValueColumn) => {
+    const roles = column.source?.roles;
+    return !!(roles?.measure || roles?.lineRatioNumerator || roles?.lineRatioDenominator);
+};
 
 const toNumber = (raw: PrimitiveValue | undefined): number | null => {
     if (raw === null || raw === undefined) return null;
@@ -75,7 +80,10 @@ export function lineIndependenceOf(dataView: DataView | undefined): Map<string, 
     return result;
 }
 
-export function collapseOthers(dataView: DataView | undefined, topCount: number, label: string): CollapsedOthers {
+/**
+ * keepRows を渡すと、値で選ばずにその行を残す（比較レイヤーの奥のレイヤーを、手前のレイヤーと同じカテゴリにまとめる）
+ */
+export function collapseOthers(dataView: DataView | undefined, topCount: number, label: string, keepRows?: number[]): CollapsedOthers {
     const none: CollapsedOthers = { dataView, otherRow: -1, mergedRows: [], otherPositiveTotal: 0 };
     const categorical = dataView?.categorical;
     const categories = categorical?.categories;
@@ -90,7 +98,7 @@ export function collapseOthers(dataView: DataView | undefined, topCount: number,
     const totalAt = (i: number) => sumOf(measures.map((column) => column.values[i])) ?? 0;
     // 値の大きい順に上位 N 件。同じ値なら元の順
     const ranked = Array.from({ length: rowCount }, (_, i) => i).sort((a, b) => totalAt(b) - totalAt(a));
-    const keepSet = new Set(ranked.slice(0, n));
+    const keepSet = new Set(keepRows ?? ranked.slice(0, n));
     // 残す行は元の並びのまま（並べ替えは transform の値順・パレートに任せる）
     const kept = Array.from({ length: rowCount }, (_, i) => i).filter((i) => keepSet.has(i));
     const mergedRows = Array.from({ length: rowCount }, (_, i) => i).filter((i) => !keepSet.has(i));
@@ -109,7 +117,7 @@ export function collapseOthers(dataView: DataView | undefined, topCount: number,
     const collapse = (column: DataViewValueColumn): DataViewValueColumn => {
         const found = columnMap.get(column);
         if (found) return found;
-        const measure = isMeasure(column);
+        const measure = isSummable(column);
         const next: DataViewValueColumn = {
             ...column,
             values: pick(column.values, measure ? sumOf(mergedRows.map((i) => column.values[i])) : null)!,

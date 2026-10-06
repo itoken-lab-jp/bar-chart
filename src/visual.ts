@@ -26,8 +26,9 @@ import {
 
 /** 保存の応答（update）を待つ上限 (ms)。過ぎたら、保存に失敗したものとして読み戻しを受け付ける */
 const PENDING_TIMEOUT_MS = 5000;
-import { transform, savedCumulativeReset, tooltipStackOf, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint, LOADING_NOTICE, TRUNCATED_TITLE, TRUNCATED_NOTICE } from "./viewModel";
-import { tooltipItemsOf, toRootCoordinates } from "./tooltip";
+import { savedCumulativeReset, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint, LOADING_NOTICE, TRUNCATED_TITLE, TRUNCATED_NOTICE, LINE_RATIO_WARNING_TITLE, VALUE_LINE_WARNING_TITLE } from "./viewModel";
+import { toRootCoordinates } from "./tooltip";
+import { transformWithLayers, nextVisibleLayers, barTooltipItems, COMPARE_LIMIT_TITLE } from "./compareLayers";
 
 import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructorOptions;
 import VisualUpdateOptions = powerbi.extensibility.visual.VisualUpdateOptions;
@@ -68,6 +69,11 @@ export class Visual implements IVisual {
     private lastRestoredVisualState: string | null = null;
     /** 操作を受け付けるか（ダッシュボードのタイルに固定すると false）。false なら切り替えボタンを出さない */
     private allowInteractions = true;
+    /**
+     * 凡例で選んだ比較レイヤー（compareLayers の添字）。空ならすべて描く。選んだレイヤーだけを並べ直して描く
+     * （通常の選択とは別に持ち、ほかのビジュアルを絞り込まない）。保存はしない
+     */
+    private visibleLayers: number[] = [];
 
     constructor(options: VisualConstructorOptions) {
         this.host = options.host;
@@ -125,13 +131,19 @@ export class Visual implements IVisual {
         // 作成者が書式を変えて古くなった閲覧者の操作は捨て、捨てた状態を保存し直す（保存が返す update では、もう捨てるものが無いので輪にならない）
         const current = withoutStale(this.visualState, baseCumulative, authorReset);
         if (current !== this.visualState) this.persistVisualState(current);
-        const viewModel: ViewModel = transform(options.dataViews?.[0], this.host, this.formattingSettings, {
+        const viewModel: ViewModel = transformWithLayers(options.dataViews?.[0], this.host, this.formattingSettings, {
             cumulative: effectiveCumulative(current, baseCumulative),
             cumulativeReset: current.cumulativeReset,
         });
         if (this.loadState === "loading") viewModel.notice = LOADING_NOTICE;
-        // 警告は描き直すたびに消えるので、そのたびに出し直す
-        if (this.loadState === "truncated") this.host.displayWarningIcon(TRUNCATED_TITLE, TRUNCATED_NOTICE);
+        // 警告は描き直すたびに消えるので、そのたびに出し直す。アイコンは 1 つしか出せないので、2 つあれば本文を並べる
+        const warnings = [
+            ...(this.loadState === "truncated" ? [{ title: TRUNCATED_TITLE, detail: TRUNCATED_NOTICE }] : []),
+            ...(viewModel.lineWarning ? [{ title: LINE_RATIO_WARNING_TITLE, detail: viewModel.lineWarning }] : []),
+            ...(viewModel.compareWarning ? [{ title: COMPARE_LIMIT_TITLE, detail: viewModel.compareWarning }] : []),
+            ...(viewModel.valueLineWarning ? [{ title: VALUE_LINE_WARNING_TITLE, detail: viewModel.valueLineWarning }] : []),
+        ];
+        if (warnings.length) this.host.displayWarningIcon(warnings[0].title, warnings.map((w) => w.detail).join(" "));
         // 書式ペインの区切りは書式の値のまま出す（閲覧者の選んだ区切りは書式を書き換えない）
         calc.applyCumulativeLevels(viewModel.cumulative.levels, authorReset);
         this.formattingSettings.lines.includeCumulative.visible = viewModel.cumulative.available;
@@ -142,6 +154,13 @@ export class Visual implements IVisual {
         });
         this.formattingSettings.applySingleSeriesFill(viewModel.seriesMode, viewModel.columns.fill, options.dataViews?.[0]?.metadata?.objects);
         this.formattingSettings.applyCardVisibility(viewModel.lines.length > 0);
+        // 「比較値」「比較の列」が無ければ「比較」のカードは出さない。「手前にする値」は「比較の列」のときだけ
+        this.formattingSettings.compare.visible = hasRole(options.dataViews?.[0], "compare") || hasRole(options.dataViews?.[0], "compareBy");
+        this.formattingSettings.compare.applyCompareBy(hasRole(options.dataViews?.[0], "compareBy"));
+        // 「X 軸の定数線」の欄が空なら、そのカードは出さない
+        this.formattingSettings.categoryLine.visible = hasRole(options.dataViews?.[0], "categoryLine");
+        // 比較レイヤーが変わったら（枚数が変わる・比較を外す）、凡例で選んだレイヤーは外す
+        if (this.visibleLayers.some((l) => l >= viewModel.compareLayers.length)) this.visibleLayers = [];
         this.selectedIds = this.selectionManager.getSelectionIds() as ISelectionId[];
 
         const render = () =>
@@ -189,6 +208,12 @@ export class Visual implements IVisual {
                     onRibbonTooltipShow: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, false),
                     onRibbonTooltipMove: (s, i, x, y) => this.showRibbonTooltip(viewModel, s, i, x, y, true),
                     interactive: this.allowInteractions,
+                    visibleLayers: this.visibleLayers,
+                    onSelectLayer: (layer, multiSelect) => {
+                        if (!this.allowInteractions) return;
+                        this.visibleLayers = nextVisibleLayers(this.visibleLayers, layer, multiSelect);
+                        render();
+                    },
                     browserMenu: hasBrowserMenu(this.host.hostEnv),
                     onToggleCumulative: () =>
                         this.changeVisualState({
@@ -258,7 +283,8 @@ export class Visual implements IVisual {
         const options = {
             coordinates: toRootCoordinates(clientX, clientY, this.element),
             isTouchEvent: false,
-            dataItems: tooltipItemsOf(viewModel.tooltip, d.rowIndex, d.category, d.seriesIndex, tooltipStackOf(viewModel, d)),
+            // 比較レイヤーの奥の棒は、そのレイヤーの値で出す
+            dataItems: barTooltipItems(viewModel, d),
             // 「その他」は、まとめたカテゴリの ID を全部渡す（ドリルスルーやレポート ページのツールヒントの対象）
             identities: d.selectionIds ?? [d.selectionId],
         };
@@ -312,4 +338,9 @@ export class Visual implements IVisual {
     public destroy(): void {
         this.root?.unmount();
     }
+}
+
+/** その欄にフィールドが入っているか（メタデータの列の役割で見る） */
+function hasRole(dataView: powerbi.DataView | undefined, role: string): boolean {
+    return (dataView?.metadata?.columns ?? []).some((column) => column.roles?.[role]);
 }

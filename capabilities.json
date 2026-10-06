@@ -17,16 +17,58 @@
             "description": "系列ごとに分ける。入れると値は 1 つに絞られる"
         },
         {
+            "displayName": "比較値",
+            "name": "compare",
+            "kind": "Measure",
+            "description": "「値」の奥に重ねて比べる値（予定・見通しなど）。メジャーを 4 つまで入れられ、入れた順に奥へ重なる。同じ幅の棒を少しずつずらして前後に重ね、奥ほど薄くする"
+        },
+        {
+            "displayName": "比較の列",
+            "name": "compareBy",
+            "kind": "Grouping",
+            "description": "予定・見通し・実績が 1 列に縦に並んでいるときは、その列を入れる。列の値ごとに、棒を同じ幅で少しずつずらして前後に重ねる（「比較値」の縦持ち版）。どの値を手前にするかは「比較」カードで選ぶ"
+        },
+        {
             "displayName": "折れ線の値",
             "name": "lineMeasure",
             "kind": "Measure",
             "description": "折れ線で描く値。棒と尺度が違えば右の第 2 Y 軸に出す"
         },
         {
+            "displayName": "折れ線の率の分子",
+            "name": "lineRatioNumerator",
+            "kind": "Measure",
+            "description": "率を折れ線で描くときの分子。分母と組で入れ、入れた順に組にする。凡例で分けても、系列をまたいで分子と分母をそれぞれ足してから割るので全体の率になる"
+        },
+        {
+            "displayName": "折れ線の率の分母",
+            "name": "lineRatioDenominator",
+            "kind": "Measure",
+            "description": "「折れ線の率の分子」と組で入れる。入れた順に分子と組にする"
+        },
+        {
+            "displayName": "X 軸の定数線",
+            "name": "categoryLine",
+            "kind": "Measure",
+            "description": "線を引くカテゴリで、空白でない値を返すメジャー（文字を返すと線のラベルになる）。X 軸のカテゴリごとに計算されるので、期の境目などはメジャーの中で日付の表を使って決める。日付の欄は要らない。4 つまで（横棒では Y 軸）"
+        },
+        {
+            "displayName": "Y 軸の定数線",
+            "name": "valueLine",
+            "kind": "Measure",
+            "description": "値の軸に横の線を引く値（目標・上限など）を返すメジャー。4 つまで。決まった数なら、書式設定の「Y 軸の定数線」カードの「値」に入れてもよい。カテゴリごとに違う値を返すと、先頭のカテゴリの値で引いて警告する（横棒では X 軸）"
+        },
+        {
             "displayName": "ラベルの詳細",
             "name": "labelDetail",
             "kind": "Measure",
             "description": "データ ラベルの「詳細」で、コンテンツを「カスタム」にしたときに出す値"
+        },
+        {
+            "displayName": "棒の色",
+            "name": "dataColor",
+            "kind": "Measure",
+            "description": "棒を塗る色（#1AAB40 のような色の文字）を返す列かメジャー。列は集計を「最初」にする。凡例があれば凡例ごと、無ければカテゴリごとの値で塗り、書式ペインの色より優先する"
         },
         {
             "displayName": "ツールヒント",
@@ -240,6 +282,12 @@
                         "numeric": true
                     }
                 },
+                "borderOutlineOnly": {
+                    "displayName": "内側の罫線を非表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "reverseOrder": {
                     "displayName": "順序を逆にする",
                     "type": {
@@ -268,6 +316,36 @@
                     "displayName": "系列間のスペース (%)",
                     "type": {
                         "numeric": true
+                    }
+                },
+                "overlap": {
+                    "displayName": "重複",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "overlapReverse": {
+                    "displayName": "重複を反転する",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "stackedSpacing": {
+                    "displayName": "系列間のスペース",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "stackedExplode": {
+                    "displayName": "系列の展開",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "reverseStackOrder": {
+                    "displayName": "積み上げ順を逆にする",
+                    "type": {
+                        "bool": true
                     }
                 },
                 "maxBarWidth": {
@@ -556,10 +634,47 @@
                         "numeric": true
                     }
                 },
+                "transparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
                 "lineStyle": {
                     "displayName": "線のスタイル",
                     "type": {
                         "enumeration": []
+                    }
+                },
+                "dashArray": {
+                    "displayName": "ダッシュ配列",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "scaleWithWidth": {
+                    "displayName": "幅で拡大縮小",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "dashCap": {
+                    "displayName": "ダッシュ キャップ",
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "none",
+                                "displayName": "フラット"
+                            },
+                            {
+                                "value": "round",
+                                "displayName": "丸"
+                            },
+                            {
+                                "value": "square",
+                                "displayName": "四角"
+                            }
+                        ]
                     }
                 },
                 "lineJoin": {
@@ -602,6 +717,18 @@
                     "displayName": "段の幅",
                     "type": {
                         "enumeration": []
+                    }
+                },
+                "formatMode": {
+                    "displayName": "書式",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "customFormat": {
+                    "displayName": "カスタム書式",
+                    "type": {
+                        "text": true
                     }
                 }
             }
@@ -718,6 +845,381 @@
                 }
             }
         },
+        "compare": {
+            "displayName": "比較",
+            "properties": {
+                "show": {
+                    "displayName": "比較",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "order": {
+                    "displayName": "手前にする値",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "frontValue": {
+                    "displayName": "手前にする値の名前",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "overlap": {
+                    "displayName": "重なり (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "direction": {
+                    "displayName": "手前の棒",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "backOpacity": {
+                    "displayName": "いちばん奥の不透明度 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "outline": {
+                    "displayName": "輪郭線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "showInLegend": {
+                    "displayName": "凡例に出す",
+                    "type": {
+                        "bool": true
+                    }
+                }
+            }
+        },
+        "categoryLine": {
+            "displayName": "X 軸の定数線",
+            "properties": {
+                "show": {
+                    "displayName": "X 軸の定数線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "position": {
+                    "displayName": "線を引く場所",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "color": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "transparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "lineStyle": {
+                    "displayName": "線のスタイル",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "dashArray": {
+                    "displayName": "ダッシュ配列",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "scaleWithWidth": {
+                    "displayName": "幅で拡大縮小",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "dashCap": {
+                    "displayName": "ダッシュ キャップ",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "width": {
+                    "displayName": "幅 (px)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "layer": {
+                    "displayName": "位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "shadeShow": {
+                    "displayName": "網掛け領域",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "shadeRegion": {
+                    "displayName": "位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "shadeMatchLine": {
+                    "displayName": "線の色を一致させる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "shadeColor": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "shadeTransparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "labelShow": {
+                    "displayName": "データ ラベル",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "labelHorizontal": {
+                    "displayName": "水平方向の位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "labelVertical": {
+                    "displayName": "縦位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "labelText": {
+                    "displayName": "スタイル",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "labelColor": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "labelFontSize": {
+                    "displayName": "テキストのサイズ",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "labelAvoidOverlap": {
+                    "displayName": "ラベルの重なりを避ける",
+                    "type": {
+                        "bool": true
+                    }
+                }
+            }
+        },
+        "valueLine": {
+            "displayName": "Y 軸の定数線",
+            "properties": {
+                "show": {
+                    "displayName": "Y 軸の定数線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "value": {
+                    "displayName": "値",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "name": {
+                    "displayName": "名前",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "axis": {
+                    "displayName": "軸",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "extendAxis": {
+                    "displayName": "軸を線に合わせて広げる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "color": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "transparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "lineStyle": {
+                    "displayName": "線のスタイル",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "dashArray": {
+                    "displayName": "ダッシュ配列",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "scaleWithWidth": {
+                    "displayName": "幅で拡大縮小",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "dashCap": {
+                    "displayName": "ダッシュ キャップ",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "width": {
+                    "displayName": "幅 (px)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "layer": {
+                    "displayName": "位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "shadeShow": {
+                    "displayName": "網掛け領域",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "shadeRegion": {
+                    "displayName": "位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "shadeMatchLine": {
+                    "displayName": "線の色を一致させる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "shadeColor": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "shadeTransparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "labelShow": {
+                    "displayName": "データ ラベル",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "labelHorizontal": {
+                    "displayName": "水平方向の位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "labelVertical": {
+                    "displayName": "縦位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "labelText": {
+                    "displayName": "スタイル",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "labelColor": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "labelFontSize": {
+                    "displayName": "テキストのサイズ",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "labelPrecision": {
+                    "displayName": "小数点以下桁数の値",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "labelAvoidOverlap": {
+                    "displayName": "ラベルの重なりを避ける",
+                    "type": {
+                        "bool": true
+                    }
+                }
+            }
+        },
         "markers": {
             "displayName": "マーカー",
             "properties": {
@@ -735,6 +1237,12 @@
                 },
                 "size": {
                     "displayName": "サイズ (px)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "rotation": {
+                    "displayName": "回転",
                     "type": {
                         "numeric": true
                     }
@@ -903,6 +1411,41 @@
                         ]
                     }
                 },
+                "legendMarkerRendering": {
+                    "displayName": "スタイル",
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "markerCircleDefault",
+                                "displayName": "マーカー（円）"
+                            },
+                            {
+                                "value": "markerOnly",
+                                "displayName": "マーカー"
+                            },
+                            {
+                                "value": "lineOnly",
+                                "displayName": "線"
+                            },
+                            {
+                                "value": "lineAndMarker",
+                                "displayName": "線とマーカー"
+                            }
+                        ]
+                    }
+                },
+                "matchLineColor": {
+                    "displayName": "線の色に合わせる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "reverseOrder": {
+                    "displayName": "表示順を反転",
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "fontFamily": {
                     "displayName": "フォント",
                     "type": {
@@ -994,6 +1537,18 @@
                         "bool": true
                     }
                 },
+                "optimizeLabelDisplay": {
+                    "displayName": "ラベルの表示を最適化",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "labelMaxWidth": {
+                    "displayName": "最大幅 (px)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
                 "fontSize": {
                     "displayName": "文字サイズ",
                     "type": {
@@ -1022,6 +1577,12 @@
                         "bool": true
                     }
                 },
+                "underline": {
+                    "displayName": "下線",
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "color": {
                     "displayName": "文字色",
                     "type": {
@@ -1030,6 +1591,12 @@
                                 "color": true
                             }
                         }
+                    }
+                },
+                "transparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
                     }
                 },
                 "valueShow": {
@@ -1110,6 +1677,12 @@
                     "displayName": "詳細の小数点以下の桁数",
                     "type": {
                         "enumeration": []
+                    }
+                },
+                "detailShowBlankAs": {
+                    "displayName": "空白の表示方法",
+                    "type": {
+                        "text": true
                     }
                 },
                 "backgroundShow": {
@@ -1776,10 +2349,48 @@
                         "bool": true
                     }
                 },
+                "horizontalDashCap": {
+                    "displayName": "ダッシュ キャップ",
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "none",
+                                "displayName": "フラット"
+                            },
+                            {
+                                "value": "round",
+                                "displayName": "丸"
+                            },
+                            {
+                                "value": "square",
+                                "displayName": "四角"
+                            }
+                        ]
+                    }
+                },
                 "verticalScaleWithWidth": {
                     "displayName": "幅で拡大縮小",
                     "type": {
                         "bool": true
+                    }
+                },
+                "verticalDashCap": {
+                    "displayName": "ダッシュ キャップ",
+                    "type": {
+                        "enumeration": [
+                            {
+                                "value": "none",
+                                "displayName": "フラット"
+                            },
+                            {
+                                "value": "round",
+                                "displayName": "丸"
+                            },
+                            {
+                                "value": "square",
+                                "displayName": "四角"
+                            }
+                        ]
                     }
                 },
                 "horizontalShow": {
@@ -1819,8 +2430,18 @@
                             {
                                 "value": "dotted",
                                 "displayName": "点線"
+                            },
+                            {
+                                "value": "custom",
+                                "displayName": "カスタム"
                             }
                         ]
+                    }
+                },
+                "horizontalDashArray": {
+                    "displayName": "ダッシュ配列",
+                    "type": {
+                        "text": true
                     }
                 },
                 "horizontalWidth": {
@@ -1866,8 +2487,18 @@
                             {
                                 "value": "dotted",
                                 "displayName": "点線"
+                            },
+                            {
+                                "value": "custom",
+                                "displayName": "カスタム"
                             }
                         ]
+                    }
+                },
+                "verticalDashArray": {
+                    "displayName": "ダッシュ配列",
+                    "type": {
+                        "text": true
                     }
                 },
                 "verticalWidth": {
@@ -1906,6 +2537,36 @@
                     }
                 }
             }
+        },
+        "subTotals": {
+            "displayName": "小計",
+            "properties": {
+                "rowSubtotals": {
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "perRowLevel": {
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "columnSubtotals": {
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "perColumnLevel": {
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "levelSubtotalEnabled": {
+                    "type": {
+                        "bool": true
+                    }
+                }
+            }
         }
     },
     "dataViewMappings": [
@@ -1917,6 +2578,21 @@
                     },
                     "labelDetail": {
                         "max": 1
+                    },
+                    "dataColor": {
+                        "max": 1
+                    },
+                    "compare": {
+                        "max": 0
+                    },
+                    "compareBy": {
+                        "max": 0
+                    },
+                    "categoryLine": {
+                        "max": 4
+                    },
+                    "valueLine": {
+                        "max": 4
                     }
                 },
                 {
@@ -1928,11 +2604,26 @@
                     },
                     "labelDetail": {
                         "max": 1
+                    },
+                    "dataColor": {
+                        "max": 1
+                    },
+                    "compare": {
+                        "max": 4
+                    },
+                    "compareBy": {
+                        "max": 0
+                    },
+                    "categoryLine": {
+                        "max": 4
+                    },
+                    "valueLine": {
+                        "max": 4
                     }
                 }
             ],
-            "categorical": {
-                "categories": {
+            "matrix": {
+                "rows": {
                     "for": {
                         "in": "category"
                     },
@@ -1942,41 +2633,228 @@
                         }
                     }
                 },
-                "values": {
-                    "group": {
-                        "by": "series",
-                        "select": [
-                            {
-                                "for": {
-                                    "in": "measure"
-                                }
-                            },
-                            {
-                                "for": {
-                                    "in": "lineMeasure"
-                                }
-                            },
-                            {
-                                "for": {
-                                    "in": "labelDetail"
-                                }
-                            },
-                            {
-                                "for": {
-                                    "in": "tooltips"
-                                }
-                            }
-                        ],
-                        "dataReductionAlgorithm": {
-                            "top": {
-                                "count": 60
-                            }
+                "columns": {
+                    "for": {
+                        "in": "series"
+                    },
+                    "dataReductionAlgorithm": {
+                        "top": {
+                            "count": 60
                         }
                     }
+                },
+                "values": {
+                    "select": [
+                        {
+                            "for": {
+                                "in": "measure"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "compare"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "lineMeasure"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "lineRatioNumerator"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "lineRatioDenominator"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "categoryLine"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "valueLine"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "labelDetail"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "dataColor"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "tooltips"
+                            }
+                        }
+                    ]
+                }
+            }
+        },
+        {
+            "conditions": [
+                {
+                    "compareBy": {
+                        "min": 1,
+                        "max": 1
+                    },
+                    "series": {
+                        "max": 1
+                    },
+                    "measure": {
+                        "max": 1
+                    },
+                    "compare": {
+                        "max": 0
+                    },
+                    "labelDetail": {
+                        "max": 1
+                    },
+                    "dataColor": {
+                        "max": 1
+                    },
+                    "categoryLine": {
+                        "max": 4
+                    },
+                    "valueLine": {
+                        "max": 4
+                    }
+                }
+            ],
+            "matrix": {
+                "rows": {
+                    "select": [
+                        {
+                            "for": {
+                                "in": "category"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "compareBy"
+                            }
+                        }
+                    ],
+                    "dataReductionAlgorithm": {
+                        "window": {
+                            "count": 30000
+                        }
+                    }
+                },
+                "columns": {
+                    "for": {
+                        "in": "series"
+                    },
+                    "dataReductionAlgorithm": {
+                        "top": {
+                            "count": 60
+                        }
+                    }
+                },
+                "values": {
+                    "select": [
+                        {
+                            "for": {
+                                "in": "measure"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "compare"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "lineMeasure"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "lineRatioNumerator"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "lineRatioDenominator"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "categoryLine"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "valueLine"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "labelDetail"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "dataColor"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "tooltips"
+                            }
+                        }
+                    ]
                 }
             }
         }
     ],
+    "subtotals": {
+        "matrix": {
+            "rowSubtotals": {
+                "propertyIdentifier": {
+                    "objectName": "subTotals",
+                    "propertyName": "rowSubtotals"
+                },
+                "defaultValue": false
+            },
+            "rowSubtotalsPerLevel": {
+                "propertyIdentifier": {
+                    "objectName": "subTotals",
+                    "propertyName": "perRowLevel"
+                },
+                "defaultValue": false
+            },
+            "columnSubtotals": {
+                "propertyIdentifier": {
+                    "objectName": "subTotals",
+                    "propertyName": "columnSubtotals"
+                },
+                "defaultValue": true
+            },
+            "columnSubtotalsPerLevel": {
+                "propertyIdentifier": {
+                    "objectName": "subTotals",
+                    "propertyName": "perColumnLevel"
+                },
+                "defaultValue": false
+            },
+            "levelSubtotalEnabled": {
+                "propertyIdentifier": {
+                    "objectName": "subTotals",
+                    "propertyName": "levelSubtotalEnabled"
+                },
+                "defaultValue": true
+            }
+        }
+    },
     "drilldown": {
         "roles": [
             "category"

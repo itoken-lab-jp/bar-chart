@@ -27,6 +27,9 @@ import {
     Orientation,
     CALCULATION_MODES,
     CUMULATIVE_RESET_NONE,
+    LINE_FORMAT_MODES,
+    LINE_PERCENT_FORMAT,
+    LinesCardSettings,
     legendPlacementValue,
 } from "./settings";
 import {
@@ -40,6 +43,7 @@ import {
     UNIT_DEFINITIONS,
 } from "./unitUtils";
 import { collapseOthers, lineIndependenceOf } from "./others";
+import { categoricalOf, withCategoryOf, withSeriesOf } from "./matrixDataView";
 import { TooltipSource, TooltipStack, TooltipColumn, tooltipColumnOf, formatTooltipValue, categoryTooltipRows, BLANK_TEXT } from "./tooltip";
 import { ticksUpTo, tickCountOf, boundOf } from "./shared/ticks";
 import { formatSigned, shownSignOf, toneOf, NEGATIVE_STYLES, SignStyle, ZERO_STYLES, TONE_MODES, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR } from "./shared/numberFormat";
@@ -63,6 +67,8 @@ export interface DataPoint {
     share: number | null;
     /** 積み上げの外側の端の棒（角丸を付ける棒）。集合ではすべて true */
     outermost: boolean;
+    /** 積み上げで、同じ側（正・負）の下に別の棒がある。描くとき、始まりの側を系列間のスペース（px）だけ縮める */
+    insetStart: boolean;
     /** リボンでの順位（カテゴリの中で値の大きい順、1 が最大）。リボン以外は null */
     rank: number | null;
     formattedValue: string;
@@ -93,6 +99,8 @@ export interface DataPoint {
     labelShow: boolean;
     /** データラベルの文字色。空 = 自動（棒の色に合わせて白か黒） */
     labelColor: string;
+    /** 比較レイヤーの番号（0 が手前の「値」、1 から奥の「比較値」）。比較が無ければ無し */
+    layerIndex?: number;
 }
 
 /** 系列 1 本ぶん（凡例の 1 項目） */
@@ -133,6 +141,8 @@ export interface CategoryGroup {
     points: DataPoint[];
     /** 積み上げのときの合計。集合・100% 積み上げでは null */
     totals: StackTotals | null;
+    /** 比較レイヤーの奥の棒（[0] が 2 枚目＝「比較値」の 1 つ目）。並びは points と同じ系列の順。比較が無ければ無し */
+    layerPoints?: DataPoint[][];
 }
 
 /** 折れ線の点 1 つ。並びは categoryGroups と同じ（並べ替えのあと） */
@@ -155,6 +165,13 @@ export interface LineSeriesInfo {
     color: string;
     width: number;
     lineStyle: string;
+    /** 線のスタイルがカスタムのときの模様（ダッシュ配列）と端の形（ダッシュ キャップ） */
+    dashArray: string;
+    dashCap: string;
+    /** 破線・点線・カスタムの模様を線の幅に比例させるか */
+    scaleWithWidth: boolean;
+    /** 線の透過性 (%)。マーカー・網掛け領域には効かない */
+    transparency: number;
     /** 結合の種類（"miter" | "round" | "bevel"） */
     lineJoin: string;
     /** 補間の種類（"linear" | "smooth" | "step"） */
@@ -216,8 +233,8 @@ export interface ValueAxis2Settings {
 
 /** 凡例の 1 項目。棒の系列のあとに折れ線が並ぶ（標準と同じ） */
 export interface LegendItemInfo {
-    kind: "bar" | "line";
-    /** 棒なら series の添字、折れ線なら lines の添字 */
+    kind: "bar" | "line" | "layer";
+    /** 棒なら series の添字、折れ線なら lines の添字、比較レイヤーなら compareLayers の添字 */
     index: number;
     name: string;
     color: string;
@@ -225,6 +242,8 @@ export interface LegendItemInfo {
     selectionId: ISelectionId | null;
     /** 棒の見た目（凡例の四角を棒に合わせる）。折れ線の見た目は lines[index] とマーカーを見る */
     barStyle?: { transparency: number; borderShow: boolean; borderColor: string; borderWidth: number };
+    /** 比較レイヤーの印の濃さ（0〜1） */
+    layerOpacity?: number;
 }
 
 /** 折れ線のマーカー */
@@ -233,6 +252,8 @@ export interface MarkerSettings {
     /** 型（"circle" | "square" | "diamond" | "triangle" | "cross" | "shortDash" | "longDash" | "plus"） */
     shape: string;
     size: number;
+    /** 中心で回す角度（度、時計回り。0〜359） */
+    rotation: number;
     /** 空 = 線の色 */
     color: string;
     transparency: number;
@@ -284,9 +305,15 @@ export interface TotalLabelsSettings {
 export interface LegendInfo {
     /** 描くか（複数系列で、凡例カードが オン のとき） */
     show: boolean;
+    /** 折れ線の印（LEGEND_MARKER_STYLES） */
+    markerStyle: string;
+    /** 折れ線のマーカーを線の色で塗る */
+    matchLineColor: boolean;
     position: string;
     /** 空ならタイトルなし */
     title: string;
+    /** 凡例の「タイトル」の設定。オフなら、比較レイヤーの段の見出し「比較」も出さない */
+    titleShow: boolean;
     fontFamily: string;
     fontSize: number;
     bold: boolean;
@@ -312,6 +339,14 @@ export interface UnitInfo {
 
 export interface DataLabelsSettings {
     show: boolean;
+    /** 値の行の下線と透過性 (%) */
+    underline: boolean;
+    transparency: number;
+    /** ラベルの表示を最適化：ラベルの行を labelMaxWidth (px) で切る */
+    optimizeLabelDisplay: boolean;
+    labelMaxWidth: number;
+    /** 詳細がカスタムで、フィールドの値が空白のときに出す文字（空なら出さない） */
+    detailShowBlankAs: string;
     /** 値の行を出すか */
     valueShow: boolean;
     /** 詳細の行を出すか */
@@ -404,12 +439,17 @@ export interface GridlinesSettings {
     horizontalStyle: string;
     horizontalWidth: number;
     horizontalScaleWithWidth: boolean;
+    /** 線のスタイルがカスタムのときの模様（ダッシュ配列）と端の形 */
+    horizontalDashArray: string;
+    horizontalDashCap: string;
     verticalShow: boolean;
     verticalColor: string;
     verticalTransparency: number;
     verticalStyle: string;
     verticalWidth: number;
     verticalScaleWithWidth: boolean;
+    verticalDashArray: string;
+    verticalDashCap: string;
 }
 
 export interface ColumnsSettings {
@@ -427,6 +467,16 @@ export interface ColumnsSettings {
     categorySpacing: number;
     /** 系列間のスペース (%)。集合で同じカテゴリの棒のすき間 */
     seriesSpacing: number;
+    /** 集合で系列の棒を重ねる（系列間のスペースを重ねる割合として読む）。積み上げでは false */
+    overlap: boolean;
+    /** 重なった棒の前後を入れ替える（既定は凡例の後ろの系列が手前） */
+    overlapReverse: boolean;
+    /** 積み上げの系列間のスペース。系列の展開がオフなら px、オンなら %（プロットの長さの半分に対する %） */
+    stackedSpacing: number;
+    /** 系列の展開（積んだ棒を離して並べ、値の軸を消す）。折れ線があるときは false */
+    stackedExplode: boolean;
+    /** 積み上げで、罫線を積んだ棒の外側だけに引く */
+    borderOutlineOnly: boolean;
     /** 0 = 上限なし */
     maxBarWidth: number;
     cornerRadius: number;
@@ -481,6 +531,12 @@ export interface ViewModel {
     /** 折れ線（複合）。無ければ空 */
     lines: LineSeriesInfo[];
     lineTargets: LineTarget[];
+    /** 折れ線の率の分子と分母の数が合わないときの警告（組にならない分は描かない）。無ければ無し */
+    lineWarning?: string;
+    /** 「比較の列」の値が多すぎて重ねきれないときの警告（compareLayers.ts）。無ければ無し */
+    compareWarning?: string;
+    /** 「比較の列」に入れたフィールドの名前（ツールヒントでレイヤーの値の行に使う）。「比較値」で重ねたときは無し */
+    compareByName?: string;
     markers: MarkerSettings;
     areas: AreaSettings;
     valueAxis2: ValueAxis2Settings;
@@ -492,8 +548,139 @@ export interface ViewModel {
     cumulative: CumulativeInfo;
     /** パレートの状態 */
     pareto: ParetoInfo;
+    /** Y 軸の定数線。無ければ空 */
+    valueLines: ValueLineInfo[];
+    valueLine: ValueLineSettings;
+    /** Y 軸の定数線のメジャーが、カテゴリごとに違う値を返したときの警告（先頭のカテゴリの値で引く）。無ければ無し */
+    valueLineWarning?: string;
+    /** X 軸の定数線（「X 軸の定数線」の欄のメジャーごと）。無ければ空 */
+    categoryLines: CategoryLineInfo[];
+    categoryLine: CategoryLineSettings;
+    /** 比較レイヤー（2 枚以上のときだけ。手前が [0]）。比較が無ければ空 */
+    compareLayers: CompareLayerInfo[];
+    compare: CompareSettings;
+    /** 比較レイヤーごとのツールヒントの元データ（[0] は tooltip と同じ）。比較が無ければ無し */
+    layerTooltips?: Array<TooltipSource | null>;
+    /** 比較レイヤーで手前にそろえるもの（この viewModel を作ったときの値） */
+    basis: { extent: ValueExtent; keepRows: number[] | null; displayOrder: number[] };
     isEmpty: boolean;
 }
+
+/**
+ * X 軸の定数線 1 本（「X 軸の定数線」の欄のメジャー 1 つ）。メジャーが空白でない値を返したカテゴリに線を引く。
+ * marks の index は categoryGroups の添字（並べ替えのあと）
+ */
+export interface CategoryLineInfo {
+    name: string;
+    /** label はスタイルで選んだ中身（データ値・名前・両方） */
+    marks: Array<{ index: number; label: string }>;
+}
+
+export interface CategoryLineSettings {
+    show: boolean;
+    position: "before" | "center" | "after";
+    color: string;
+    transparency: number;
+    lineStyle: string;
+    dashArray: string;
+    scaleWithWidth: boolean;
+    dashCap: string;
+    width: number;
+    /** 棒の後ろ（back）か前（front）か */
+    layer: "back" | "front";
+    shadeShow: boolean;
+    shadeRegion: "before" | "after";
+    shadeColor: string;
+    shadeTransparency: number;
+    labelShow: boolean;
+    labelHorizontal: "left" | "right";
+    labelVertical: "top" | "bottom";
+    labelColor: string;
+    labelFontSize: number;
+    labelAvoidOverlap: boolean;
+}
+
+/** Y 軸の定数線 1 本（カードの「値」か、「Y 軸の定数線」の欄のメジャー 1 つ）。軸の範囲の外の線は入れない */
+export interface ValueLineInfo {
+    name: string;
+    value: number;
+    /** 載せた軸の比率（0〜1） */
+    ratio: number;
+    secondary: boolean;
+    /** スタイルで選んだ中身（データ値・名前・両方） */
+    label: string;
+}
+
+export type ValueLineSettings = Omit<CategoryLineSettings, "position" | "shadeRegion"> & {
+    /** 網掛け領域を、値の小さい側（below）か大きい側（above）に塗る */
+    shadeRegion: "below" | "above";
+};
+
+/** 比較レイヤー 1 枚 */
+export interface CompareLayerInfo {
+    /** 凡例・ツールヒントに出す名前（メジャーの名前） */
+    name: string;
+}
+
+export interface CompareSettings {
+    /** 手前の棒を置く側。縦棒は右・左、横棒は下・上 */
+    rightFront: boolean;
+    /** 重なり（0〜1）。0 で隣り合わせ、1 で完全に重なる */
+    overlap: number;
+    /** いちばん奥の不透明度（0〜1） */
+    backOpacity: number;
+    outline: boolean;
+    showInLegend: boolean;
+}
+
+export const EMPTY_CATEGORY_LINE: CategoryLineSettings = {
+    show: true,
+    position: "before",
+    color: "#605E5C",
+    transparency: 0,
+    lineStyle: "dashed",
+    dashArray: "",
+    scaleWithWidth: true,
+    dashCap: "none",
+    width: 1,
+    layer: "front",
+    shadeShow: false,
+    shadeRegion: "before",
+    shadeColor: "#E1DFDD",
+    shadeTransparency: 40,
+    labelShow: true,
+    labelHorizontal: "right",
+    labelVertical: "top",
+    labelColor: "#605E5C",
+    labelFontSize: 9,
+    labelAvoidOverlap: true,
+};
+
+export const EMPTY_VALUE_LINE: ValueLineSettings = {
+    show: true,
+    color: "#605E5C",
+    transparency: 0,
+    lineStyle: "dashed",
+    dashArray: "",
+    scaleWithWidth: true,
+    dashCap: "none",
+    width: 1,
+    layer: "front",
+    shadeShow: false,
+    shadeRegion: "below",
+    shadeColor: "#E1DFDD",
+    shadeTransparency: 40,
+    labelShow: true,
+    labelHorizontal: "left",
+    labelVertical: "top",
+    labelColor: "#605E5C",
+    labelFontSize: 9,
+    labelAvoidOverlap: true,
+};
+
+export const VALUE_LINE_WARNING_TITLE = "Y 軸の定数線の値がカテゴリごとに違います";
+
+export const EMPTY_COMPARE: CompareSettings = { rightFront: true, overlap: 0.6, backOpacity: 0.3, outline: false, showInLegend: true };
 
 const EMPTY_COLUMNS_SETTINGS: ColumnsSettings = {
     fill: "#118DFF",
@@ -508,6 +695,11 @@ const EMPTY_COLUMNS_SETTINGS: ColumnsSettings = {
     outerPadding: null,
     categorySpacing: 20,
     seriesSpacing: 0,
+    overlap: false,
+    overlapReverse: false,
+    stackedSpacing: 0,
+    stackedExplode: false,
+    borderOutlineOnly: false,
     maxBarWidth: 0,
     cornerRadius: 0,
 };
@@ -634,16 +826,25 @@ const EMPTY_GRIDLINES: GridlinesSettings = {
     horizontalStyle: "dotted",
     horizontalWidth: 1,
     horizontalScaleWithWidth: false,
+    horizontalDashArray: "",
+    horizontalDashCap: "none",
     verticalShow: false,
     verticalColor: "#E1DFDD",
     verticalTransparency: 0,
     verticalStyle: "dotted",
     verticalWidth: 1,
     verticalScaleWithWidth: false,
+    verticalDashArray: "",
+    verticalDashCap: "none",
 };
 
 const EMPTY_DATA_LABELS: DataLabelsSettings = {
     show: false,
+    underline: false,
+    transparency: 0,
+    optimizeLabelDisplay: false,
+    labelMaxWidth: 200,
+    detailShowBlankAs: "",
     position: "auto",
     orientation: "horizontal",
     overflow: false,
@@ -668,9 +869,12 @@ const EMPTY_DATA_LABELS: DataLabelsSettings = {
 };
 
 const EMPTY_LEGEND: LegendInfo = {
+    markerStyle: "lineAndMarker",
+    matchLineColor: false,
     show: false,
     position: "topLeft",
     title: "",
+    titleShow: true,
     fontFamily: "Segoe UI",
     fontSize: 10,
     bold: false,
@@ -747,6 +951,7 @@ const EMPTY: ViewModel = {
         show: false,
         shape: "circle",
         size: 5,
+        rotation: 0,
         color: "",
         transparency: 0,
         borderShow: false,
@@ -793,6 +998,13 @@ const EMPTY: ViewModel = {
     },
     hasHighlights: false,
     tooltip: null,
+    valueLines: [],
+    valueLine: EMPTY_VALUE_LINE,
+    categoryLines: [],
+    categoryLine: EMPTY_CATEGORY_LINE,
+    compareLayers: [],
+    compare: EMPTY_COMPARE,
+    basis: { extent: { min: 0, max: 0, valueMaxAbs: 0, magMin: Infinity, magMax: 0 }, keepRows: null, displayOrder: [] },
     isEmpty: true,
 };
 
@@ -847,6 +1059,8 @@ export function lineTooltipItems(
 
 /** 棒のツールヒントに足す、積み上げの合計（積み上げ）か割合（100% 積み上げ） */
 export function tooltipStackOf(viewModel: ViewModel, d: DataPoint): TooltipStack {
+    // 比較レイヤーの奥の棒は、合計・割合を持たない（積み上げの合計は手前のレイヤーのもの）
+    if ((d.layerIndex ?? 0) > 0) return viewModel.chartType === CHART_TYPES.stacked100 ? { share: d.share } : {};
     if (viewModel.chartType === CHART_TYPES.stacked100) return { share: d.share };
     if (viewModel.chartType === CHART_TYPES.stacked && viewModel.seriesMode) {
         const group = viewModel.categoryGroups.find((g) => g.rowIndex === d.rowIndex);
@@ -867,12 +1081,29 @@ interface SeriesSlot {
     tooltips: DataViewValueColumn[];
     /** 「ラベルの詳細」の列。無ければ undefined */
     detail?: DataViewValueColumn;
+    /** 「棒の色」の列。無ければ undefined */
+    colorColumn?: DataViewValueColumn;
     group: DataViewValueColumnGroup;
     /** 系列ごとの書式の保存先。凡例の系列はグループ、メジャーの系列は列のメタデータに入る */
     objects: Array<DataViewObjects | undefined>;
 }
 
 const isMeasure = (column: DataViewValueColumn): boolean => !!column.source?.roles?.measure;
+const isDataColor = (column: DataViewValueColumn): boolean => !!column.source?.roles?.dataColor;
+
+/** 色として読める文字（#RGB・#RRGGBB・#RRGGBBAA、rgb()・hsl()、red などの名前） */
+const COLOR_TEXT = /^(#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})|(rgb|hsl)a?\([^()]*\)|[a-z]+)$/i;
+
+/**
+ * 「棒の色」の i 行目の色。色として読めない値（空白・数など）は null。
+ * 標準の系列の色の fx（フィールド値）の代わり。このビジュアルは matrix で受けるので、凡例があると Power BI が fx の色を渡さない
+ */
+function dataColorAt(column: DataViewValueColumn | undefined, i: number): string | null {
+    const raw = column?.values[i];
+    if (typeof raw !== "string") return null;
+    const text = raw.trim();
+    return COLOR_TEXT.test(text) ? text : null;
+}
 
 function seriesSlotsOf(
     groups: DataViewValueColumnGroup[],
@@ -893,6 +1124,7 @@ function seriesSlotsOf(
                 tooltips: group.values.filter((c) => c !== column && c.source?.roles?.tooltips),
                 // 「値」と同じフィールドを入れると、Power BI は役割を 2 つ持つ 1 つの列にまとめて渡す
                 detail: group.values.find((c) => c.source?.roles?.labelDetail),
+                colorColumn: group.values.find(isDataColor),
                 group,
                 objects: [group.objects, column.source?.objects],
             }];
@@ -904,15 +1136,96 @@ function seriesSlotsOf(
     const measures = columns.filter(isMeasure);
     const tooltips = columns.filter((c) => !measures.includes(c) && c.source?.roles?.tooltips);
     const detail = columns.find((c) => c.source?.roles?.labelDetail);
+    // 「棒の色」は系列 1 本のときだけ使う（値が複数で凡例が無いときは、どの系列の色か決められない）
+    const colorColumn = measures.length === 1 ? columns.find(isDataColor) : undefined;
     return measures.map((column) => ({
         key: column.source.queryName ?? column.source.displayName,
         name: column.source.displayName,
         column,
         tooltips,
         detail,
+        colorColumn,
         group: groups[0],
         objects: [column.source.objects],
     }));
+}
+
+/** 積み上げの棒 1 本の、始まりと量（値の単位。100% 積み上げは割合）。ハイライトの量は無ければ null */
+interface StackSegment {
+    start: number;
+    amount: number;
+    highlightAmount: number | null;
+}
+
+/**
+ * 系列の展開。積んだ棒と棒のあいだに gap（プロットの長さに対する比）を空け、全体がプロットに収まるよう値の比率を縮めて置き直す。
+ * すき間は同じ側（正・負）の棒と棒のあいだだけ（0 をはさむ所には入れない）。値の比率 r = z + v × s の s を、
+ * どのカテゴリでも正の端が 1 − margin 以下・負の端が margin 以上になる範囲で最大にする。すき間が多すぎて入らなければ、すき間を縮める
+ */
+export function explodeStacks(groups: CategoryGroup[], segments: Map<DataPoint, StackSegment>, gap: number, margin = 0): void {
+    const stacks = groups.map((g) => {
+        const segs = g.points.filter((p) => !p.blank && segments.has(p)).map((p) => ({ p, ...segments.get(p)! }));
+        const side = (positive: boolean) =>
+            segs.filter((x) => (positive ? x.amount > 0 : x.amount < 0)).sort((a, b) => Math.abs(a.start) - Math.abs(b.start));
+        const pos = side(true);
+        const neg = side(false);
+        return {
+            g,
+            pos,
+            neg,
+            zero: segs.filter((x) => x.amount === 0),
+            P: pos.reduce((t, x) => t + x.amount, 0),
+            N: neg.reduce((t, x) => t + x.amount, 0),
+            gp: Math.max(0, pos.length - 1),
+            gn: Math.max(0, neg.length - 1),
+        };
+    });
+    const maxGaps = Math.max(0, ...stacks.map((x) => x.gp + x.gn));
+    const g = maxGaps > 0 ? Math.min(gap, (0.9 - 2 * margin) / maxGaps) : gap;
+    const lower = (s: number) => Math.max(margin, ...stacks.map((x) => margin - x.N * s + x.gn * g));
+    const upper = (s: number) => Math.min(1 - margin, ...stacks.map((x) => 1 - margin - x.P * s - x.gp * g));
+    const span = Math.max(1e-12, ...stacks.map((x) => x.P - x.N));
+    let lo = 0;
+    let hi = 1 / span;
+    for (let k = 0; k < 60; k++) {
+        const mid = (lo + hi) / 2;
+        if (lower(mid) <= upper(mid)) lo = mid;
+        else hi = mid;
+    }
+    const s = lo;
+    const z = lower(s);
+    for (const x of stacks) {
+        const place = (list: typeof x.pos, dir: 1 | -1): number => {
+            let cur = z;
+            list.forEach((seg, k) => {
+                if (k > 0) cur += dir * g;
+                seg.p.startRatio = cur;
+                seg.p.valRatio = cur + seg.amount * s;
+                seg.p.highlightRatio = seg.highlightAmount === null ? null : cur + seg.highlightAmount * s;
+                cur = seg.p.valRatio;
+            });
+            return cur;
+        };
+        const top = place(x.pos, 1);
+        const bottom = place(x.neg, -1);
+        for (const seg of x.zero) {
+            seg.p.startRatio = z;
+            seg.p.valRatio = z;
+            seg.p.highlightRatio = seg.highlightAmount === null ? null : z;
+        }
+        for (const p of x.g.points) {
+            if (p.blank) {
+                p.startRatio = z;
+                p.valRatio = z;
+            }
+            // 展開したあとは、すき間を縮める必要が無い
+            p.insetStart = false;
+        }
+        if (x.g.totals) {
+            x.g.totals.positiveEndRatio = top;
+            x.g.totals.negativeEndRatio = bottom;
+        }
+    }
 }
 
 /** 書式の保存先を順に見て、最初に見つかった値を返す */
@@ -1007,6 +1320,30 @@ export interface CalculationRuntime {
     cumulativeReset?: string | null;
 }
 
+/**
+ * 比較レイヤーの奥のレイヤーを組み立てるときに、手前のレイヤーにそろえるもの（compareLayers.ts）。
+ * 値の軸はすべてのレイヤーの範囲で決め、カテゴリの並びと「その他」にまとめる行は手前のレイヤーで決める
+ */
+export interface LayerBasis {
+    /** すべてのレイヤーの値の範囲。軸の範囲と表示単位に入れる */
+    extent?: ValueExtent;
+    /** 「その他」にまとめずに残す行（畳む前の行番号） */
+    keepRows?: number[];
+    /** カテゴリの並び（畳んだ後の行番号） */
+    displayOrder?: number[];
+}
+
+/** 棒の値の範囲（折れ線を入れる前）。比較レイヤーで軸をそろえるのに使う */
+export interface ValueExtent {
+    min: number;
+    max: number;
+    /** 値そのものの絶対値の最大（集合・100% の表示単位） */
+    valueMaxAbs: number;
+    /** 0 でない値の絶対値の最小・最大（対数の軸）。値が無ければ magMin は Infinity */
+    magMin: number;
+    magMax: number;
+}
+
 /** パレートのランク。累積比で A・B・C に分ける */
 export type ParetoRank = "A" | "B" | "C";
 
@@ -1043,15 +1380,20 @@ export function transform(
     dataView: DataView | undefined,
     host: IVisualHost,
     settings: VisualFormattingSettingsModel,
-    runtime: CalculationRuntime = {}
+    runtime: CalculationRuntime = {},
+    basis: LayerBasis = {}
 ): ViewModel {
+    // matrix で受けたなら categorical の形に詰め替える（折れ線の値は、凡例をまとめたカテゴリ全体の値になる）
+    dataView = categoricalOf(dataView);
     // 上位 N 件＋「その他」。読む前に DataView を畳む。「その他」の選択は元のカテゴリの列から作り直す
     const originalCategories = dataView?.categorical?.categories;
     const originalDataView = dataView;
-    const others = collapseOthers(dataView, settings.columns.otherCount.value ?? 0, settings.columns.otherLabel.value?.trim() || "その他");
+    const others = collapseOthers(dataView, settings.columns.otherCount.value ?? 0, settings.columns.otherLabel.value?.trim() || "その他", basis.keepRows);
     dataView = others.dataView;
     const otherRow = others.otherRow;
-    const otherSelectionIds = others.mergedRows.map((r) => host.createSelectionIdBuilder().withCategory(originalCategories![0], r).createSelectionId());
+    const otherSelectionIds = others.mergedRows.map((r) =>
+        withCategoryOf(host.createSelectionIdBuilder(), originalDataView!.categorical!, originalCategories![0], r).createSelectionId()
+    );
 
     const categorical: DataViewCategorical | undefined = dataView?.categorical;
     const categories = categorical?.categories?.[0];
@@ -1120,7 +1462,7 @@ export function transform(
      * レベルごとに withCategory を重ねると selector の data が重複し、保存した書式が objects に戻らない（2026-09-23、Desktop）
      */
     const lowestLevel = levelColumns[levelColumns.length - 1];
-    const withCategories = (builder: powerbi.visuals.ISelectionIdBuilder, i: number) => builder.withCategory(lowestLevel, i);
+    const withCategories = (builder: powerbi.visuals.ISelectionIdBuilder, i: number) => withCategoryOf(builder, categorical!, lowestLevel, i);
     const categoryObjectsAt = (i: number) => lowestLevel.objects?.[i];
 
     const orientation: Orientation =
@@ -1143,23 +1485,24 @@ export function transform(
     }
     /**
      * 折れ線 1 本の値（行ごと）。凡例があると系列ごとの値が届く。
-     * 系列ごとの値がどの行でも同じなら（凡例に左右されないメジャー）その値、違えば足した値を使う
-     * （標準はカテゴリ単位で計算するが、カスタムビジュアルは凡例で分けたデータしか受け取れないため）
+     * matrix で受けると、凡例があるときはカテゴリ全体の値（列の小計）が 1 列だけ届く（matrixDataView.ts）。
+     * 系列ごとの値が届いたとき（小計が届かない・categorical で受けた）は、どの行でも同じならその値、違えば足した値を使う
      */
     const lineIndependenceBeforeCollapse = otherRow >= 0 ? lineIndependenceOf(originalDataView) : null;
-    const lineDefs = [...lineColumns.entries()].map(([key, columns]) => {
-        const numbersAt = (i: number) =>
-            columns
-                .map((c) => c.values[i])
-                .filter((v) => v !== null && v !== undefined)
-                .map((v) => (typeof v === "number" ? v : Number(v)))
-                .filter((v) => Number.isFinite(v));
+    /** 系列ごとに複製された列の、行 i の数（空白・数でないものは除く） */
+    const numbersOf = (columns: DataViewValueColumn[], i: number) =>
+        columns
+            .map((c) => c.values[i])
+            .filter((v) => v !== null && v !== undefined)
+            .map((v) => (typeof v === "number" ? v : Number(v)))
+            .filter((v) => Number.isFinite(v));
+    const measureLineDefs: LineDef[] = [...lineColumns.entries()].map(([key, columns]) => {
         // 「その他」にまとめたときは、畳む前の DataView で判定する（行が減ると判定が変わり、残したカテゴリの線の値まで変わる）
         const independent =
             lineIndependenceBeforeCollapse?.get(key) ??
-            Array.from({ length: rowCount }, (_, i) => numbersAt(i)).every((vals) => vals.every((v) => v === vals[0]));
+            Array.from({ length: rowCount }, (_, i) => numbersOf(columns, i)).every((vals) => vals.every((v) => v === vals[0]));
         const values: Array<number | null> = Array.from({ length: rowCount }, (_, i) => {
-            const vals = numbersAt(i);
+            const vals = numbersOf(columns, i);
             if (!vals.length) return null;
             return independent ? vals[0] : vals.reduce((sum, v) => sum + v, 0);
         });
@@ -1172,6 +1515,53 @@ export function transform(
             values,
         };
     });
+    /**
+     * 「折れ線の率の分子」「折れ線の率の分母」。入れた順に組にして 1 本の線にする。分母が 1 つだけなら、すべての分子をその分母で割る
+     * （粗利率と営業利益率を、どちらも売上で割るとき）。
+     * 分子と分母を別に受け、系列をまたいでそれぞれ足してから最後に 1 回だけ割るので、凡例があっても全体の率になる
+     * （率のメジャーをそのまま「折れ線の値」に入れても、カテゴリ全体の値が届くので同じ率になる）
+     */
+    const numeratorColumns = new Map<string, DataViewValueColumn[]>();
+    const denominatorColumns = new Map<string, DataViewValueColumn[]>();
+    for (const group of groups) {
+        for (const column of group.values) {
+            const roles = column.source?.roles;
+            const target = roles?.lineRatioNumerator ? numeratorColumns : roles?.lineRatioDenominator ? denominatorColumns : null;
+            if (!target) continue;
+            const key = column.source.queryName ?? column.source.displayName;
+            const found = target.get(key);
+            if (found) found.push(column);
+            else target.set(key, [column]);
+        }
+    }
+    const numeratorList = [...numeratorColumns.entries()];
+    const denominatorList = [...denominatorColumns.values()];
+    const sharedDenominator = denominatorList.length === 1;
+    const lineWarning = numeratorList.length !== denominatorList.length && !(sharedDenominator && numeratorList.length > 0) ? LINE_RATIO_WARNING : undefined;
+    /** 系列をまたいだ合計。すべて空白なら空白 */
+    const seriesSumOf = (columns: DataViewValueColumn[], i: number): number | null => {
+        const vals = numbersOf(columns, i);
+        return vals.length ? vals.reduce((sum, v) => sum + v, 0) : null;
+    };
+    const pairedNumerators = sharedDenominator ? numeratorList : numeratorList.slice(0, denominatorList.length);
+    const ratioLineDefs: LineDef[] = pairedNumerators.map(([key, numerators], k) => {
+        const denominators = denominatorList[sharedDenominator ? 0 : k];
+        const ratio = {
+            numerators: Array.from({ length: rowCount }, (_, i) => seriesSumOf(numerators, i)),
+            denominators: Array.from({ length: rowCount }, (_, i) => seriesSumOf(denominators, i)),
+        };
+        const source = numerators[0].source;
+        return {
+            key,
+            // 線の名前は分子の名前（ビジュアルの中でフィールドの名前を変えれば、線の名前も変わる）
+            name: source.displayName,
+            format: valueFormatter.getFormatStringByColumn(source),
+            objects: source.objects,
+            values: divideRatio(ratio.numerators, ratio.denominators),
+            ratio,
+        };
+    });
+    const lineDefs = [...measureLineDefs, ...ratioLineDefs].map((def) => ({ ...def, format: lineFormatOf(def, settings.lines) }));
     const isBlankAt = (column: DataViewValueColumn, i: number) => column.values[i] === null || column.values[i] === undefined;
     const numberAt = (column: DataViewValueColumn, i: number) => {
         const raw = column.values[i];
@@ -1202,6 +1592,8 @@ export function transform(
     // （標準のリボン グラフと同じ。凡例の順なら標準の積み上げ＋リボンと同じ）
     const ribbonsOn = stacked && (settings.ribbons.show.value ?? false);
     const rankOrder = ribbonsOn && getDropdownValue(settings.ribbons.order.value, RIBBON_ORDERS.legend) === RIBBON_ORDERS.value;
+    // 積み上げ順を逆にする（リボンで値の大きい順に積むときは、その順が優先）
+    const reverseStack = stacked && !rankOrder && (settings.columns.reverseStackOrder.value ?? false);
 
     // 複数系列の空白は棒を描かないので数えない（系列 1 本の空白は 1.4 までと同じく 0 として数える）
     const isSkipped = (column: DataViewValueColumn, i: number) => seriesMode && isBlankAt(column, i);
@@ -1225,6 +1617,8 @@ export function transform(
     if (!paretoOn && (settings.columns.reverseOrder.value ?? false)) displayOrder.reverse();
     // 「その他」は、並べ替えによらずいつも最後に置く
     if (otherRow >= 0) displayOrder = [...displayOrder.filter((i) => i !== otherRow), otherRow];
+    // 比較レイヤーの奥のレイヤーは、手前のレイヤーの並びに合わせる（値順でも、手前の値の順に並べる）
+    if (basis.displayOrder && basis.displayOrder.length === rowCount) displayOrder = basis.displayOrder.slice();
 
     // --- 累計 ------------------------------------------------------------
     // 表示の順に、系列ごとに値を足していく。区切り（階層のレベル）の値が変わったところで 0 に戻す。
@@ -1294,12 +1688,21 @@ export function transform(
         for (const def of lineDefs) {
             const own = def.objects?.lines?.includeCumulative;
             if (!(typeof own === "boolean" ? own : includeAll)) continue;
-            def.values = cumulate(def.values, true) as Array<number | null>;
+            // 率の線は、率を足さずに分子と分母をそれぞれ累計してから割る（累計の率）
+            def.values = def.ratio
+                ? divideRatio(
+                    cumulate(def.ratio.numerators, true) as Array<number | null>,
+                    cumulate(def.ratio.denominators, true) as Array<number | null>
+                )
+                : (cumulate(def.values, true) as Array<number | null>);
             cumulativeLineKeys.add(def.key);
         }
     }
-    // 「その他」の行の折れ線は、足しようが無いので空白（「値」と同じ列を「折れ線の値」にも入れたとき・累計で空白が埋まったときも）
-    if (otherRow >= 0) lineDefs.forEach((def) => (def.values[otherRow] = null));
+    // 「その他」の行の折れ線は、足しようが無いので空白（「値」と同じ列を「折れ線の値」にも入れたとき・累計で空白が埋まったときも）。
+    // 率の線は、まとめたカテゴリの分子の合計 ÷ 分母の合計なので出せる（累計でなければ。累計の「その他」は区切りをまたぐので空白）
+    if (otherRow >= 0) lineDefs.forEach((def) => {
+        if (!def.ratio || cumulativeLineKeys.has(def.key)) def.values[otherRow] = null;
+    });
     /** ツールヒントの値の行。累計なら「値（累計）」と、累計の前の値の行を出す */
     const measureTooltipOf = (slot: SeriesSlot): { measure: TooltipColumn; before?: TooltipColumn } => {
         const measure = tooltipColumnOf(slot.column);
@@ -1382,6 +1785,23 @@ export function transform(
     }
     if (!isFinite(maxValue)) maxValue = 0;
     if (!isFinite(minValue)) minValue = 0;
+    let magMin = Infinity;
+    let magMax = 0;
+    for (const v of allValues) {
+        const mag = Math.abs(v);
+        if (mag > 0 && mag < magMin) magMin = mag;
+        if (mag > magMax) magMax = mag;
+    }
+    /** このレイヤーだけの範囲（比較レイヤーで、すべてのレイヤーの範囲を決めるのに使う） */
+    const ownExtent: ValueExtent = { min: minValue, max: maxValue, valueMaxAbs, magMin, magMax };
+    // 比較レイヤーでは、すべてのレイヤーの範囲で軸を決める（どのレイヤーも同じ軸で描く）
+    if (basis.extent) {
+        maxValue = Math.max(maxValue, basis.extent.max);
+        minValue = Math.min(minValue, basis.extent.min);
+        valueMaxAbs = Math.max(valueMaxAbs, basis.extent.valueMaxAbs);
+        if (Number.isFinite(basis.extent.magMin)) allValues.push(basis.extent.magMin * (minValue < 0 && maxValue <= 0 ? -1 : 1));
+        if (basis.extent.magMax > 0) allValues.push(basis.extent.magMax * (minValue < 0 && maxValue <= 0 ? -1 : 1));
+    }
 
     // 表示単位は、積み上げなら積み上げの端の大きさ、それ以外（集合・100%）は値の大きさで決める
     let maxAbs = stacked && !percent ? Math.max(Math.abs(maxValue), Math.abs(minValue)) : valueMaxAbs;
@@ -1414,6 +1834,49 @@ export function transform(
         minValue = Math.min(minValue, lineMin);
         allValues.push(...lineNumbers);
         maxAbs = Math.max(maxAbs, Math.abs(lineMax), Math.abs(lineMin));
+    }
+
+    // --- Y 軸の定数線の値 -------------------------------------------------------
+    // カードの「値」（決まった数）と、「Y 軸の定数線」の欄のメジャー。メジャーはカテゴリごとに計算されて届くので、
+    // 並べた順の先頭のカテゴリの値で引き、ほかのカテゴリで値が違えば警告する（凡例があると matrix は全体の値で 1 列届く）
+    const vl = settings.valueLine;
+    const valueLineOn = vl.show.value ?? true;
+    const valueLineDefs: Array<{ name: string; value: number }> = [];
+    let valueLineWarning: string | undefined;
+    if (valueLineOn) {
+        const fixed = boundOf(vl.value.value);
+        if (fixed !== null) valueLineDefs.push({ name: vl.lineName.value?.trim() || "定数線", value: fixed });
+        const valueLineColumns = new Map<string, DataViewValueColumn[]>();
+        for (const group of groups) {
+            for (const column of group.values) {
+                if (!column.source?.roles?.valueLine) continue;
+                const key = column.source.queryName ?? column.source.displayName;
+                const found = valueLineColumns.get(key);
+                if (found) found.push(column);
+                else valueLineColumns.set(key, [column]);
+            }
+        }
+        const varying: string[] = [];
+        for (const columns of [...valueLineColumns.values()].slice(0, 4)) {
+            const values = displayOrder
+                .filter((i) => i !== otherRow)
+                .map((i) => numbersOf(columns, i)[0])
+                .filter((x): x is number => x !== undefined);
+            if (!values.length) continue;
+            if (values.some((x) => x !== values[0])) varying.push(columns[0].source.displayName);
+            valueLineDefs.push({ name: columns[0].source.displayName, value: values[0] });
+        }
+        if (varying.length) valueLineWarning = `「${varying.join("」「")}」はカテゴリごとに違う値を返しているので、先頭のカテゴリの値で線を引いています。決まった値を返すメジャーにするか、カテゴリごとの値なら「折れ線の値」に入れてください。`;
+    }
+    const valueLineOnSecondary = onSecondary && getDropdownValue(vl.axis.value, "primary") === "secondary";
+    // 軸を線に合わせて広げる（Y 軸のときだけ。標準は広げない）
+    if (valueLineDefs.length && !valueLineOnSecondary && (vl.extendAxis.value ?? false) && !percent) {
+        for (const def of valueLineDefs) {
+            maxValue = Math.max(maxValue, def.value);
+            minValue = Math.min(minValue, def.value);
+            maxAbs = Math.max(maxAbs, Math.abs(def.value));
+            allValues.push(def.value);
+        }
     }
 
     // Y軸設定および単位設定の抽出
@@ -1649,12 +2112,16 @@ export function transform(
         horizontalStyle: String(gl.horizontalStyle.value?.value ?? "dotted"),
         horizontalWidth: Math.max(1, Math.min(10, gl.horizontalWidth.value ?? 1)),
         horizontalScaleWithWidth: gl.horizontalScaleWithWidth.value ?? false,
+        horizontalDashArray: gl.horizontalDashArray.value ?? "",
+        horizontalDashCap: String(gl.horizontalDashCap.value?.value ?? "none"),
         verticalShow: gl.verticalShow.value ?? false,
         verticalColor: gl.verticalColor.value?.value || "#E1DFDD",
         verticalTransparency: Math.max(0, Math.min(100, gl.verticalTransparency.value ?? 0)),
         verticalStyle: String(gl.verticalStyle.value?.value ?? "dotted"),
         verticalWidth: Math.max(1, Math.min(10, gl.verticalWidth.value ?? 1)),
         verticalScaleWithWidth: gl.verticalScaleWithWidth.value ?? false,
+        verticalDashArray: gl.verticalDashArray.value ?? "",
+        verticalDashCap: String(gl.verticalDashCap.value?.value ?? "none"),
     };
 
     // データラベル設定の抽出
@@ -1668,6 +2135,11 @@ export function transform(
         fontFamily: dl.fontFamily.value ?? "Segoe UI",
         bold: dl.bold.value ?? false,
         italic: dl.italic.value ?? false,
+        underline: dl.underline.value ?? false,
+        transparency: clampPercent(dl.transparency.value ?? 0),
+        optimizeLabelDisplay: dl.optimizeLabelDisplay.value ?? false,
+        labelMaxWidth: Math.max(10, Math.min(2000, Number(dl.labelMaxWidth.value) || 200)),
+        detailShowBlankAs: dl.detailShowBlankAs.value ?? "",
         color: dl.color.value?.value ?? "",
         backgroundShow: dl.backgroundShow.value ?? false,
         backgroundColor: dl.backgroundColor.value?.value ?? "#FFFFFF",
@@ -1686,6 +2158,9 @@ export function transform(
 
     // 列（columns）設定の抽出
     const col = settings.columns;
+    // 系列の展開は積み上げだけ。折れ線があると値の軸を消せないので使わない（標準の複合にも無い）
+    const explodeOn = stacked && (col.stackedExplode.value ?? false) && lineDefs.length === 0;
+    const overlapOn = !stacked && (col.overlap.value ?? false);
     // 系列 1 本の棒の色：保存が無ければ、標準と同じくテーマのデータの色の 1 番目（1.28 までは #118DFF 固定で、
     // テーマの 1 番目を変えたレポートでも従わなかった）。getColor は同じ key なら同じ色を返すので、下の折れ線の色の取り方とずれない
     const singleSeriesFill =
@@ -1707,7 +2182,14 @@ export function transform(
                 : null,
         // 範囲: 間隔 0〜50%、系列間 0〜90%、角丸 0〜30px、罫線 1〜5px。範囲は描画側でクランプする
         categorySpacing: Math.max(0, Math.min(50, col.categorySpacing.value ?? 20)),
-        seriesSpacing: Math.max(0, Math.min(90, col.seriesSpacing.value ?? 0)),
+        // 重複のときは重ねる割合なので 0〜100%、並べるときはすき間で 0〜90%
+        seriesSpacing: Math.max(0, Math.min(overlapOn ? 100 : 90, col.seriesSpacing.value ?? 0)),
+        overlap: overlapOn,
+        overlapReverse: overlapOn && (col.overlapReverse.value ?? false),
+        // 標準と同じく、展開しないときは 0〜5 px、展開するときは 0〜10 %
+        stackedSpacing: Math.max(0, Math.min(explodeOn ? 10 : 5, Number(col.stackedSpacing.value) || 0)),
+        stackedExplode: explodeOn,
+        borderOutlineOnly: stacked && (col.borderOutlineOnly.value ?? false),
         maxBarWidth: Math.max(0, col.maxBarWidth.value ?? 0),
         cornerRadius: Math.max(0, Math.min(30, col.cornerRadius.value ?? 0)),
     };
@@ -1716,8 +2198,11 @@ export function transform(
     const lg = settings.legend;
     const legendInfo: LegendInfo = {
         show: seriesMode && (lg.show.value ?? true),
+        markerStyle: getDropdownValue(lg.markerStyle.value, "lineAndMarker"),
+        matchLineColor: lg.matchLineColor.value ?? false,
         position: legendPlacementValue(lg.position.value?.value),
         title: (lg.titleShow.value ?? true) ? (lg.titleText.value?.trim() || (legendSource?.displayName ?? "")) : "",
+        titleShow: lg.titleShow.value ?? true,
         fontFamily: lg.font.fontFamily.value ?? "Segoe UI",
         fontSize: Math.max(8, Math.min(32, lg.font.fontSize.value ?? 10)),
         bold: lg.font.bold?.value ?? false,
@@ -1728,14 +2213,20 @@ export function transform(
 
     // 系列。複数系列の色は、個別の指定が無ければ標準と同じくレポートのテーマの色を順に割り当てる。
     // 系列 1 本のときは 1.4 までと同じく「列」のカラー（カテゴリごとの指定があればそちら）
+    /** 書式ペインに出す系列の色（「棒の色」で塗っても、ペインには自分で選んだ色かテーマの色を出す） */
+    const ownSeriesColors: string[] = [];
     const series: SeriesInfo[] = slots.map((slot) => {
         if (!seriesMode) return { name: slot.name, color: columnsSettings.fill, selectionId: null };
         // テーマの色は、個別の指定がある系列でも必ず取る。Desktop の colorPalette は呼んだ順に色を割り当てるので、
         // 取らないと後ろの系列の色が 1 つ前にずれる（標準では、ある系列の色を変えても他の系列の色は変わらない）
         const themeColor = host.colorPalette.getColor(slot.key).value;
-        const color = firstOf(slot.objects, (o) => customColor(o, "fill")) ?? themeColor;
+        ownSeriesColors.push(firstOf(slot.objects, (o) => customColor(o, "fill")) ?? themeColor);
+        // 「棒の色」があれば、凡例の色はその系列で最初に色が入っている行の色（標準の fx と同じ）
+        let fieldColor: string | null = null;
+        for (let i = 0; i < rowCount && fieldColor === null; i++) fieldColor = dataColorAt(slot.colorColumn, i);
+        const color = fieldColor ?? ownSeriesColors[ownSeriesColors.length - 1];
         const selectionId = legendSource
-            ? host.createSelectionIdBuilder().withSeries(categorical!.values!, slot.group).createSelectionId()
+            ? withSeriesOf(host.createSelectionIdBuilder(), categorical!, slot.group).createSelectionId()
             : host.createSelectionIdBuilder().withMeasure(slot.column.source.queryName).createSelectionId();
         return { name: slot.name, color, selectionId };
     });
@@ -1853,7 +2344,9 @@ export function transform(
         }
         const column = slot.detail;
         const raw = column?.values[i];
-        if (!column || raw === null || raw === undefined) return "";
+        if (!column) return "";
+        // 棒はあるが詳細のフィールドが空白：標準の「空白の表示方法」の文字（空なら詳細の行を出さない）
+        if (raw === null || raw === undefined || raw === "") return dataLabelsSettings.detailShowBlankAs;
         if (typeof raw !== "number") return String(raw);
         if (detailUnitKey !== "auto") {
             const unit = resolveUnit(detailUnitKey, Math.abs(raw), unitNotation, detailPrecision);
@@ -1872,17 +2365,20 @@ export function transform(
 
     // データポイントとカテゴリ別ターゲットの生成
     const categoryGroups: CategoryGroup[] = [];
+    /** 系列の展開のときだけ、積んだ棒の始まりと量（値の単位）を残し、あとで置き直す */
+    const stackSegments = new Map<DataPoint, StackSegment>();
     const columnTargets: ColumnTarget[] = [];
 
     for (let i = 0; i < rowCount; i++) {
         const category = categoryText(i);
         const targetObjects = categoryObjectsAt(i);
 
-        // 系列 1 本のときの、カテゴリごとの見た目（1.4 までと同じ）
+        // 系列 1 本のときの、カテゴリごとの見た目（1.4 までと同じ）。「棒の色」があればそれを優先する
+        const categoryOwnFill = customColor(targetObjects, "fill") ?? paretoFillAt(i) ?? columnsSettings.fill;
         const categoryFill =
             i === otherRow
                 ? settings.columns.otherFill.value?.value || "#A0A0A0"
-                : customColor(targetObjects, "fill") ?? paretoFillAt(i) ?? columnsSettings.fill;
+                : (!seriesMode ? dataColorAt(slots[0]?.colorColumn, i) : null) ?? categoryOwnFill;
         const categoryTransparency = clampPercent(customNumber(targetObjects, "transparency") ?? columnsSettings.transparency);
         const categoryShowBorder = customFlag(targetObjects, "showBorder") ?? columnsSettings.showBorder;
         const categoryBorderMatchColumn = customFlag(targetObjects, "borderMatchColumn") ?? columnsSettings.borderMatchColumn;
@@ -1898,6 +2394,20 @@ export function transform(
         const absoluteSum = absoluteSums[i];
         let positiveEnd = 0;
         let negativeEnd = 0;
+        // 積み上げ順を逆にする：凡例の後ろの系列から 0 の側に積む。始まりを先に決めておく
+        const reversedStarts = new Map<number, number>();
+        if (reverseStack) {
+            let up = 0;
+            let down = 0;
+            for (let s = slots.length - 1; s >= 0; s--) {
+                const slot = slots[s];
+                const v = numberAt(slot.column, i);
+                const amount = isSkipped(slot.column, i) ? 0 : percent ? (absoluteSums[i] > 0 ? v / absoluteSums[i] : 0) : v;
+                reversedStarts.set(s, amount >= 0 ? up : down);
+                if (amount >= 0) up += amount;
+                else down += amount;
+            }
+        }
 
         // リボン：順位は値の大きい順（1 が最大、帯のツールヒント用）。
         // 積む順が値の大きい順なら、カテゴリの中で値の小さい順に 0 から積む（いちばん大きい系列が外側に来る）。
@@ -1933,6 +2443,8 @@ export function transform(
             let start = 0;
             if (rankOrder) {
                 start = ribbonStarts.get(s) ?? 0;
+            } else if (reverseStack) {
+                start = reversedStarts.get(s) ?? 0;
             } else if (stacked) {
                 start = amount >= 0 ? positiveEnd : negativeEnd;
                 if (amount >= 0) positiveEnd += amount;
@@ -1944,7 +2456,7 @@ export function transform(
             const selectionId = !seriesMode
                 ? builder.createSelectionId()
                 : legendSource
-                    ? builder.withSeries(categorical!.values!, slot.group).createSelectionId()
+                    ? withSeriesOf(builder, categorical!, slot.group).createSelectionId()
                     : builder.withMeasure(slot.column.source.queryName).createSelectionId();
 
             // ハイライトは該当しない行が null。数値で持ち、棒の高さは軸と同じ calcRatio で出す。
@@ -1958,7 +2470,9 @@ export function transform(
                 highlight === null ? null : !stacked ? highlight : start + (percent ? (absoluteSum > 0 ? highlight / absoluteSum : 0) : highlight);
 
             const style = seriesStyles[s];
-            return {
+            const insetStart = stacked && !skipped && start !== 0;
+            const pointColor = seriesMode ? (i === otherRow ? null : dataColorAt(slot.colorColumn, i)) ?? series[s].color : categoryFill;
+            const point: DataPoint = {
                 category,
                 rowIndex: i,
                 seriesIndex: s,
@@ -1968,6 +2482,7 @@ export function transform(
                 valRatio: calcRatio(end),
                 share,
                 outermost: true,
+                insetStart,
                 rank: ribbonsOn ? ribbonRanks.get(s) ?? null : null,
                 ...formatted(val),
                 detailText: detailTextOf(slot, i, val, skipped),
@@ -1978,27 +2493,34 @@ export function transform(
                 ...(paretoOn ? { categorySelectionId: seriesMode ? withCategories(host.createSelectionIdBuilder(), i).createSelectionId() : selectionId } : {}),
                 highlight,
                 highlightRatio: highlightEnd === null ? null : calcRatio(highlightEnd),
-                color: seriesMode ? series[s].color : categoryFill,
+                color: pointColor,
                 transparency: seriesMode ? style.transparency : categoryTransparency,
                 borderShow: seriesMode ? style.borderShow : categoryShowBorder,
-                borderColor: seriesMode ? style.borderColor : categoryBorderFill,
+                borderColor: seriesMode ? (style.borderMatchColumn ? pointColor : style.borderColor) : categoryBorderFill,
                 borderTransparency: seriesMode ? style.borderTransparency : categoryBorderTransparency,
                 borderWidth: seriesMode ? style.borderWidth : categoryBorderWidth,
                 labelShow: style.labelShow,
                 labelColor: style.explicitLabelColor ?? dataLabelsSettings.color,
             };
+            if (explodeOn) {
+                const highlightAmount = highlight === null ? null : percent ? (absoluteSum > 0 ? highlight / absoluteSum : 0) : highlight;
+                stackSegments.set(point, { start, amount, highlightAmount });
+            }
+            return point;
         });
 
         // 積み上げでは、角丸は正と負それぞれいちばん外側の棒だけに付ける（値の大きい順に積むときは、最大と最小）
         if (stacked) {
             const pick = (want: (d: DataPoint) => boolean, better: (a: DataPoint, b: DataPoint) => boolean) =>
                 points.reduce((best, d, k) => (want(d) && (best < 0 || better(d, points[best])) ? k : best), -1);
+            // 外側の端の棒：凡例の順に積むなら最後の棒、逆に積むなら最初の棒
+            const outerOf = (flags: boolean[]) => (reverseStack ? flags.indexOf(true) : flags.lastIndexOf(true));
             const lastPositive = rankOrder
                 ? pick((d) => !d.blank && d.value > 0, (a, b) => a.value >= b.value)
-                : points.map((d) => !d.blank && d.value > 0).lastIndexOf(true);
+                : outerOf(points.map((d) => !d.blank && d.value > 0));
             const lastNegative = rankOrder
                 ? pick((d) => !d.blank && d.value < 0, (a, b) => a.value <= b.value)
-                : points.map((d) => !d.blank && d.value < 0).lastIndexOf(true);
+                : outerOf(points.map((d) => !d.blank && d.value < 0));
             points.forEach((d, k) => (d.outermost = k === lastPositive || k === lastNegative));
         }
 
@@ -2025,7 +2547,7 @@ export function transform(
             columnTargets.push({
                 name: category,
                 selector: points[0].selectionId.getSelector(),
-                color: categoryFill,
+                color: categoryOwnFill,
                 transparency: categoryTransparency,
                 borderShow: categoryShowBorder,
                 borderMatchColumn: categoryBorderMatchColumn,
@@ -2034,6 +2556,14 @@ export function transform(
                 borderWidth: categoryBorderWidth,
             });
         }
+    }
+
+    // 系列の展開：すき間を入れても全体がプロットに収まるように置き直し、値の軸とその目盛線を消す（標準と同じ）
+    if (explodeOn) {
+        // 合計ラベルを出すときは、棒の外のラベルが切れないよう、上下に少し空ける
+        explodeStacks(categoryGroups, stackSegments, columnsSettings.stackedSpacing / 200, totalLabelsSettings.show ? 0.08 : 0);
+        valueAxisSettings.show = false;
+        gridlinesSettings.horizontalShow = false;
     }
 
     // 複数系列では「設定の適用先」に系列を並べる（標準と同じ）
@@ -2045,7 +2575,7 @@ export function transform(
             columnTargets.push({
                 name: slot.name,
                 selector,
-                color: series[s].color,
+                color: ownSeriesColors[s],
                 transparency: style.transparency,
                 borderShow: style.borderShow,
                 borderMatchColumn: style.borderMatchColumn,
@@ -2093,6 +2623,8 @@ export function transform(
     // 対数では、全体一律の表示単位の語を単位ラベルとタイトルに付けない（Y 軸と同じ）
     const unitWord2 = log2Active ? "" : unitDef2.unitWord;
     let calcRatio2 = calcRatio;
+    /** 第 2 Y 軸の範囲（値）。Y 軸の定数線が範囲の内かを見る。第 2 Y 軸が無ければ null */
+    let range2: [number, number] | null = null;
     let ticks2: Tick[] = [];
     /** 第 2 Y 軸の目盛りを、Y 軸と同じ本数の上限で作り直す（対数は変えない） */
     let ticks2For: (count: number) => Tick[] = () => ticks2;
@@ -2122,6 +2654,7 @@ export function transform(
                 return logSign2 > 0 ? r : 1 - r;
             };
             raw2 = logAxisTicks(lower, upper).map((m) => logSign2 * m);
+            range2 = logSign2 > 0 ? [lower, upper] : [-upper, -lower];
         } else {
             // 標準と同じく、第 2 Y 軸は 0 から始めず折れ線の範囲に合わせる（率が 90〜113% なら 90% あたりから）
             let min2 = start2 ?? lineMin;
@@ -2138,6 +2671,7 @@ export function transform(
             let [lo2, hi2] = scale2.domain();
             if (aligning) [lo2, hi2] = alignZeroAt(lo2, hi2, invertRange ? 1 - zeroRatio : zeroRatio);
             const span2 = hi2 - lo2;
+            range2 = [lo2, hi2];
             calcRatio2 = (v: number) => (span2 > 0 ? Math.max(0, Math.min(1, (v - lo2) / span2)) : 0);
             raw2 = scaleLinear().domain([lo2, hi2]).ticks(5);
             const domain2: [number, number] = [lo2, hi2];
@@ -2171,6 +2705,52 @@ export function transform(
         ticks2For = (count) => percentTicks(ticksUpTo([0, 1], count, (values) => values.map((v) => `${Math.round(v * 100)}%`)));
     }
 
+    // --- Y 軸の定数線 ---------------------------------------------------------
+    // 載せた軸の範囲の内の線だけを入れる（標準と同じく、範囲の外は描かない）。値は載せた軸の表示単位で書く
+    const range1: [number, number] = isLogScaleActive ? (logSign > 0 ? [logLower, logUpper] : [-logUpper, -logLower]) : [niceMin, niceMax];
+    const vlPrecision = getDropdownValue(vl.labelPrecision.value, "auto");
+    const vlLabelText = getDropdownValue(vl.labelText.value, "value");
+    const valueLines: ValueLineInfo[] = valueLineDefs.flatMap((def) => {
+        const secondary = valueLineOnSecondary && range2 !== null;
+        const [lo, hi] = secondary ? range2! : range1;
+        const eps = Math.abs(hi - lo) * 1e-9;
+        if (!(def.value >= lo - eps && def.value <= hi + eps)) return [];
+        const p1 = vlPrecision !== "auto" ? vlPrecision : precision;
+        const p2 = vlPrecision !== "auto" ? vlPrecision : v2Precision;
+        const valueText = secondary
+            ? isPercentLine
+                ? `${(def.value * 100).toFixed(p2 === "auto" ? 1 : Number(p2))}%`
+                : formatValue(def.value, unitDef2.divisor, p2)
+            : percent
+                ? `${(def.value * 100).toFixed(p1 === "auto" ? 0 : Number(p1))}%`
+                : isLogScaleActive
+                    ? formatDynamicValue(def.value, unitNotation, p1, true)
+                    : formatValue(def.value, unitDef.divisor, p1);
+        const label = vlLabelText === "name" ? def.name : vlLabelText === "both" ? `${def.name} ${valueText}` : valueText;
+        return [{ name: def.name, value: def.value, ratio: secondary ? calcRatio2(def.value) : calcRatio(def.value), secondary, label }];
+    });
+    const valueLine: ValueLineSettings = {
+        show: valueLineOn,
+        color: vl.color.value?.value || "#605E5C",
+        transparency: Math.max(0, Math.min(100, vl.transparency.value ?? 0)),
+        lineStyle: getDropdownValue(vl.lineStyle.value, "dashed"),
+        dashArray: vl.dashArray.value ?? "",
+        scaleWithWidth: vl.scaleWithWidth.value ?? true,
+        dashCap: getDropdownValue(vl.dashCap.value, "none"),
+        width: Math.max(1, Math.min(10, vl.width.value ?? 1)),
+        layer: getDropdownValue(vl.layer.value, "front") === "back" ? "back" : "front",
+        shadeShow: vl.shadeShow.value ?? false,
+        shadeRegion: getDropdownValue(vl.shadeRegion.value, "below") === "above" ? "above" : "below",
+        shadeColor: (vl.shadeMatchLine.value ?? false) ? vl.color.value?.value || "#605E5C" : vl.shadeColor.value?.value || "#E1DFDD",
+        shadeTransparency: Math.max(0, Math.min(100, vl.shadeTransparency.value ?? 40)),
+        labelShow: vl.labelShow.value ?? true,
+        labelHorizontal: getDropdownValue(vl.labelHorizontal.value, "left") === "right" ? "right" : "left",
+        labelVertical: getDropdownValue(vl.labelVertical.value, "top") === "bottom" ? "bottom" : "top",
+        labelColor: vl.labelColor.value?.value || "#605E5C",
+        labelFontSize: Math.max(6, Math.min(32, vl.labelFontSize.value ?? 9)),
+        labelAvoidOverlap: vl.labelAvoidOverlap.value ?? true,
+    };
+
     // 折れ線の色は、棒の系列の続きのテーマの色（系列 1 本の棒はテーマの 1 番目を使う扱いにして、線は 2 番目から）
     if (lineDefs.length && !seriesMode) host.colorPalette.getColor(slots[0].key);
     const lineCard = settings.lines;
@@ -2199,6 +2779,10 @@ export function transform(
             color: ownFill ? String(ownFill) : themeColor,
             width: Math.max(1, Math.min(10, ownWidth ?? lineCard.width.value ?? 3)),
             lineStyle: ownStyle !== undefined && ownStyle !== null ? String(ownStyle) : defaultLineStyle,
+            dashArray: ownText("dashArray", lineCard.dashArray.value ?? ""),
+            dashCap: ownText("dashCap", String(lineCard.dashCap.value?.value ?? "none")),
+            scaleWithWidth: typeof own?.scaleWithWidth === "boolean" ? own.scaleWithWidth : lineCard.scaleWithWidth.value ?? true,
+            transparency: clampPercent(typeof own?.transparency === "number" ? own.transparency : lineCard.transparency.value ?? 0),
             lineJoin: ownText("lineJoin", defaultShape.lineJoin),
             interpolation: ownText("interpolation", defaultShape.interpolation),
             smoothing: ownText("smoothing", defaultShape.smoothing),
@@ -2242,6 +2826,12 @@ export function transform(
             typeof lineDefs[j].objects?.lines?.includeCumulative === "boolean"
                 ? Boolean(lineDefs[j].objects?.lines?.includeCumulative)
                 : settings.lines.includeCumulative.value ?? false,
+        formatMode: ownTextOf(lineDefs[j].objects, "formatMode") ?? String(settings.lines.formatMode.value?.value ?? LINE_FORMAT_MODES.auto),
+        customFormat: ownTextOf(lineDefs[j].objects, "customFormat") ?? settings.lines.customFormat.value ?? "",
+        dashArray: line.dashArray,
+        dashCap: line.dashCap,
+        scaleWithWidth: line.scaleWithWidth,
+        transparency: line.transparency,
     }));
 
     if (paretoOn) {
@@ -2251,6 +2841,10 @@ export function transform(
             color: ratioColor,
             width: 2,
             lineStyle: LINE_STYLES.solid,
+            dashArray: "",
+            dashCap: "none",
+            scaleWithWidth: true,
+            transparency: 0,
             lineJoin: "round",
             interpolation: "linear",
             smoothing: LINE_SHAPE_DEFAULTS.smoothing,
@@ -2382,7 +2976,61 @@ export function transform(
                 : []),
         ...lines.map((l, index) => ({ kind: "line" as const, index, name: l.name, color: l.color, selectionId: l.selectable === false ? null : l.selectionId })),
     ];
+    // 表示順を反転：凡例の項目だけを逆に並べる（棒の並び・積む順は変えない）
+    if (lg.reverseOrder.value ?? false) legendEntries.reverse();
     legendInfo.show = (seriesMode || legendEntries.length > 1) && (lg.show.value ?? true);
+
+    // --- X 軸の定数線 ---------------------------------------------------
+    // 「X 軸の定数線」の欄のメジャーは、カテゴリ（行）ごとに Power BI が計算して返す。空白でない値を返したカテゴリに線を引く。
+    // 文字ならラベルにし、それ以外（数・真偽）はメジャーの名前をラベルにする。凡例があると matrix は列の小計（全体の値）で 1 列届く。
+    // categorical で凡例ごとに届いたときは、どれかの凡例で空白でなければ引く（先頭の凡例が空白でも消さない）。「その他」の行には引かない
+    const categoryLineColumns = new Map<string, DataViewValueColumn[]>();
+    for (const group of groups) {
+        for (const column of group.values) {
+            if (!column.source?.roles?.categoryLine) continue;
+            const key = column.source.queryName ?? column.source.displayName;
+            const found = categoryLineColumns.get(key);
+            if (found) found.push(column);
+            else categoryLineColumns.set(key, [column]);
+        }
+    }
+    const cl = settings.categoryLine;
+    const labelText = getDropdownValue(cl.labelText.value, "value");
+    const categoryLines: CategoryLineInfo[] = [...categoryLineColumns.values()].slice(0, 4).map((columns) => {
+        const name = columns[0].source.displayName;
+        const marks = categoryGroups.flatMap((g, index) => {
+            if (g.rowIndex === otherRow) return [];
+            const raw = columns.map((c) => c.values[g.rowIndex]).find((v) => v !== null && v !== undefined && v !== "" && v !== false);
+            if (raw === undefined) return [];
+            // データ値：返した文字（数は書式を当てた値、真偽はメジャーの名前）。名前：メジャーの名前。両方：名前と値
+            const value = typeof raw === "string" ? raw : typeof raw === "boolean" ? name : valueFormatter.create({ format: valueFormatter.getFormatStringByColumn(columns[0].source) }).format(raw);
+            const label = labelText === "name" ? name : labelText === "both" ? `${name} ${value}` : value;
+            return [{ index, label }];
+        });
+        return { name, marks };
+    });
+    const categoryLine: CategoryLineSettings = {
+        show: cl.show.value ?? true,
+        position: (["before", "center", "after"].includes(getDropdownValue(cl.position.value, "before")) ? getDropdownValue(cl.position.value, "before") : "before") as CategoryLineSettings["position"],
+        color: cl.color.value?.value || "#605E5C",
+        transparency: Math.max(0, Math.min(100, cl.transparency.value ?? 0)),
+        lineStyle: getDropdownValue(cl.lineStyle.value, "dashed"),
+        dashArray: cl.dashArray.value ?? "",
+        scaleWithWidth: cl.scaleWithWidth.value ?? true,
+        dashCap: getDropdownValue(cl.dashCap.value, "none"),
+        width: Math.max(1, Math.min(10, cl.width.value ?? 1)),
+        layer: getDropdownValue(cl.layer.value, "front") === "back" ? "back" : "front",
+        shadeShow: cl.shadeShow.value ?? false,
+        shadeRegion: getDropdownValue(cl.shadeRegion.value, "before") === "after" ? "after" : "before",
+        shadeColor: (cl.shadeMatchLine.value ?? false) ? cl.color.value?.value || "#605E5C" : cl.shadeColor.value?.value || "#E1DFDD",
+        shadeTransparency: Math.max(0, Math.min(100, cl.shadeTransparency.value ?? 40)),
+        labelShow: cl.labelShow.value ?? true,
+        labelHorizontal: getDropdownValue(cl.labelHorizontal.value, "right") === "left" ? "left" : "right",
+        labelVertical: getDropdownValue(cl.labelVertical.value, "top") === "bottom" ? "bottom" : "top",
+        labelColor: cl.labelColor.value?.value || "#605E5C",
+        labelFontSize: Math.max(6, Math.min(32, cl.labelFontSize.value ?? 9)),
+        labelAvoidOverlap: cl.labelAvoidOverlap.value ?? true,
+    };
 
     const mk = settings.markers;
     const unitFontSize = Math.max(6, Math.min(32, valAxis.unitFontSize.value ?? 9));
@@ -2425,10 +3073,12 @@ export function transform(
         totalLabels: totalLabelsSettings,
         lines,
         lineTargets,
+        ...(lineWarning ? { lineWarning } : {}),
         markers: {
             show: mk.show.value ?? false,
             shape: getDropdownValue(mk.shape.value, "circle"),
             size: Math.max(1, Math.min(20, mk.size.value ?? 5)),
+            rotation: (((Number(mk.rotation.value) || 0) % 360) + 360) % 360,
             color: mk.color.value?.value ?? "",
             transparency: clampPercent(mk.transparency.value ?? 0),
             borderShow: mk.borderShow.value ?? false,
@@ -2469,6 +3119,18 @@ export function transform(
                 : {}),
         },
         pareto: paretoInfo,
+        valueLines,
+        valueLine,
+        ...(valueLineWarning ? { valueLineWarning } : {}),
+        categoryLines,
+        categoryLine,
+        compareLayers: [],
+        compare: EMPTY_COMPARE,
+        basis: {
+            extent: ownExtent,
+            keepRows: otherRow >= 0 ? Array.from({ length: originalCategories![0].values.length }, (_, i) => i).filter((i) => !others.mergedRows.includes(i)) : null,
+            displayOrder,
+        },
         cumulative: {
             available: cumulativeAvailable,
             enabled: cumulativeEnabled,
@@ -2486,3 +3148,42 @@ export const LOADING_NOTICE = "続きのカテゴリを読み込んでいます�
 export const TRUNCATED_TITLE = "すべてのカテゴリを読み込めていません";
 export const TRUNCATED_NOTICE =
     "Power BI の読み込みの上限で、すべてのカテゴリを読み込めていません。「その他」と積み上げの合計、パレートの累積比は、読み込めたカテゴリで計算しています。";
+
+/** 折れ線の率の分子と分母の数が合わないときの警告 */
+export const LINE_RATIO_WARNING_TITLE = "折れ線の率の分子と分母の数が合いません";
+export const LINE_RATIO_WARNING =
+    "「折れ線の率の分子」と「折れ線の率の分母」は同じ数だけ入れてください。入れた順に組にして割ります。組にならない分は描いていません。";
+
+/** 折れ線 1 本の元。率の線は、系列をまたいで足した分子と分母を持つ（累計のとき、それぞれ累計してから割り直す） */
+interface LineDef {
+    key: string;
+    name: string;
+    format: string;
+    objects: DataViewObjects | undefined;
+    values: Array<number | null>;
+    ratio?: { numerators: Array<number | null>; denominators: Array<number | null> };
+}
+
+/** 行ごとに分子 ÷ 分母。分子か分母が空白、分母が 0 なら空白（0% ではない） */
+function divideRatio(numerators: Array<number | null>, denominators: Array<number | null>): Array<number | null> {
+    return numerators.map((numerator, i) => {
+        const denominator = denominators[i];
+        if (numerator === null || denominator === null || denominator === 0) return null;
+        return numerator / denominator;
+    });
+}
+
+/** 線ごとに保存した「線」の項目の値。保存が無ければ無し */
+function ownTextOf(objects: DataViewObjects | undefined, property: string): string | undefined {
+    const raw = objects?.lines?.[property];
+    return raw !== undefined && raw !== null ? String(raw) : undefined;
+}
+
+/** 線の書式文字列。線ごとの保存があればそれ、無ければ「すべて」の値で決める */
+function lineFormatOf(def: LineDef, card: LinesCardSettings): string {
+    const mode = ownTextOf(def.objects, "formatMode") ?? String(card.formatMode.value?.value ?? LINE_FORMAT_MODES.auto);
+    const custom = (ownTextOf(def.objects, "customFormat") ?? card.customFormat.value ?? "").trim();
+    if (mode === LINE_FORMAT_MODES.percent) return LINE_PERCENT_FORMAT;
+    if (mode === LINE_FORMAT_MODES.custom && custom) return custom;
+    return def.ratio ? LINE_PERCENT_FORMAT : def.format;
+}
