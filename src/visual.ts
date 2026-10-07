@@ -26,9 +26,10 @@ import {
 
 /** 保存の応答（update）を待つ上限 (ms)。過ぎたら、保存に失敗したものとして読み戻しを受け付ける */
 const PENDING_TIMEOUT_MS = 5000;
-import { savedCumulativeReset, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint, LOADING_NOTICE, TRUNCATED_TITLE, TRUNCATED_NOTICE, LINE_RATIO_WARNING_TITLE, VALUE_LINE_WARNING_TITLE } from "./viewModel";
+import { savedCumulativeReset, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint, TRUNCATED_TITLE, TRUNCATED_NOTICE, SERIES_TRUNCATED_TITLE, SERIES_TRUNCATED_NOTICE, LINE_RATIO_WARNING_TITLE, VALUE_LINE_WARNING_TITLE } from "./viewModel";
 import { toRootCoordinates } from "./tooltip";
 import { transformWithLayers, nextVisibleLayers, barTooltipItems, COMPARE_LIMIT_TITLE } from "./compareLayers";
+import { receivedCounts, ROW_LIMIT, SERIES_LIMIT } from "./matrixDataView";
 
 import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructorOptions;
 import VisualUpdateOptions = powerbi.extensibility.visual.VisualUpdateOptions;
@@ -54,11 +55,13 @@ export class Visual implements IVisual {
     private renderLatest: (() => void) | null = null;
     /** 最後の update（閲覧者が累計を切り替えたときに、同じ内容で作り直す） */
     private lastOptions: VisualUpdateOptions | null = null;
+    /** 前に描いた値の軸の高さ (px、縦棒)。棒の外に出すデータ ラベルの余白を値の軸に取るのに使う（App の onPlotHeight） */
+    private plotHeight = 0;
     /**
-     * 続きの読み込み。カテゴリが 30,000 件を超えると、Power BI は続きを残して届ける（metadata.segment）。
-     * update() でだけ決める（閲覧者の操作で描き直すときに、もう一度読みに行かない）
+     * 上限に達して切られたか。行（カテゴリ）は top 30000・列（凡例）は top 2000 で受け、届いた数が上限に達したら切られたとみなす。
+     * 行を window にして続きを読むと、凡例が 60 で切られ、列の小計（全体の値）も届かなくなったため。update() でだけ決める
      */
-    private loadState: "complete" | "loading" | "truncated" = "complete";
+    private truncated = { rows: false, series: false };
     /** 閲覧者が触った累計の状態。ページを移ってもレポートから読み直す */
     private visualState: VisualState = EMPTY_VISUAL_STATE;
     /** persistProperties 直後の値。保存が返る前の古い dataView で操作を巻き戻さないための印 */
@@ -98,13 +101,8 @@ export class Visual implements IVisual {
 
         try {
             this.lastOptions = options;
-            // 続きがあれば全部読む（「その他」や積み上げの合計を、読み込めた分だけで計算しないため）。
-            // 読めない（100 MB の上限など）ときは、読めた分で描いて警告を出す
-            this.loadState = !options.dataViews?.[0]?.metadata?.segment
-                ? "complete"
-                : this.host.fetchMoreData(true)
-                  ? "loading"
-                  : "truncated";
+            const counts = receivedCounts(options.dataViews?.[0]);
+            this.truncated = { rows: counts.rows >= ROW_LIMIT, series: counts.series >= SERIES_LIMIT };
             this.restoreVisualState(options.dataViews?.[0]);
             this.build(options);
             this.events.renderingFinished(options);
@@ -134,11 +132,12 @@ export class Visual implements IVisual {
         const viewModel: ViewModel = transformWithLayers(options.dataViews?.[0], this.host, this.formattingSettings, {
             cumulative: effectiveCumulative(current, baseCumulative),
             cumulativeReset: current.cumulativeReset,
+            plotHeight: this.plotHeight,
         });
-        if (this.loadState === "loading") viewModel.notice = LOADING_NOTICE;
         // 警告は描き直すたびに消えるので、そのたびに出し直す。アイコンは 1 つしか出せないので、2 つあれば本文を並べる
         const warnings = [
-            ...(this.loadState === "truncated" ? [{ title: TRUNCATED_TITLE, detail: TRUNCATED_NOTICE }] : []),
+            ...(this.truncated.rows ? [{ title: TRUNCATED_TITLE, detail: TRUNCATED_NOTICE }] : []),
+            ...(this.truncated.series ? [{ title: SERIES_TRUNCATED_TITLE, detail: SERIES_TRUNCATED_NOTICE }] : []),
             ...(viewModel.lineWarning ? [{ title: LINE_RATIO_WARNING_TITLE, detail: viewModel.lineWarning }] : []),
             ...(viewModel.compareWarning ? [{ title: COMPARE_LIMIT_TITLE, detail: viewModel.compareWarning }] : []),
             ...(viewModel.valueLineWarning ? [{ title: VALUE_LINE_WARNING_TITLE, detail: viewModel.valueLineWarning }] : []),
@@ -169,6 +168,12 @@ export class Visual implements IVisual {
                     viewModel,
                     viewport: options.viewport,
                     settings: this.formattingSettings,
+                    // 値の軸の高さが変わったら、棒の外に出すデータ ラベルの余白を取り直して描き直す（高さは軸の範囲で変わらないので 1 回で落ち着く）
+                    onPlotHeight: (height) => {
+                        if (Math.abs(height - this.plotHeight) < 1 || this.lastOptions !== options) return;
+                        this.plotHeight = height;
+                        this.build(options);
+                    },
                     selectedIds: this.selectedIds,
                     // 操作できない場所（ダッシュボードのタイルなど）では、選択・右クリックのメニューを送らない
                     onSelect: (id, multiSelect) => {

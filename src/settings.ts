@@ -17,7 +17,7 @@ import { AUTO_PLACEHOLDER, AutoNumUpDown, itemOf } from "./shared/formatting";
 import { SCROLL_START_ITEMS } from "./shared/scrollStart";
 import { NEGATIVE_STYLE_ITEMS, ZERO_STYLE_ITEMS, SIGN_TONE_MODE_ITEMS, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR } from "./shared/numberFormat";
 import { CUSTOM_LINE_STYLE, CUSTOM_LINE_STYLE_ITEM, DASH_CAP_ITEMS } from "./shared/gridlines";
-import { legendParts, gridlineParts, categoryAxisParts, valueAxisParts, labelValueParts, labelBackgroundParts } from "./shared/formatCards";
+import { legendParts, gridlineParts, categoryAxisParts, valueAxisParts, labelValueParts, labelBackgroundParts, labelHaloParts } from "./shared/formatCards";
 
 export interface ColumnTarget {
     name: string;
@@ -674,6 +674,28 @@ export const DETAIL_CONTENT_ITEMS: powerbi.IEnumMember[] = [
     { value: DETAIL_CONTENTS.custom, displayName: "カスタム（ラベルの詳細）" },
 ];
 
+/** データ ラベルのタイトルのコンテンツ。標準の「カスタム」はフィールドを選ぶので、ここでは「ラベルのタイトル」に入れたフィールド */
+export const TITLE_CONTENTS = {
+    seriesName: "seriesName",
+    custom: "custom",
+} as const;
+
+export const TITLE_CONTENT_ITEMS: powerbi.IEnumMember[] = [
+    { value: TITLE_CONTENTS.seriesName, displayName: "系列名" },
+    { value: TITLE_CONTENTS.custom, displayName: "カスタム（ラベルのタイトル）" },
+];
+
+/** データ ラベルの行（タイトル・値・詳細）を縦に積むか、1 行に並べるか（標準の「レイアウト」） */
+export const LABEL_LAYOUTS = {
+    multiLine: "multiLine",
+    singleLine: "singleLine",
+} as const;
+
+export const LABEL_LAYOUT_ITEMS: powerbi.IEnumMember[] = [
+    { value: LABEL_LAYOUTS.multiLine, displayName: "複数行" },
+    { value: LABEL_LAYOUTS.singleLine, displayName: "単一行" },
+];
+
 export interface LabelTarget {
     name: string;
     selector: powerbi.data.Selector;
@@ -937,9 +959,141 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
         value: PRECISIONS[0],
     });
 
+    /** 値の行の上に、系列名かフィールド（ラベルのタイトル）の行を出す（標準の「タイトル」）。既定はオフ */
+    titleShow = new formattingSettings.ToggleSwitch({
+        name: "titleShow",
+        displayName: "タイトル",
+        value: false,
+    });
+
+    titleContent = new formattingSettings.ItemDropdown({
+        name: "titleContent",
+        displayName: "コンテンツ",
+        items: TITLE_CONTENT_ITEMS,
+        value: TITLE_CONTENT_ITEMS[0],
+    });
+
+    titleFont = new formattingSettings.FontControl({
+        name: "titleFont",
+        displayName: "フォント",
+        fontFamily: new formattingSettings.FontPicker({
+            name: "titleFontFamily",
+            displayName: "フォント",
+            value: "Segoe UI",
+        }),
+        fontSize: new formattingSettings.NumUpDown({
+            name: "titleFontSize",
+            displayName: "文字サイズ",
+            value: 9,
+        }),
+        bold: new formattingSettings.ToggleSwitch({
+            name: "titleBold",
+            displayName: "太字",
+            value: false,
+        }),
+        italic: new formattingSettings.ToggleSwitch({
+            name: "titleItalic",
+            displayName: "斜体",
+            value: false,
+        }),
+        underline: new formattingSettings.ToggleSwitch({
+            name: "titleUnderline",
+            displayName: "下線",
+            value: false,
+        }),
+    });
+
+    /** 空 = 自動（値の行と同じく、棒の色に合わせて白か黒） */
+    titleColor = new formattingSettings.ColorPicker({
+        name: "titleColor",
+        displayName: "カラー",
+        value: { value: "" },
+    });
+
+    titleTransparency = new formattingSettings.NumUpDown({
+        name: "titleTransparency",
+        displayName: "透過性 (%)",
+        value: 0,
+    });
+
+    /** カスタム（ラベルのタイトルのフィールド）の数値の表示単位。「自動」はフィールドの書式のまま */
+    titleUnitType = new formattingSettings.ItemDropdown({
+        name: "titleUnitType",
+        displayName: "表示単位",
+        items: UNIT_TYPES,
+        value: UNIT_TYPES[0],
+    });
+
+    titlePrecision = new formattingSettings.ItemDropdown({
+        name: "titlePrecision",
+        displayName: "小数点以下の桁数",
+        items: PRECISIONS,
+        value: PRECISIONS[0],
+    });
+
+    /** タイトルがカスタムで、フィールドの値が空白のときに出す文字。空ならタイトルの行を出さない */
+    titleShowBlankAs = new formattingSettings.TextInput({
+        name: "titleShowBlankAs",
+        displayName: "空白の表示方法",
+        value: "",
+        placeholder: "",
+    });
+
+    /** 「ラベルの値」のフィールドが空白のときに出す文字。空なら棒の値を出す */
+    valueShowBlankAs = new formattingSettings.TextInput({
+        name: "valueShowBlankAs",
+        displayName: "空白の表示方法",
+        value: "",
+        placeholder: "",
+    });
+
+    /** タイトル・値・詳細を縦に積む（複数行）か、1 行に並べる（単一行）か */
+    labelContentLayout = new formattingSettings.ItemDropdown({
+        name: "labelContentLayout",
+        displayName: "レイアウト",
+        items: LABEL_LAYOUT_ITEMS,
+        value: LABEL_LAYOUT_ITEMS[0],
+    });
+
+    /** 複数行のとき、行どうしを左・中央・右のどれでそろえるか */
+    horizontalAlignment = new formattingSettings.AlignmentGroup({
+        name: "horizontalAlignment",
+        displayName: "水平方向の配置",
+        mode: "horizontalAlignment" as powerbi.visuals.AlignmentGroupMode,
+        value: "center",
+    });
+
+    /** 文字のまわりに縁を付ける（標準に無い項目。棒や線の上でも読める） */
+    private halo = labelHaloParts();
+    haloShow = this.halo.haloShow;
+    haloColor = this.halo.haloColor;
+    haloWidth = this.halo.haloWidth;
+    haloGroup = this.halo.haloGroup;
+
     backgroundShow = this.background.backgroundShow;
     backgroundColor = this.background.backgroundColor;
     backgroundTransparency = this.background.backgroundTransparency;
+
+    titleGroup = new FormattingSettingsGroup({
+        name: "labelTitle",
+        displayName: "タイトル",
+        topLevelSlice: this.titleShow,
+        slices: [
+            this.titleContent,
+            this.titleFont,
+            this.titleColor,
+            this.titleTransparency,
+            this.titleUnitType,
+            this.titlePrecision,
+            this.titleShowBlankAs,
+        ],
+    });
+
+    layoutGroup = new FormattingSettingsGroup({
+        name: "labelLayout",
+        displayName: "レイアウト",
+        slices: [this.labelContentLayout, this.horizontalAlignment],
+    });
 
     optionsGroup = new FormattingSettingsGroup({
         name: "labelOptions",
@@ -972,6 +1126,7 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
             this.toneMode,
             this.positiveColor,
             this.negativeColor,
+            this.valueShowBlankAs,
         ],
     });
 
@@ -1002,9 +1157,12 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
 
     groups = [
         this.optionsGroup,
+        this.titleGroup,
         this.valuesGroup,
         this.detailGroup,
         this.backgroundGroup,
+        this.haloGroup,
+        this.layoutGroup,
     ];
 
     /**
@@ -1012,7 +1170,7 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
      * 保存していない項目だけ変える。saved はレポートに保存された dataLabels の値。
      * hasDetailField は「ラベルの詳細」にフィールドがあるとき true（コンテンツの既定をカスタムにする）
      */
-    applyChartTypeDefaults(chartType: string, saved: powerbi.DataViewObject | undefined, hasDetailField: boolean): void {
+    applyChartTypeDefaults(chartType: string, saved: powerbi.DataViewObject | undefined, hasDetailField: boolean, hasValueField = false, hasTitleField = false): void {
         const percent = chartType === CHART_TYPES.stacked100;
         if (saved?.valueShow === undefined) this.valueShow.value = !percent;
         if (saved?.detailShow === undefined) this.detailShow.value = percent;
@@ -1023,6 +1181,19 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
         this.detailUnitType.visible = String(this.detailContent.value?.value) === DETAIL_CONTENTS.custom;
         this.detailShowBlankAs.visible = this.detailUnitType.visible;
         this.labelMaxWidth.visible = this.optimizeLabelDisplay.value ?? false;
+        // 「ラベルのタイトル」にフィールドを入れたら、コンテンツの既定をカスタムにする（詳細と同じ）
+        if (saved?.titleContent === undefined) {
+            this.titleContent.value = itemOf(TITLE_CONTENT_ITEMS, hasTitleField ? TITLE_CONTENTS.custom : TITLE_CONTENTS.seriesName);
+        }
+        // タイトルの表示単位・桁数・空白は、フィールド（カスタム）のときだけ効く
+        const titleCustom = String(this.titleContent.value?.value) === TITLE_CONTENTS.custom;
+        this.titleUnitType.visible = titleCustom;
+        this.titlePrecision.visible = titleCustom;
+        this.titleShowBlankAs.visible = titleCustom;
+        // 値の空白の表示方法は、「ラベルの値」にフィールドがあるときだけ効く
+        this.valueShowBlankAs.visible = hasValueField;
+        // 水平方向の配置は、行を縦に積むときだけ効く
+        this.horizontalAlignment.visible = String(this.labelContentLayout.value?.value) !== LABEL_LAYOUTS.singleLine;
     }
 
     /**
@@ -1030,7 +1201,7 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
      * 系列が 1 本なら何も足さない（1.4 までと同じ）
      */
     applyTargets(targets: LabelTarget[]): void {
-        const base = [this.optionsGroup, this.valuesGroup, this.detailGroup, this.backgroundGroup];
+        const base = [this.optionsGroup, this.titleGroup, this.valuesGroup, this.detailGroup, this.backgroundGroup, this.haloGroup, this.layoutGroup];
         if (!targets.length) {
             this.groups = base;
             return;
@@ -3091,8 +3262,11 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
 
         const chartType = String(this.chart.chartType.value?.value ?? CHART_TYPES.clustered);
         const saved = objects?.dataLabels;
-        const hasDetailField = !!dataView?.metadata?.columns?.some((c) => c.roles?.labelDetail);
-        this.dataLabels.applyChartTypeDefaults(chartType, saved, hasDetailField);
+        const columns = dataView?.metadata?.columns;
+        const hasDetailField = !!columns?.some((c) => c.roles?.labelDetail);
+        const hasTitleField = !!columns?.some((c) => c.roles?.labelTitle);
+        const hasValueField = !!columns?.some((c) => c.roles?.labelValue);
+        this.dataLabels.applyChartTypeDefaults(chartType, saved, hasDetailField, hasValueField, hasTitleField);
     }
 
     /**

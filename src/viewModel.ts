@@ -21,6 +21,8 @@ import {
     ChartType,
     RIBBON_ORDERS,
     DETAIL_CONTENTS,
+    LABEL_LAYOUTS,
+    TITLE_CONTENTS,
     LINE_STYLES,
     LINE_SHAPE_DEFAULTS,
     ORIENTATIONS,
@@ -46,6 +48,8 @@ import { collapseOthers, lineIndependenceOf } from "./others";
 import { categoricalOf, withCategoryOf, withSeriesOf } from "./matrixDataView";
 import { TooltipSource, TooltipStack, TooltipColumn, tooltipColumnOf, formatTooltipValue, categoryTooltipRows, BLANK_TEXT } from "./tooltip";
 import { ticksUpTo, tickCountOf, boundOf } from "./shared/ticks";
+import { PT_TO_PX } from "./shared/text";
+import { Halo, haloOf, NO_HALO } from "./shared/halo";
 import { formatSigned, shownSignOf, toneOf, NEGATIVE_STYLES, SignStyle, ZERO_STYLES, TONE_MODES, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR } from "./shared/numberFormat";
 
 export { tickCountOf };
@@ -75,6 +79,8 @@ export interface DataPoint {
     dataLabelText: string;
     /** 値の行を符号で塗る色（「符号の色」）。塗らなければ空 */
     labelToneColor: string;
+    /** データラベルのタイトルの行（系列名か、ラベルのタイトルのフィールドの値）。無ければ空 */
+    titleText: string;
     /** データラベルの詳細の行（全体に対する割合か、ラベルの詳細のフィールドの値）。無ければ空 */
     detailText: string;
     selectionId: ISelectionId;
@@ -359,6 +365,26 @@ export interface DataLabelsSettings {
     /** 空 = 自動（値の行と同じ） */
     detailColor: string;
     detailTransparency: number;
+    /** タイトルの行を出すか（系列名か、ラベルのタイトルのフィールド） */
+    titleShow: boolean;
+    titleFontFamily: string;
+    titleFontSize: number;
+    titleBold: boolean;
+    titleItalic: boolean;
+    titleUnderline: boolean;
+    /** 空 = 自動（値の行と同じ） */
+    titleColor: string;
+    titleTransparency: number;
+    /** タイトルがカスタムで、フィールドの値が空白のときに出す文字（空なら出さない） */
+    titleShowBlankAs: string;
+    /** ラベルの値のフィールドが空白のときに出す文字（空なら棒の値） */
+    valueShowBlankAs: string;
+    /** 行を 1 行に並べるか（単一行） */
+    singleLine: boolean;
+    /** 複数行のとき、行をそろえる位置 */
+    horizontalAlignment: "left" | "center" | "right";
+    /** 文字の縁（幅 0 なら付けない） */
+    halo: Halo;
     position: string; // "auto" | "outsideEnd" | "insideTop" | "insideCenter" | "insideBottom"
     orientation: string; // "horizontal" | "vertical"
     overflow: boolean;
@@ -705,6 +731,9 @@ const EMPTY_COLUMNS_SETTINGS: ColumnsSettings = {
 };
 
 const clampPercent = (v: number): number => Math.max(0, Math.min(100, v));
+
+/** 水平方向の配置の保存値（left・center・right。ほかは中央） */
+const alignmentOf = (v: unknown): "left" | "center" | "right" => (v === "left" || v === "right" ? v : "center");
 const clampBorderWidth = (v: number): number => Math.max(1, Math.min(5, v));
 
 /** 対数目盛りの本数の上限。標準の値軸と同程度（5〜8 本）に収める */
@@ -866,6 +895,19 @@ const EMPTY_DATA_LABELS: DataLabelsSettings = {
     detailUnderline: false,
     detailColor: "",
     detailTransparency: 0,
+    titleShow: false,
+    titleFontFamily: "Segoe UI",
+    titleFontSize: 9,
+    titleBold: false,
+    titleItalic: false,
+    titleUnderline: false,
+    titleColor: "",
+    titleTransparency: 0,
+    titleShowBlankAs: "",
+    valueShowBlankAs: "",
+    singleLine: false,
+    horizontalAlignment: "center",
+    halo: NO_HALO,
 };
 
 const EMPTY_LEGEND: LegendInfo = {
@@ -1081,6 +1123,9 @@ interface SeriesSlot {
     tooltips: DataViewValueColumn[];
     /** 「ラベルの詳細」の列。無ければ undefined */
     detail?: DataViewValueColumn;
+    /** 「ラベルのタイトル」「ラベルの値」の列。無ければ undefined */
+    title?: DataViewValueColumn;
+    value?: DataViewValueColumn;
     /** 「棒の色」の列。無ければ undefined */
     colorColumn?: DataViewValueColumn;
     group: DataViewValueColumnGroup;
@@ -1124,6 +1169,8 @@ function seriesSlotsOf(
                 tooltips: group.values.filter((c) => c !== column && c.source?.roles?.tooltips),
                 // 「値」と同じフィールドを入れると、Power BI は役割を 2 つ持つ 1 つの列にまとめて渡す
                 detail: group.values.find((c) => c.source?.roles?.labelDetail),
+                title: group.values.find((c) => c.source?.roles?.labelTitle),
+                value: group.values.find((c) => c.source?.roles?.labelValue),
                 colorColumn: group.values.find(isDataColor),
                 group,
                 objects: [group.objects, column.source?.objects],
@@ -1136,6 +1183,8 @@ function seriesSlotsOf(
     const measures = columns.filter(isMeasure);
     const tooltips = columns.filter((c) => !measures.includes(c) && c.source?.roles?.tooltips);
     const detail = columns.find((c) => c.source?.roles?.labelDetail);
+    const title = columns.find((c) => c.source?.roles?.labelTitle);
+    const value = columns.find((c) => c.source?.roles?.labelValue);
     // 「棒の色」は系列 1 本のときだけ使う（値が複数で凡例が無いときは、どの系列の色か決められない）
     const colorColumn = measures.length === 1 ? columns.find(isDataColor) : undefined;
     return measures.map((column) => ({
@@ -1144,6 +1193,8 @@ function seriesSlotsOf(
         column,
         tooltips,
         detail,
+        title,
+        value,
         colorColumn,
         group: groups[0],
         objects: [column.source.objects],
@@ -1318,6 +1369,37 @@ export interface CalculationRuntime {
     cumulative?: boolean;
     /** 閲覧者が選んだ区切り（レベルの queryName か CUMULATIVE_RESET_NONE）。null なら書式の値 */
     cumulativeReset?: string | null;
+    /**
+     * 前に描いた値の軸の高さ (px)。棒の外に出すデータ ラベルが入るよう、値の軸の範囲を広げるのに使う（labelRoomOf）。
+     * 値の軸の高さは凡例と X 軸で決まり、範囲では変わらないので、描いた高さを次の transform に渡せば落ち着く
+     */
+    plotHeight?: number;
+}
+
+/** データ ラベルの文字の行の高さ（文字サイズに対する比）と、行のあいだ・背景の余白 (px)。unitUtils の labelBlock と同じ見積もり */
+const LABEL_LINE_RATIO = 1.02;
+const LABEL_ROOM_GAP = 1;
+const LABEL_ROOM_PADDING = 3;
+
+/**
+ * 縦棒の外の端に出すデータ ラベルのまとまりの高さ (px)。棒の外に出しうるときだけ（積み上げ・100%・縦向きのラベルは 0）。
+ * 標準は、外に出すラベルが入るよう値の軸の範囲を広げる（ラベルが上の枠で切れたり、X 軸の名前に重なったりしない）
+ */
+function labelRoomOf(settings: VisualFormattingSettingsModel, stacked: boolean): number {
+    const dl = settings.dataLabels;
+    if (!(dl.show.value ?? false) || stacked) return 0;
+    const position = String(dl.position.value?.value ?? "auto");
+    if (position !== "auto" && position !== "outsideEnd") return 0;
+    if (String(dl.orientation.value?.value ?? "horizontal") === "vertical") return 0;
+    const sizes: number[] = [];
+    if (dl.titleShow.value) sizes.push(dl.titleFont.fontSize.value ?? 9);
+    if (dl.valueShow.value ?? true) sizes.push(dl.fontSize.value ?? 9);
+    if (dl.detailShow.value) sizes.push(dl.detailFont.fontSize.value ?? 9);
+    if (!sizes.length) return 0;
+    const px = sizes.map((pt) => Math.max(8, Math.min(32, pt)) * PT_TO_PX * LABEL_LINE_RATIO);
+    const singleLine = String(dl.labelContentLayout.value?.value) === LABEL_LAYOUTS.singleLine;
+    const text = singleLine ? Math.max(...px) : px.reduce((sum, h) => sum + h, 0) + LABEL_ROOM_GAP * (px.length - 1);
+    return text + LABEL_ROOM_PADDING * 2;
 }
 
 /**
@@ -1956,9 +2038,16 @@ export function transform(
         // 合計ラベルを出す積み上げでは、自動で決める端に範囲の 10% の余白を足す
         // （合計ラベルが軸の外で切れたり、カテゴリ名に掛かったりしないように）
         const totalLabelsOn = chartType === CHART_TYPES.stacked && (settings.totalLabels.show.value ?? false);
-        const headroom = totalLabelsOn ? (Math.max(maxValue, 0) - Math.min(minValue, 0)) * 0.1 : 0;
-        const lowerBound = userStart !== undefined ? userStart : (minValue < 0 ? minValue - headroom : 0);
-        const upperBound = userEnd !== undefined ? userEnd : (maxValue > 0 ? maxValue + headroom : 1);
+        const span = Math.max(maxValue, 0) - Math.min(minValue, 0);
+        const headroom = totalLabelsOn ? span * 0.1 : 0;
+        // 棒の外の端に出すデータ ラベルの余白（縦棒）。描いた値の軸の高さに対するラベルの高さの比で、自動の端を広げる
+        const room = !horizontal && (runtime.plotHeight ?? 0) > 0 ? labelRoomOf(settings, stacked) / runtime.plotHeight! : 0;
+        const roomTop = userEnd === undefined && maxValue > 0 ? room : 0;
+        const roomBottom = userStart === undefined && minValue < 0 ? room : 0;
+        const roomShare = Math.min(0.6, roomTop + roomBottom);
+        const roomSpan = roomShare > 0 ? span / (1 - roomShare) : span;
+        const lowerBound = userStart !== undefined ? userStart : (minValue < 0 ? minValue - headroom - roomBottom * roomSpan : 0);
+        const upperBound = userEnd !== undefined ? userEnd : (maxValue > 0 ? maxValue + headroom + roomTop * roomSpan : 1);
         const scale = scaleLinear().domain([lowerBound, upperBound]);
         if (roundRange && userStart === undefined && userEnd === undefined) {
             scale.nice();
@@ -2154,6 +2243,19 @@ export function transform(
         detailUnderline: dl.detailFont.underline?.value ?? false,
         detailColor: dl.detailColor.value?.value ?? "",
         detailTransparency: clampPercent(dl.detailTransparency.value ?? 0),
+        titleShow: dl.titleShow.value ?? false,
+        titleFontFamily: dl.titleFont.fontFamily.value ?? "Segoe UI",
+        titleFontSize: Math.max(8, Math.min(32, dl.titleFont.fontSize.value ?? 9)),
+        titleBold: dl.titleFont.bold?.value ?? false,
+        titleItalic: dl.titleFont.italic?.value ?? false,
+        titleUnderline: dl.titleFont.underline?.value ?? false,
+        titleColor: dl.titleColor.value?.value ?? "",
+        titleTransparency: clampPercent(dl.titleTransparency.value ?? 0),
+        titleShowBlankAs: dl.titleShowBlankAs.value ?? "",
+        valueShowBlankAs: dl.valueShowBlankAs.value ?? "",
+        singleLine: String(dl.labelContentLayout.value?.value) === LABEL_LAYOUTS.singleLine,
+        horizontalAlignment: alignmentOf(dl.horizontalAlignment.value),
+        halo: haloOf(dl.haloShow.value, dl.haloColor.value?.value, dl.haloWidth.value),
     };
 
     // 列（columns）設定の抽出
@@ -2335,32 +2437,63 @@ export function transform(
             minimumFractionDigits: percentDigits,
             maximumFractionDigits: percentDigits,
         })}%`;
-    const detailFormatters = new Map<DataViewValueColumn, ReturnType<typeof valueFormatter.create>>();
+    const fieldFormatters = new Map<DataViewValueColumn, ReturnType<typeof valueFormatter.create>>();
     const detailTextOf = (slot: SeriesSlot, i: number, val: number, skipped: boolean): string => {
         if (skipped) return "";
         if (detailContent !== DETAIL_CONTENTS.custom) {
             const denominator = seriesMode || percent ? absoluteSums[i] : grandAbsolute;
             return percentText(denominator > 0 ? val / denominator : 0);
         }
-        const column = slot.detail;
-        const raw = column?.values[i];
-        if (!column) return "";
         // 棒はあるが詳細のフィールドが空白：標準の「空白の表示方法」の文字（空なら詳細の行を出さない）
-        if (raw === null || raw === undefined || raw === "") return dataLabelsSettings.detailShowBlankAs;
+        return fieldText(slot.detail, i, detailUnitKey, detailPrecision, dataLabelsSettings.detailShowBlankAs);
+    };
+
+    /**
+     * ラベルの欄（タイトル・値・詳細）に入れたフィールドの i 行目の文字。空白なら blankAs。
+     * 表示単位を選べばその単位で、「自動」ならフィールドの書式のまま（小数点以下の桁数を選んだら、その桁で出す）
+     */
+    function fieldText(column: DataViewValueColumn | undefined, i: number, unitKey: string, digits: string, blankAs: string): string {
+        if (!column) return "";
+        const raw = column.values[i];
+        if (raw === null || raw === undefined || raw === "") return blankAs;
         if (typeof raw !== "number") return String(raw);
-        if (detailUnitKey !== "auto") {
-            const unit = resolveUnit(detailUnitKey, Math.abs(raw), unitNotation, detailPrecision);
-            return `${formatValue(raw, unit.divisor, detailPrecision)}${unit.unitWord}`;
+        if (unitKey !== "auto") {
+            const unit = resolveUnit(unitKey, Math.abs(raw), unitNotation, digits);
+            return `${formatValue(raw, unit.divisor, digits)}${unit.unitWord}`;
         }
-        // 自動はフィールドの書式のまま（小数点以下の桁数を選んだら、その桁で出す）
         const format = valueFormatter.getFormatStringByColumn(column.source) ?? "";
-        if (detailPrecision !== "auto") return /%/.test(format) ? percentText(raw) : formatValue(raw, 1, detailPrecision);
-        let formatter = detailFormatters.get(column);
+        if (digits !== "auto") {
+            const fraction = Number(digits);
+            return /%/.test(format)
+                ? `${(raw * 100).toLocaleString("ja-JP", { minimumFractionDigits: fraction, maximumFractionDigits: fraction })}%`
+                : formatValue(raw, 1, digits);
+        }
+        let formatter = fieldFormatters.get(column);
         if (!formatter) {
             formatter = valueFormatter.create({ format });
-            detailFormatters.set(column, formatter);
+            fieldFormatters.set(column, formatter);
         }
         return formatter.format(raw);
+    }
+
+    // データ ラベルのタイトルの行。系列名か、「ラベルのタイトル」に入れたフィールドの値
+    const titleCustom = getDropdownValue(dl.titleContent.value, TITLE_CONTENTS.seriesName) === TITLE_CONTENTS.custom;
+    const titleUnitKey = getDropdownValue(dl.titleUnitType.value, "auto");
+    const titlePrecision = getDropdownValue(dl.titlePrecision.value, "auto");
+    const titleTextOf = (slot: SeriesSlot, i: number, skipped: boolean): string => {
+        if (skipped) return "";
+        if (!titleCustom) return slot.name;
+        // 「その他」の行はフィールドの値をまとめられないので出さない
+        if (i === otherRow) return "";
+        return fieldText(slot.title, i, titleUnitKey, titlePrecision, dataLabelsSettings.titleShowBlankAs);
+    };
+
+    // 「ラベルの値」：棒の値の代わりに出すフィールドの値。値の行の小数点以下の桁数で出す（表示単位はフィールドの書式のまま）。
+    // 空白なら「空白の表示方法」の文字、それも空なら棒の値。「その他」の行は棒の値
+    const valueFieldTextOf = (slot: SeriesSlot, i: number): string | null => {
+        if (!slot.value || i === otherRow) return null;
+        const text = fieldText(slot.value, i, "auto", labelPrecision, dataLabelsSettings.valueShowBlankAs);
+        return text === "" ? null : text;
     };
 
     // データポイントとカテゴリ別ターゲットの生成
@@ -2485,6 +2618,11 @@ export function transform(
                 insetStart,
                 rank: ribbonsOn ? ribbonRanks.get(s) ?? null : null,
                 ...formatted(val),
+                ...(() => {
+                    const text = valueFieldTextOf(slot, i);
+                    return text === null ? {} : { dataLabelText: text, labelToneColor: "" };
+                })(),
+                titleText: titleTextOf(slot, i, skipped),
                 detailText: detailTextOf(slot, i, val, skipped),
                 selectionId,
                 // 「その他」の棒を押したら、まとめたカテゴリを全部選ぶ
@@ -3142,12 +3280,13 @@ export function transform(
     };
 }
 
-/** カテゴリが 30,000 件を超えて、続きを読み込んでいるあいだの知らせ */
-export const LOADING_NOTICE = "続きのカテゴリを読み込んでいます…";
-/** 続きを読み込めなかった（Power BI の読み込みの上限）ときの警告 */
+/** カテゴリが上限（30,000 件）に達したときの警告 */
 export const TRUNCATED_TITLE = "すべてのカテゴリを読み込めていません";
 export const TRUNCATED_NOTICE =
-    "Power BI の読み込みの上限で、すべてのカテゴリを読み込めていません。「その他」と積み上げの合計、パレートの累積比は、読み込めたカテゴリで計算しています。";
+    "カテゴリが 30,000 件に達したので、並べた順の先頭の 30,000 件で描いています。「その他」と積み上げの合計、パレートの累積比は、読み込めたカテゴリで計算しています。フィルターで絞ってください。";
+/** 凡例の値が上限（2,000）に達したときの警告 */
+export const SERIES_TRUNCATED_TITLE = "すべての凡例の値を読み込めていません";
+export const SERIES_TRUNCATED_NOTICE = "凡例の値が 2,000 に達したので、先頭の 2,000 で描いています。フィルターで絞ってください。";
 
 /** 折れ線の率の分子と分母の数が合わないときの警告 */
 export const LINE_RATIO_WARNING_TITLE = "折れ線の率の分子と分母の数が合いません";

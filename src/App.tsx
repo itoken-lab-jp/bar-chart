@@ -14,6 +14,7 @@ import { linePath, areaPath, markerPath, XY } from "./linePath";
 import { recommendedTickCount } from "./shared/ticks";
 import { gridDashOf, lineCapOf, customDashOf, CUSTOM_LINE_STYLE, CustomDash } from "./shared/gridlines";
 import { blend } from "./shared/color";
+import { haloStyle } from "./shared/halo";
 import { PT_TO_PX, truncateToWidth } from "./shared/text";
 import { useScrollStart } from "./shared/scrollStart";
 import { CopyImageButton } from "./shared/CopyImageButton";
@@ -82,10 +83,10 @@ const HIGHLIGHT_DIM_FACTOR = 0.35;
 
 
 interface DataLabelLine extends LabelLine {
-    kind: "value" | "detail";
+    kind: "title" | "value" | "detail";
 }
 
-/** データラベルの行（値の行と詳細の行。標準と同じく値が上）。ラベルの表示を最適化なら、最大幅を超える行を「…」で切る */
+/** データラベルの行（タイトル・値・詳細の行。標準と同じくこの順に上から）。ラベルの表示を最適化なら、最大幅を超える行を「…」で切る */
 function labelLinesOf(dl: DataLabelsSettings, d: DataPoint): DataLabelLine[] {
     const lines = rawLabelLinesOf(dl, d);
     if (!dl.optimizeLabelDisplay) return lines;
@@ -94,6 +95,19 @@ function labelLinesOf(dl: DataLabelsSettings, d: DataPoint): DataLabelLine[] {
 
 function rawLabelLinesOf(dl: DataLabelsSettings, d: DataPoint): DataLabelLine[] {
     const lines: DataLabelLine[] = [];
+    if (dl.titleShow && d.titleText) {
+        lines.push({
+            kind: "title",
+            text: d.titleText,
+            font: {
+                family: dl.titleFontFamily,
+                size: dl.titleFontSize * PT_TO_PX,
+                bold: dl.titleBold,
+                italic: dl.titleItalic,
+                underline: dl.titleUnderline,
+            },
+        });
+    }
     if (dl.valueShow) {
         lines.push({
             kind: "value",
@@ -117,22 +131,30 @@ function rawLabelLinesOf(dl: DataLabelsSettings, d: DataPoint): DataLabelLine[] 
     return lines;
 }
 
+/** データラベルの行の class（テストとハーネスが行を見分ける） */
+function labelClassOf(line: DataLabelLine): string {
+    return line.kind === "value" ? "data-label" : line.kind === "title" ? "data-label-title" : "data-label-detail";
+}
+
 /**
  * データラベルの行の文字の見た目。色が空なら autoColor（棒の色に合わせた白か黒）。
  * 「符号の色」は棒の外か背景を付けたラベルだけに効かせる（toneHere）。棒の中の文字を棒と別の色にすると読めなくなるので、
  * 中は今までどおり読める色（標準も棒の中のラベルは白）
  */
 function labelTextStyle(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoint, autoColor: string, toneHere: boolean): React.CSSProperties {
-    const detail = line.kind === "detail";
+    const own = line.kind === "detail" ? { color: dl.detailColor, transparency: dl.detailTransparency } : line.kind === "title" ? { color: dl.titleColor, transparency: dl.titleTransparency } : null;
+    const fill = (own ? own.color : (toneHere && d.labelToneColor) || d.labelColor) || autoColor;
     return {
-        fill: (detail ? dl.detailColor : (toneHere && d.labelToneColor) || d.labelColor) || autoColor,
-        ...(detail && dl.detailTransparency > 0 ? { fillOpacity: 1 - dl.detailTransparency / 100 } : {}),
-        ...(!detail && dl.transparency > 0 ? { fillOpacity: 1 - dl.transparency / 100 } : {}),
+        fill,
+        ...(own && own.transparency > 0 ? { fillOpacity: 1 - own.transparency / 100 } : {}),
+        ...(!own && dl.transparency > 0 ? { fillOpacity: 1 - dl.transparency / 100 } : {}),
         fontSize: `${line.font.size / PT_TO_PX}pt`,
         fontFamily: line.font.family,
         fontWeight: line.font.bold ? "bold" : "normal",
         fontStyle: line.font.italic ? "italic" : "normal",
         ...(line.font.underline ? { textDecoration: "underline" } : {}),
+        // 文字の縁。文字と縁の色が同じなら付けない（棒の中の自動の白い文字に白い縁を付けると、文字が太るだけ）
+        ...haloStyle(dl.halo, fill),
     };
 }
 
@@ -356,6 +378,8 @@ export interface AppProps {
     visibleLayers?: number[];
     /** 凡例の比較レイヤーを押した。描くレイヤーを決めるのは visual.ts */
     onSelectLayer?: (layer: number, multiSelect: boolean) => void;
+    /** 描いた値の軸の高さ (px、縦棒)。visual.ts が次の transform に渡し、棒の外に出すデータ ラベルの余白を値の軸に取る */
+    onPlotHeight?: (height: number) => void;
 }
 
 /** 比較レイヤーの棒 1 枚ぶんの描き方。offset は系列の棒の中心からのずれ */
@@ -400,8 +424,15 @@ export const App: React.FC<AppProps> = ({
     browserMenu = false,
     visibleLayers = NO_LAYERS,
     onSelectLayer,
+    onPlotHeight,
 }) => {
     const [hoveredKey, setHoveredKey] = React.useState<string | null>(null);
+    // 縦棒の描画で決まった値の軸の高さ。描いたあとに visual.ts へ知らせる（横棒・空のときは 0）
+    const plotHeightRef = React.useRef(0);
+    plotHeightRef.current = 0;
+    React.useEffect(() => {
+        if (plotHeightRef.current > 0) onPlotHeight?.(plotHeightRef.current);
+    });
 
     // はみ出したときの最初の位置。縦棒は横に、横棒は縦にスクロールする。末尾なら、カテゴリの数・両端が変わったら当て直す
     const horizontalBars = viewModel.orientation === "horizontal";
@@ -1150,6 +1181,7 @@ export const App: React.FC<AppProps> = ({
         // 全体の下部マージン = ラベル領域 + 上のレベルの段 + ランクの帯 + タイトル領域 + スクロールバー高さ + 余白
         const marginBottom = Math.max(20, labelAreaHeight + levelAreaHeight + rankBandHeight + catTitleHeight + SCROLLBAR_HEIGHT + 6);
         const plotHeight = Math.max(10, height - marginTop - marginBottom);
+        plotHeightRef.current = plotHeight;
         // 目盛りの本数は、標準と同じく描く範囲の高さで決める（150px 未満は 3、300px 未満は 5、それ以上は 8 まで）
         // 「目盛りの本数 (目安)」があればその本数、空なら描く範囲の高さで決める（第 2 Y 軸も同じ上限）。
         // どちらも、数字の行が重ならない本数までにとどめる
@@ -1234,6 +1266,8 @@ export const App: React.FC<AppProps> = ({
         /** 棒 1 本（系列 1 本ぶん）。cx は棒の中心の x */
         /** 描いたデータラベル・合計ラベルの枠（プロットの座標）。ドリルの位置を重ねないために集める */
         const labelBoxes: Array<{ x0: number; x1: number; y0: number; y1: number }> = [];
+        // データラベルは、すべての棒を描いたあとに重ねる（棒ごとに描くと、外に出したラベルが隣の棒に隠れる。標準も棒の上）
+        const labelLayer: React.ReactNode[] = [];
         const renderBar = (d: DataPoint, cx: number, key: string, layer?: LayerDraw) => {
             if (d.blank) return null;
             // 比較レイヤーの棒は、レイヤーの幅で描く
@@ -1332,8 +1366,8 @@ export const App: React.FC<AppProps> = ({
                         />
                     )}
 
-                    {/* データラベル */}
-                    {(() => {
+                    {/* データラベル。描くのは棒の後ろ（labelLayer） */}
+                    {void labelLayer.push((() => {
                         const dl = viewModel.dataLabels;
                         if (!dl.show || !d.labelShow || barH <= 0 || layer?.label === false) return null;
 
@@ -1350,6 +1384,8 @@ export const App: React.FC<AppProps> = ({
                             value: lines[0].text,
                             font: lines[0].font,
                             lines,
+                            layout: { singleLine: dl.singleLine, align: dl.horizontalAlignment },
+                            endAtBottom: !roundAtTop,
                             vertical: isVertical,
                             // 積み上げでは外側が上の棒なので、入りきらないラベルを外へ逃がさず出さない
                             overflow: stacked ? false : dl.overflow,
@@ -1360,11 +1396,12 @@ export const App: React.FC<AppProps> = ({
 
                         // 縦向きのラベルは rotate(-90)：(x, y) → (y, −x)
                         const bx = placed.box;
-                        labelBoxes.push(
-                            isVertical
-                                ? { x0: cx + bx.y, x1: cx + bx.y + bx.height, y0: placed.y - bx.x - bx.width, y1: placed.y - bx.x }
-                                : { x0: cx + bx.x, x1: cx + bx.x + bx.width, y0: placed.y + bx.y, y1: placed.y + bx.y + bx.height }
-                        );
+                        const ownBox = isVertical
+                            ? { x0: cx + bx.y, x1: cx + bx.y + bx.height, y0: placed.y - bx.x - bx.width, y1: placed.y - bx.x }
+                            : { x0: cx + bx.x, x1: cx + bx.x + bx.width, y0: placed.y + bx.y, y1: placed.y + bx.y + bx.height };
+                        // 先に描いたラベルと重なるラベルは出さない（標準と同じ。棒の幅より長いラベルを外に出すと隣と重なる）
+                        if (labelBoxes.some((b) => b.x0 < ownBox.x1 - 1 && ownBox.x0 < b.x1 - 1 && b.y0 < ownBox.y1 - 1 && ownBox.y0 < b.y1 - 1)) return null;
+                        labelBoxes.push(ownBox);
                         const autoColor = labelAutoColor(!placed.outside, d.color, dl);
                         const toneHere = placed.outside || dl.backgroundShow;
                         const bgOpacity = (100 - dl.backgroundTransparency) / 100;
@@ -1390,10 +1427,10 @@ export const App: React.FC<AppProps> = ({
                                 {lines.map((line, k) => (
                                     <text
                                         key={line.kind}
-                                        x={0}
+                                        x={placed.xs[k]}
                                         y={placed.baselines[k]}
-                                        className={line.kind === "value" ? "data-label" : "data-label-detail"}
-                                        textAnchor="middle"
+                                        className={labelClassOf(line)}
+                                        textAnchor={placed.anchor}
                                         style={labelTextStyle(dl, line, d, autoColor, toneHere)}
                                     >
                                         {line.text}
@@ -1401,7 +1438,7 @@ export const App: React.FC<AppProps> = ({
                                 ))}
                             </g>
                         );
-                    })()}
+                    })())}
                 </g>
             );
         };
@@ -1778,6 +1815,7 @@ export const App: React.FC<AppProps> = ({
                             );
                         })}
                     </g>
+                    <g className="data-labels-group">{labelLayer}</g>
 
                     {levelRows > 0 && renderLevelRows(xOffset)}
                     {rankBandOn && renderRankBand(xOffset)}
@@ -2414,7 +2452,7 @@ export const App: React.FC<AppProps> = ({
                 if (!dl.show || !d.labelShow || w <= 0 || layer?.label === false) return null;
                 const lines = labelLinesOf(dl, d);
                 if (!lines.length) return null;
-                const block = labelBlock(lines);
+                const block = labelBlock(lines, { singleLine: dl.singleLine, align: dl.horizontalAlignment });
                 const textW = block.width;
                 const right = left + w;
                 let x: number;
@@ -2450,6 +2488,10 @@ export const App: React.FC<AppProps> = ({
                 const bgTop = lines.length > 1 ? midY + block.topEdge - 1 : midY - firstPx * 0.6 - 1;
                 const bgHeight = lines.length > 1 ? blockHeight + 2 : firstPx * 1.2 + 2;
                 const boxX = anchor === "start" ? x - LABEL_PADDING : anchor === "end" ? x - textW - LABEL_PADDING : x - textW / 2 - LABEL_PADDING;
+                // 行はまとまりの中心から置く（左・右そろえと単一行は、行ごとに x が違う）
+                const blockCenter = boxX + LABEL_PADDING + textW / 2;
+                // 中央そろえは、どの行も棒に対する同じ位置（x・anchor）で描ける（1.35 までと同じ書き方）
+                const centered = block.anchor === "middle";
                 return (
                     <g className="data-label-group" pointerEvents="none">
                         {dl.backgroundShow && (
@@ -2466,10 +2508,10 @@ export const App: React.FC<AppProps> = ({
                         {lines.map((line, k) => (
                             <text
                                 key={line.kind}
-                                x={x}
+                                x={centered ? x : blockCenter + block.xs[k]}
                                 y={midY + block.baselines[k]}
-                                className={line.kind === "value" ? "data-label" : "data-label-detail"}
-                                textAnchor={anchor}
+                                className={labelClassOf(line)}
+                                textAnchor={centered ? anchor : block.anchor}
                                 style={labelTextStyle(dl, line, d, autoColor, toneHere)}
                             >
                                 {line.text}

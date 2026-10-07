@@ -86,6 +86,24 @@ function rowPathsOf(root: DataViewMatrixNode | undefined, depth: number): DataVi
 
 const isSeriesLevel = (level: DataViewHierarchyLevel | undefined) => !!level?.sources?.some((source) => source.roles?.series);
 
+/** capabilities の行（カテゴリ）と列（凡例）の上限。届いた数がこれに達したら、切られたとみなす */
+export const ROW_LIMIT = 30000;
+export const SERIES_LIMIT = 2000;
+
+/**
+ * matrix で届いた行（カテゴリ。階層なら葉、比較の列があればカテゴリ × 比較の列の組）と、凡例の値の数。
+ * 行を window（続きを読む受け方）にすると、凡例は 60 で切られ、列の小計も届かなくなった（2026-10-07、Desktop）。
+ * そこで行も top で受け、上限に達したかをこの数で見る（Power BI は続きがあることを知らせない）
+ */
+export function receivedCounts(dataView: DataView | undefined): { rows: number; series: number } {
+    const matrix = dataView?.matrix;
+    if (!matrix) return { rows: dataView?.categorical?.categories?.[0]?.values?.length ?? 0, series: dataView?.categorical?.values?.grouped?.().length ?? 0 };
+    const rows = rowPathsOf(matrix.rows?.root, matrix.rows?.levels?.length ?? 0).length;
+    const hasSeries = isSeriesLevel(matrix.columns?.levels?.[0]);
+    const series = hasSeries ? (matrix.columns?.root?.children ?? []).filter((node) => !node.isSubtotal).length : 0;
+    return { rows, series };
+}
+
 /**
  * matrix を categorical の形に詰め替えた DataView。categorical で届いたときは、そのまま返す
  */

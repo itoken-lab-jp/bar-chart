@@ -63,3 +63,17 @@ export function blend(color: string, toward: string, amount: number): string {
     };
     return `#${[16, 8, 0].map((shift) => channel(shift).toString(16).padStart(2, "0")).join("").toUpperCase()}`;
 }
+
+/** 同じ色か（#FFF と #FFFFFF、white と #FFFFFF を同じとみなす。大文字・小文字は問わない） */
+export function sameColor(a: string, b: string): boolean {
+    return colorKeyOf(a) === colorKeyOf(b);
+}
+
+const NAMED_COLORS: Record<string, string> = { white: "#ffffff", black: "#000000" };
+
+function colorKeyOf(color: string): string {
+    const c = color.trim().toLowerCase();
+    if (NAMED_COLORS[c]) return NAMED_COLORS[c];
+    const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/.exec(c);
+    return short ? `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}` : c;
+}

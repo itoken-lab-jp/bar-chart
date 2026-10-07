@@ -130,6 +130,9 @@ export interface PlacedLabel {
     box: { x: number; y: number; width: number; height: number };
     /** 基準点に対する各行のベースライン */
     baselines: number[];
+    /** 各行を描く x（まとまりの中心から）と text-anchor（labelBlock） */
+    xs: number[];
+    anchor: "start" | "middle" | "end";
 }
 
 /** フォントサイズに対するベースラインより上/下の割合。背景の高さを出すのに使う */
@@ -147,16 +150,55 @@ export interface LabelLine {
 /** 行と行のあいだ (px) */
 const LABEL_LINE_GAP = 1;
 
+/** ラベルの行の並べ方。単一行は行を 1 行に横に並べる。align は複数行のとき行をそろえる位置 */
+export interface LabelLayout {
+    singleLine?: boolean;
+    align?: "left" | "center" | "right";
+}
+
+/** 単一行で並べるときの、行と行のあいだ（文字サイズに対する比。空白 1 つほど） */
+const SINGLE_LINE_GAP_RATIO = 0.3;
+
 /**
- * 複数行のラベルの寸法。基準点（0, 0）に対する各行のベースライン、上端と下端、いちばん広い行の幅。
+ * 複数行のラベルの寸法。基準点（0, 0）に対する各行のベースライン、上端と下端、まとまりの幅。
+ * xs と anchor は、各行を描く x（まとまりの中心から）と text-anchor。
  * 1 行なら 1.10 までと同じ位置（ベースラインは文字サイズの 0.35 下）
  */
-export function labelBlock(lines: LabelLine[]): { width: number; topEdge: number; bottomEdge: number; baselines: number[] } {
-    const width = Math.max(0, ...lines.map((l) => measureTextWidth(l.text, l.font)));
+export function labelBlock(
+    lines: LabelLine[],
+    layout: LabelLayout = {}
+): { width: number; topEdge: number; bottomEdge: number; baselines: number[]; xs: number[]; anchor: "start" | "middle" | "end" } {
+    const widths = lines.map((l) => measureTextWidth(l.text, l.font));
+    if (layout.singleLine && lines.length > 1) {
+        // 1 行に並べる：いちばん大きい文字で高さを決め、ベースラインをそろえる
+        const size = Math.max(...lines.map((l) => l.font.size));
+        const gap = size * SINGLE_LINE_GAP_RATIO;
+        const width = widths.reduce((sum, w) => sum + w, 0) + gap * (lines.length - 1);
+        const lineY = size * 0.35;
+        const xs: number[] = [];
+        let cursor = -width / 2;
+        widths.forEach((w) => {
+            xs.push(cursor);
+            cursor += w + gap;
+        });
+        return {
+            width,
+            topEdge: lineY - size * ASCENT_RATIO,
+            bottomEdge: lineY + size * DESCENT_RATIO,
+            baselines: lines.map(() => lineY),
+            xs,
+            anchor: "start",
+        };
+    }
+    const width = Math.max(0, ...widths);
+    const align = lines.length > 1 ? layout.align ?? "center" : "center";
+    const anchor = align === "left" ? "start" : align === "right" ? "end" : "middle";
+    const x = align === "left" ? -width / 2 : align === "right" ? width / 2 : 0;
+    const xs = lines.map(() => x);
     if (lines.length <= 1) {
         const size = lines[0]?.font.size ?? 0;
         const lineY = size * 0.35;
-        return { width, topEdge: lineY - size * ASCENT_RATIO, bottomEdge: lineY + size * DESCENT_RATIO, baselines: [lineY] };
+        return { width, topEdge: lineY - size * ASCENT_RATIO, bottomEdge: lineY + size * DESCENT_RATIO, baselines: [lineY], xs, anchor };
     }
     const total =
         lines.reduce((sum, l) => sum + l.font.size * (ASCENT_RATIO + DESCENT_RATIO), 0) + LABEL_LINE_GAP * (lines.length - 1);
@@ -167,7 +209,7 @@ export function labelBlock(lines: LabelLine[]): { width: number; topEdge: number
         baselines.push(cursor + line.font.size * ASCENT_RATIO);
         cursor += line.font.size * (ASCENT_RATIO + DESCENT_RATIO) + LABEL_LINE_GAP;
     }
-    return { width, topEdge, bottomEdge: topEdge + total, baselines };
+    return { width, topEdge, bottomEdge: topEdge + total, baselines, xs, anchor };
 }
 
 /**
@@ -182,6 +224,9 @@ export function placeLabel(spec: {
     value: string;
     font: FontSpec;
     lines?: LabelLine[];
+    layout?: LabelLayout;
+    /** 値の端が下（負の値の棒など）。省くと上 */
+    endAtBottom?: boolean;
     vertical: boolean;
     overflow: boolean;
 }): PlacedLabel {
@@ -196,7 +241,7 @@ export function placeLabel(spec: {
         overflow,
     } = spec;
 
-    const block = labelBlock(spec.lines ?? [{ text: value, font }]);
+    const block = labelBlock(spec.lines ?? [{ text: value, font }], spec.layout);
 
     const left = -block.width / 2;
     const right = block.width / 2;
@@ -219,15 +264,18 @@ export function placeLabel(spec: {
     const fits = fitsVertically && fitsAlongBar;
 
     const requestedOutside = position === "outsideEnd";
-    const outside = requestedOutside || (!fits && overflow && fitsAlongBar);
+    // 入りきらなければ外の端へ（標準と同じく、棒の幅より長いラベルも外へ。中に置くと棒からはみ出した白い文字が背景に溶ける）
+    const outside = requestedOutside || (!fits && overflow);
 
+    // 値の端が下の棒（負の値。範囲の反転では正の値）は、端・外・根元を上下で入れ替える（標準と同じ）
+    const down = spec.endAtBottom ?? false;
     let anchorY: number;
     if (outside) {
-        anchorY = top - LABEL_PADDING - bottomEdge;
+        anchorY = down ? bottom + LABEL_PADDING - topEdge : top - LABEL_PADDING - bottomEdge;
     } else if (position === "insideTop" || position === "auto") {
-        anchorY = top + neededY / 2;
+        anchorY = down ? bottom - neededY / 2 : top + neededY / 2;
     } else if (position === "insideBottom") {
-        anchorY = bottom - neededY / 2;
+        anchorY = down ? top + neededY / 2 : bottom - neededY / 2;
     } else {
         anchorY = (top + bottom) / 2;
     }
@@ -242,6 +290,8 @@ export function placeLabel(spec: {
         height: box.height,
         box,
         baselines: block.baselines,
+        xs: block.xs,
+        anchor: block.anchor,
     };
 }
 

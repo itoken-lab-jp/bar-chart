@@ -59,6 +59,18 @@
             "description": "値の軸に横の線を引く値（目標・上限など）を返すメジャー。4 つまで。決まった数なら、書式設定の「Y 軸の定数線」カードの「値」に入れてもよい。カテゴリごとに違う値を返すと、先頭のカテゴリの値で引いて警告する（横棒では X 軸）"
         },
         {
+            "displayName": "ラベルのタイトル",
+            "name": "labelTitle",
+            "kind": "Measure",
+            "description": "データ ラベルの「タイトル」で、コンテンツを「カスタム」にしたときに、値の上の行に出す値"
+        },
+        {
+            "displayName": "ラベルの値",
+            "name": "labelValue",
+            "kind": "Measure",
+            "description": "データ ラベルの値の行に、棒の値の代わりに出す値（標準の「値 > フィールド」）"
+        },
+        {
             "displayName": "ラベルの詳細",
             "name": "labelDetail",
             "kind": "Measure",
@@ -1756,6 +1768,128 @@
                             }
                         }
                     }
+                },
+                "titleShow": {
+                    "displayName": "タイトル",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleContent": {
+                    "displayName": "タイトルのコンテンツ",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "titleFontFamily": {
+                    "displayName": "タイトルのフォント",
+                    "type": {
+                        "formatting": {
+                            "fontFamily": true
+                        }
+                    }
+                },
+                "titleFontSize": {
+                    "displayName": "タイトルの文字サイズ",
+                    "type": {
+                        "formatting": {
+                            "fontSize": true
+                        }
+                    }
+                },
+                "titleBold": {
+                    "displayName": "タイトルの太字",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleItalic": {
+                    "displayName": "タイトルの斜体",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleUnderline": {
+                    "displayName": "タイトルの下線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "titleColor": {
+                    "displayName": "タイトルのカラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "titleTransparency": {
+                    "displayName": "タイトルの透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "titleUnitType": {
+                    "displayName": "タイトルの表示単位",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "titlePrecision": {
+                    "displayName": "タイトルの小数点以下の桁数",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "titleShowBlankAs": {
+                    "displayName": "タイトルの空白の表示方法",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "valueShowBlankAs": {
+                    "displayName": "値の空白の表示方法",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "labelContentLayout": {
+                    "displayName": "レイアウト",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "horizontalAlignment": {
+                    "displayName": "水平方向の配置",
+                    "type": {
+                        "formatting": {
+                            "alignment": true
+                        }
+                    }
+                },
+                "haloShow": {
+                    "displayName": "文字の縁",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "haloColor": {
+                    "displayName": "文字の縁のカラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "haloWidth": {
+                    "displayName": "文字の縁の幅 (px)",
+                    "type": {
+                        "numeric": true
+                    }
                 }
             }
         },
@@ -2593,6 +2727,12 @@
                     },
                     "valueLine": {
                         "max": 4
+                    },
+                    "labelTitle": {
+                        "max": 1
+                    },
+                    "labelValue": {
+                        "max": 1
                     }
                 },
                 {
@@ -2619,6 +2759,12 @@
                     },
                     "valueLine": {
                         "max": 4
+                    },
+                    "labelTitle": {
+                        "max": 1
+                    },
+                    "labelValue": {
+                        "max": 1
                     }
                 }
             ],
@@ -2628,7 +2774,7 @@
                         "in": "category"
                     },
                     "dataReductionAlgorithm": {
-                        "window": {
+                        "top": {
                             "count": 30000
                         }
                     }
@@ -2639,7 +2785,7 @@
                     },
                     "dataReductionAlgorithm": {
                         "top": {
-                            "count": 60
+                            "count": 2000
                         }
                     }
                 },
@@ -2682,7 +2828,17 @@
                         },
                         {
                             "for": {
+                                "in": "labelTitle"
+                            }
+                        },
+                        {
+                            "for": {
                                 "in": "labelDetail"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "labelValue"
                             }
                         },
                         {
@@ -2726,6 +2882,12 @@
                     },
                     "valueLine": {
                         "max": 4
+                    },
+                    "labelTitle": {
+                        "max": 1
+                    },
+                    "labelValue": {
+                        "max": 1
                     }
                 }
             ],
@@ -2744,7 +2906,7 @@
                         }
                     ],
                     "dataReductionAlgorithm": {
-                        "window": {
+                        "top": {
                             "count": 30000
                         }
                     }
@@ -2755,7 +2917,7 @@
                     },
                     "dataReductionAlgorithm": {
                         "top": {
-                            "count": 60
+                            "count": 2000
                         }
                     }
                 },
@@ -2798,7 +2960,17 @@
                         },
                         {
                             "for": {
+                                "in": "labelTitle"
+                            }
+                        },
+                        {
+                            "for": {
                                 "in": "labelDetail"
+                            }
+                        },
+                        {
+                            "for": {
+                                "in": "labelValue"
                             }
                         },
                         {

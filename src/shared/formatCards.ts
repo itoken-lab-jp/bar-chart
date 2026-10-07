@@ -287,3 +287,21 @@ export function labelBackgroundParts(options: { showDisplayName: string; colorDi
         backgroundTransparency: new formattingSettings.NumUpDown({ name: "backgroundTransparency", displayName: "透過性 (%)", value: options.transparency }),
     };
 }
+
+/**
+ * データ ラベルの文字の縁（表示・カラー・幅）。ラベルの文字のまわりに縁を付け、棒や線の上でも読めるようにする。
+ * 既定はオフ・白・3 px。描き方は halo.ts の haloStyle
+ */
+export function labelHaloParts() {
+    const haloShow = new formattingSettings.ToggleSwitch({ name: "haloShow", displayName: "文字の縁", value: false });
+    const haloColor = new formattingSettings.ColorPicker({ name: "haloColor", displayName: "カラー", value: { value: "#FFFFFF" } });
+    const haloWidth = new formattingSettings.NumUpDown({ name: "haloWidth", displayName: "幅 (px)", value: 3 });
+    const haloGroup = new formattingSettings.Group({
+        name: "labelHalo",
+        displayName: "文字の縁",
+        description: "ラベルの文字のまわりに縁を付けて、棒や線の上でも読めるようにする",
+        topLevelSlice: haloShow,
+        slices: [haloColor, haloWidth],
+    });
+    return { haloShow, haloColor, haloWidth, haloGroup };
+}
