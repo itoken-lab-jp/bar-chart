@@ -25,6 +25,8 @@ export const LAYER_LEGEND_GRAY = "#8A8886";
 
 /** 比較のレイヤーが上限を超えたときの警告の見出し */
 export const COMPARE_LIMIT_TITLE = "比較のレイヤーが多すぎます";
+/** 折れ線だけ（値が空）で、比較の欄にフィールドを入れたときの警告の見出し */
+export const COMPARE_LINE_ONLY_TITLE = "折れ線だけでは比較で重ねません";
 
 /**
  * 比較レイヤー。手前のレイヤーに、奥のレイヤーを同じ幅で少しずつずらして重ねる。レイヤーの作り方は 2 通り：
@@ -52,6 +54,13 @@ export function transformWithLayers(
     const layers: LayerSource[] = split
         ? split.layers
         : [{ name: frontNameOf(view), view: view! }, ...sources.map((source) => ({ name: source.displayName ?? "", view: layerViewOf(view!, source) }))];
+    // 折れ線だけ（値が空）のときは、重ねる棒が無いので重ねない。線は手前の値で描き、そのことを知らせる
+    if (front.lineOnly && layers.length > 1 && show) {
+        const compareLineOnlyWarning = split
+            ? `「比較の列」は棒を前後に重ねる欄で、折れ線だけのときは重ねません。線は${split.name}が「${layers[0].name}」の値で描いています。`
+            : "「比較値」は棒を前後に重ねる欄で、折れ線だけのときは描きません。";
+        return { ...front, compare, compareLineOnlyWarning };
+    }
     const layered = layers.length > 1 && show && !front.isEmpty && !front.pareto.enabled;
     // 「比較の列」で受けて重ねないとき（オフ・パレート・値が 1 つ）は、手前の値だけを描く
     if (!layered) return { ...front, compare, ...(split?.warning && show ? { compareWarning: split.warning } : {}) };

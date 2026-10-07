@@ -1458,7 +1458,7 @@ export const TITLE_STYLE_ITEMS: powerbi.IEnumMember[] = [
     { value: TITLE_STYLES.showBoth, displayName: "両方を表示" },
 ];
 
-/** 階層の上のレベルの見せ方。区切り線は標準と同じ、囲みは標準に無い見せ方 */
+/** 階層の上のレベルの見せ方。区切り線は標準と同じ、帯は標準に無い見せ方（保存値は 1.36 までの「囲み」と同じ boxed） */
 export const HIERARCHY_STYLES = {
     lines: "lines",
     boxed: "boxed",
@@ -1466,7 +1466,20 @@ export const HIERARCHY_STYLES = {
 
 export const HIERARCHY_STYLE_ITEMS: powerbi.IEnumMember[] = [
     { value: HIERARCHY_STYLES.lines, displayName: "区切り線" },
-    { value: HIERARCHY_STYLES.boxed, displayName: "囲み" },
+    { value: HIERARCHY_STYLES.boxed, displayName: "帯" },
+];
+
+/** 段に重ねた上のレベルの段の高さ。文字の上下の余白（px）を、区切り線と帯で分けて持つ */
+export const LEVEL_ROW_PADDINGS: Record<string, { lines: number; boxed: number }> = {
+    normal: { lines: 8, boxed: 12 },
+    compact: { lines: 5, boxed: 8 },
+    tight: { lines: 3, boxed: 5 },
+};
+
+export const LEVEL_ROW_HEIGHT_ITEMS: powerbi.IEnumMember[] = [
+    { value: "normal", displayName: "標準" },
+    { value: "compact", displayName: "詰める" },
+    { value: "tight", displayName: "もっと詰める" },
 ];
 
 export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
@@ -1504,7 +1517,7 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
 
     /**
      * 段に重ねた上のレベルの見せ方。区切り線（既定）は標準と同じく点線で区切る。
-     * 囲みは区切りごとに角の丸い淡い枠で囲む（標準に無い）
+     * 帯は区切りごとに角の丸い淡い面を敷く（枠線は引かない。標準に無い）
      */
     hierarchyStyle = new formattingSettings.ItemDropdown({
         name: "hierarchyStyle",
@@ -1513,11 +1526,20 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
         value: HIERARCHY_STYLE_ITEMS[0],
     });
 
+    /** 段に重ねた上のレベルの段の高さ。既定（標準）は今までと同じ */
+    levelRowHeight = new formattingSettings.ItemDropdown({
+        name: "levelRowHeight",
+        displayName: "段の高さ",
+        description: "縦棒で階層を段に重ねたとき、上のレベルの段の上下の余白を詰める（横棒の段の幅は変わらない）",
+        items: LEVEL_ROW_HEIGHT_ITEMS,
+        value: LEVEL_ROW_HEIGHT_ITEMS[0],
+    });
+
     valuesGroup = new FormattingSettingsGroup({
         name: "categoryValues",
         displayName: "値",
         topLevelSlice: this.show,
-        slices: [...this.parts.valueSlices, this.concatenateLabels, this.hierarchyStyle],
+        slices: [...this.parts.valueSlices, this.concatenateLabels, this.hierarchyStyle, this.levelRowHeight],
     });
 
     titleGroup = this.parts.titleGroup;
@@ -1904,6 +1926,24 @@ export class ValueAxis2CardSettings extends FormattingSettingsCompositeCard {
 }
 
 /** 折れ線 1 本ぶんの書式の対象 */
+/** マーカーの書式（「すべて」か、線ごとに保存した値） */
+export interface LineMarkerValues {
+    show: boolean;
+    /** 型（"circle" | "square" | "diamond" | "triangle" | "cross" | "shortDash" | "longDash" | "plus"） */
+    shape: string;
+    size: number;
+    /** 中心で回す角度（度、時計回り。0〜359） */
+    rotation: number;
+    /** 空 = 線の色 */
+    color: string;
+    transparency: number;
+    borderShow: boolean;
+    borderMatchLine: boolean;
+    borderColor: string;
+    borderTransparency: number;
+    borderWidth: number;
+}
+
 export interface LineTarget {
     name: string;
     selector: powerbi.data.Selector;
@@ -1937,6 +1977,8 @@ export interface LineTarget {
     scaleWithWidth: boolean;
     /** 線の透過性 (%) */
     transparency: number;
+    /** この線のマーカーの書式 */
+    marker: LineMarkerValues;
 }
 
 /** 線の形の値（「すべて」と線ごとに同じ項目） */
@@ -2870,7 +2912,8 @@ export class ValueLineCardSettings extends FormattingSettingsCompositeCard {
 
 /**
  * 折れ線の点の印。標準と同じく既定は出さず、「すべてのカテゴリに表示」で出す。
- * 標準の「設定の適用先」はカテゴリごとにも選べるが、ここでは「すべて」だけ（カテゴリごとは見送り）
+ * 折れ線があれば「設定の適用先」に「すべて」と線を並べ、線ごとに型・色・罫線を変えられる（標準と同じ）。
+ * 標準の適用先はカテゴリごとにも選べるが、ここでは線ごとまで（カテゴリごとは見送り）
  */
 export class MarkersCardSettings extends FormattingSettingsCompositeCard {
     name = "markers";
@@ -2971,6 +3014,96 @@ export class MarkersCardSettings extends FormattingSettingsCompositeCard {
     });
 
     groups = [this.optionsGroup, this.shapeGroup, this.colorGroup, this.borderGroup];
+
+    /** マーカーの書式。own（線ごとに保存した値）があればそれを、無い項目は「すべて」の値を使う */
+    values(own?: powerbi.DataViewObject): LineMarkerValues {
+        const raw = (property: string): powerbi.DataViewPropertyValue | undefined => {
+            const value = own?.[property];
+            return value === undefined || value === null ? undefined : value;
+        };
+        const num = (property: string, fallback: number): number => {
+            const value = raw(property);
+            return typeof value === "number" ? value : fallback;
+        };
+        const bool = (property: string, fallback: boolean): boolean => {
+            const value = raw(property);
+            return typeof value === "boolean" ? value : fallback;
+        };
+        const fill = (property: string, fallback: string): string => {
+            const color = (raw(property) as powerbi.Fill | undefined)?.solid?.color;
+            return color !== undefined && color !== null ? String(color) : fallback;
+        };
+        const percent = (v: number) => Math.max(0, Math.min(100, v));
+        const shape = raw("shape");
+        return {
+            show: bool("show", this.show.value ?? false),
+            shape: shape !== undefined ? String(shape) : String(this.shape.value?.value ?? "circle"),
+            size: Math.max(1, Math.min(20, num("size", this.size.value ?? 5))),
+            rotation: (((num("rotation", Number(this.rotation.value) || 0) || 0) % 360) + 360) % 360,
+            color: fill("color", this.color.value?.value ?? ""),
+            transparency: percent(num("transparency", this.transparency.value ?? 0)),
+            borderShow: bool("borderShow", this.borderShow.value ?? false),
+            borderMatchLine: bool("borderMatchLine", this.borderMatchLine.value ?? false),
+            borderColor: fill("borderFill", this.borderFill.value?.value || "#605E5C") || "#605E5C",
+            borderTransparency: percent(num("borderTransparency", this.borderTransparency.value ?? 0)),
+            borderWidth: Math.max(1, Math.min(10, num("borderWidth", this.borderWidth.value ?? 1))),
+        };
+    }
+
+    /** 折れ線があれば、「設定の適用先」に「すべて」と線を並べる。無ければ今までどおり項目のまとまりで出す */
+    applyTargets(targets: LineTarget[]): void {
+        if (!targets.length) {
+            this.groups = [this.optionsGroup, this.shapeGroup, this.colorGroup, this.borderGroup];
+            return;
+        }
+        const all = new MarkerTargetItem("すべて", [
+            this.show,
+            this.shape,
+            this.size,
+            this.rotation,
+            this.color,
+            this.transparency,
+            this.borderShow,
+            this.borderMatchLine,
+            this.borderFill,
+            this.borderTransparency,
+            this.borderWidth,
+        ]);
+        const items = targets.slice(0, MAX_COLUMN_TARGETS).map((target) => {
+            const m = target.marker;
+            const selector = target.selector;
+            return new MarkerTargetItem(target.name, [
+                new formattingSettings.ToggleSwitch({ name: "show", displayName: "このシリーズに表示", value: m.show, selector }),
+                new formattingSettings.ItemDropdown({ name: "shape", displayName: "型", items: MARKER_SHAPE_ITEMS, value: itemOf(MARKER_SHAPE_ITEMS, m.shape), selector }),
+                new formattingSettings.NumUpDown({ name: "size", displayName: "サイズ (px)", value: m.size, selector }),
+                new formattingSettings.NumUpDown({ name: "rotation", displayName: "回転", value: m.rotation, selector }),
+                new formattingSettings.ColorPicker({ name: "color", displayName: "カラー", value: { value: m.color }, selector }),
+                new formattingSettings.NumUpDown({ name: "transparency", displayName: "透過性 (%)", value: m.transparency, selector }),
+                new formattingSettings.ToggleSwitch({ name: "borderShow", displayName: "罫線", value: m.borderShow, selector }),
+                new formattingSettings.ToggleSwitch({ name: "borderMatchLine", displayName: "線の色を一致させる", value: m.borderMatchLine, selector }),
+                new formattingSettings.ColorPicker({ name: "borderFill", displayName: "罫線のカラー", value: { value: m.borderColor }, selector }),
+                new formattingSettings.NumUpDown({ name: "borderTransparency", displayName: "罫線の透過性 (%)", value: m.borderTransparency, selector }),
+                new formattingSettings.NumUpDown({ name: "borderWidth", displayName: "罫線の幅 (px)", value: m.borderWidth, selector }),
+            ]);
+        });
+        this.groups = [
+            new FormattingSettingsGroup({
+                name: "markerTargets",
+                slices: [],
+                container: new FormattingSettingsContainer({ displayName: "設定の適用先", containerItems: [all, ...items] }),
+            }),
+        ];
+    }
+}
+
+class MarkerTargetItem extends FormattingSettingsCard {
+    name = "markerTarget";
+
+    constructor(displayName: string, slices: FormattingSettingsSlice[]) {
+        super();
+        this.displayName = displayName;
+        this.slices = slices;
+    }
 }
 
 class AreaTargetItem extends FormattingSettingsCard {
@@ -3048,6 +3181,12 @@ export class AreasCardSettings extends FormattingSettingsCompositeCard {
     }
 }
 
+/** 縦のグリッド線（カテゴリの区切りの線）を引く位置 */
+export const CATEGORY_GRID_POSITION_ITEMS: powerbi.IEnumMember[] = [
+    { value: "categories", displayName: "カテゴリごと" },
+    { value: "levels", displayName: "階層の区切り" },
+];
+
 export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
     name = "gridlines";
     displayName = "グリッド線";
@@ -3074,6 +3213,15 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
     verticalDashCap = this.vertical.dashCap;
     verticalWidth = this.vertical.width;
 
+    /** 縦の線を引く位置。既定はカテゴリごと（今までと同じ）。階層の区切りなら、X 軸の階層の 1 つ上のレベルの区切りだけ */
+    verticalPosition = new formattingSettings.ItemDropdown({
+        name: "verticalPosition",
+        displayName: "線の位置",
+        description: "階層の区切りにすると、X 軸に階層を入れたとき、1 つ上のレベルの区切り（年度・四半期の境目など）にだけ引く。階層が無ければカテゴリごと",
+        items: CATEGORY_GRID_POSITION_ITEMS,
+        value: CATEGORY_GRID_POSITION_ITEMS[0],
+    });
+
     horizontalGroup = new FormattingSettingsGroup({
         name: "horizontalGridlines",
         displayName: "横",
@@ -3085,7 +3233,7 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
         name: "verticalGridlines",
         displayName: "縦",
         topLevelSlice: this.verticalShow,
-        slices: this.vertical.slices,
+        slices: [this.verticalPosition, ...this.vertical.slices],
     });
 
     groups = [this.horizontalGroup, this.verticalGroup];
@@ -3202,6 +3350,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.dataLabels.applyTargets(options.labelTargets ?? []);
         this.lines.applyTargets(options.lineTargets ?? []);
         this.areas.applyTargets(options.lineTargets ?? []);
+        this.markers.applyTargets(options.lineTargets ?? []);
         this.applyOrientation();
     }
 
@@ -3271,17 +3420,20 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
 
     /**
      * グラフの種類とデータに関係ないカードを隠す（標準はその種類で使うカードだけを出す）。
-     * 隠すのは書式ペインの表示だけで、保存済みの値は残る。hasLines は「折れ線の値」にフィールドがあるとき true
+     * 隠すのは書式ペインの表示だけで、保存済みの値は残る。hasLines は「折れ線の値」にフィールドがあるとき true。
+     * lineOnly は「値」が空で折れ線だけを描くとき true（棒にしか効かない合計ラベル・リボン・第 2 Y 軸を隠す。
+     * 「棒」カードは並び順・カテゴリ間のスペース・その他のまとめ方が線にも効くので残す）
      */
-    applyCardVisibility(hasLines: boolean): void {
+    applyCardVisibility(hasLines: boolean, lineOnly = false): void {
         const chartType = String(this.chart.chartType.value?.value ?? CHART_TYPES.clustered);
         const horizontal = String(this.chart.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
         // 折れ線の値は、どの種類・向きでも描く（横棒は既定でマーカーだけ）
         const linesDrawn = hasLines;
-        this.totalLabels.visible = chartType === CHART_TYPES.stacked;
+        this.totalLabels.visible = chartType === CHART_TYPES.stacked && !lineOnly;
         // リボンは積み上げ・100% 積み上げで出せる（縦棒・横棒とも。集合は棒が横に並ぶので帯でつながない）
-        this.ribbons.visible = chartType === CHART_TYPES.stacked || chartType === CHART_TYPES.stacked100;
-        this.valueAxis2.visible = linesDrawn;
+        this.ribbons.visible = (chartType === CHART_TYPES.stacked || chartType === CHART_TYPES.stacked100) && !lineOnly;
+        // 折れ線だけのときは線を左の軸で描くので、第 2 Y 軸は使わない
+        this.valueAxis2.visible = linesDrawn && !lineOnly;
         this.lines.visible = linesDrawn;
         this.areas.visible = linesDrawn;
         this.markers.visible = linesDrawn;

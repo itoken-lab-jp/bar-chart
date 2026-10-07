@@ -28,7 +28,7 @@ import {
 const PENDING_TIMEOUT_MS = 5000;
 import { savedCumulativeReset, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint, TRUNCATED_TITLE, TRUNCATED_NOTICE, SERIES_TRUNCATED_TITLE, SERIES_TRUNCATED_NOTICE, LINE_RATIO_WARNING_TITLE, VALUE_LINE_WARNING_TITLE } from "./viewModel";
 import { toRootCoordinates } from "./tooltip";
-import { transformWithLayers, nextVisibleLayers, barTooltipItems, COMPARE_LIMIT_TITLE } from "./compareLayers";
+import { transformWithLayers, nextVisibleLayers, barTooltipItems, COMPARE_LIMIT_TITLE, COMPARE_LINE_ONLY_TITLE } from "./compareLayers";
 import { receivedCounts, ROW_LIMIT, SERIES_LIMIT } from "./matrixDataView";
 
 import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructorOptions;
@@ -140,6 +140,7 @@ export class Visual implements IVisual {
             ...(this.truncated.series ? [{ title: SERIES_TRUNCATED_TITLE, detail: SERIES_TRUNCATED_NOTICE }] : []),
             ...(viewModel.lineWarning ? [{ title: LINE_RATIO_WARNING_TITLE, detail: viewModel.lineWarning }] : []),
             ...(viewModel.compareWarning ? [{ title: COMPARE_LIMIT_TITLE, detail: viewModel.compareWarning }] : []),
+            ...(viewModel.compareLineOnlyWarning ? [{ title: COMPARE_LINE_ONLY_TITLE, detail: viewModel.compareLineOnlyWarning }] : []),
             ...(viewModel.valueLineWarning ? [{ title: VALUE_LINE_WARNING_TITLE, detail: viewModel.valueLineWarning }] : []),
         ];
         if (warnings.length) this.host.displayWarningIcon(warnings[0].title, warnings.map((w) => w.detail).join(" "));
@@ -152,7 +153,7 @@ export class Visual implements IVisual {
             lineTargets: viewModel.lineTargets,
         });
         this.formattingSettings.applySingleSeriesFill(viewModel.seriesMode, viewModel.columns.fill, options.dataViews?.[0]?.metadata?.objects);
-        this.formattingSettings.applyCardVisibility(viewModel.lines.length > 0);
+        this.formattingSettings.applyCardVisibility(viewModel.lines.length > 0, viewModel.lineOnly ?? false);
         // 「比較値」「比較の列」が無ければ「比較」のカードは出さない。「手前にする値」は「比較の列」のときだけ
         this.formattingSettings.compare.visible = hasRole(options.dataViews?.[0], "compare") || hasRole(options.dataViews?.[0], "compareBy");
         this.formattingSettings.compare.applyCompareBy(hasRole(options.dataViews?.[0], "compareBy"));

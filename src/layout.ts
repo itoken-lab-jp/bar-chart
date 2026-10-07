@@ -101,6 +101,17 @@ export interface LevelRun {
  * 親は上のレベルから level 番目までの並びで見る。上が違えば、同じ名前（別の年の Q1 など）でも別の区切り。
  * keys（元の値のキー）があればそれで見分ける。表示が同じでも値が違えば別の区切り
  */
+/**
+ * カテゴリの区切りの線（縦のグリッド線）を引く境目。i 番目のカテゴリの前に引くなら i（1 〜 カテゴリ数 - 1）。
+ * byLevels なら、階層の 1 つ上のレベルの区切り（年度・四半期の境目など）だけ。階層が無ければカテゴリごと
+ */
+export function categoryGridBreaks(levels: string[][], levelCount: number, byLevels: boolean, keys?: string[][]): number[] {
+    if (!byLevels || levelCount < 2) return levels.slice(1).map((_, k) => k + 1);
+    return levelRunsOf(levels, levelCount - 2, keys)
+        .slice(1)
+        .map((run) => run.start);
+}
+
 export function levelRunsOf(levels: string[][], level: number, keys?: string[][]): LevelRun[] {
     const runs: LevelRun[] = [];
     let key: string | null = null;

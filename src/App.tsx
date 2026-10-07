@@ -6,9 +6,9 @@ import IViewport = powerbi.IViewport;
 import ISelectionId = powerbi.visuals.ISelectionId;
 
 import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings, ParetoRank, Tick } from "./viewModel";
-import { VisualFormattingSettingsModel, STEP_WIDTHS } from "./settings";
+import { VisualFormattingSettingsModel, STEP_WIDTHS, LEVEL_ROW_PADDINGS } from "./settings";
 import { contrastingText, placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
-import { clusterLayout, spanOf, levelRunsOf, layerLayout, layerOpacity } from "./layout";
+import { clusterLayout, spanOf, levelRunsOf, layerLayout, layerOpacity, categoryGridBreaks } from "./layout";
 import { layoutLegend, LegendLayout, LegendItemBox, LEGEND_MARKER_GAP, LAYER_GLYPH_THICKNESS, LAYER_GLYPH_LENGTH } from "./legend";
 import { linePath, areaPath, markerPath, XY } from "./linePath";
 import { recommendedTickCount } from "./shared/ticks";
@@ -68,7 +68,10 @@ export function labelAutoColor(inside: boolean, barColor: string, dl: Pick<DataL
 
 /** 斜めのカテゴリ名を、棒の下端から離す間隔 (px) */
 const ROTATED_LABEL_GAP = 8;
-/** 階層の「囲み」の枠：隣の枠とのすき間の半分と、角の丸み (px) */
+/** 階層の「帯」：隣の帯とのすき間の半分と、角の丸み (px) */
+const LEVEL_BAND_OPACITY = 0.12;
+/** 選んだ区切りの帯の濃さ */
+const LEVEL_BAND_PICKED_OPACITY = 0.24;
 const LEVEL_BOX_GAP = 2;
 const LEVEL_BOX_RADIUS = 4;
 
@@ -619,7 +622,7 @@ export const App: React.FC<AppProps> = ({
 
     /**
      * 階層の区切りの当たり。押すか Enter・Space で、その区切りのカテゴリをまとめて選ぶ（Ctrl で足す）。
-     * 見た目は変えない（囲みの濃さは選んだときに少し上げる）。名前はツールヒントに出す。
+     * 見た目は変えない（帯の濃さは選んだときに少し上げる）。名前はツールヒントに出す。
      * 読み上げの名前は上のレベルからの道筋（「FY26 H1」）。同じ名前の区切り（別の年の H1）を見分けられるように
      */
     const renderLevelHit = (
@@ -726,7 +729,7 @@ export const App: React.FC<AppProps> = ({
         const opacity = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
         const stroke = lineStrokeOf(line, line.width);
         const lineOpacity = opacity * (1 - line.transparency / 100);
-        const mk = viewModel.markers;
+        const mk = line.marker ?? viewModel.markers;
         const markerFill = mk.color || line.color;
         const markerOpacity = opacity * Math.max(0, Math.min(1, 1 - mk.transparency / 100));
         const markerStroke = mk.borderShow ? (mk.borderMatchLine ? line.color : mk.borderColor) : "none";
@@ -1121,13 +1124,10 @@ export const App: React.FC<AppProps> = ({
             // グリッド線と同じく crispEdges を掛けない（拡大率が整数でない画面で太さがそろわない）
             shapeRendering: "auto",
         };
-        // 囲みの枠。ラベルの色をごく淡く敷き、同じ色の細い線で縁取る
+        // 帯。ラベルの色を淡く敷くだけで、枠線は引かない（区切りは帯どうしのすき間で見せる）
         const levelBoxStyle: React.CSSProperties = {
             fill: catAxis.labelColor,
-            fillOpacity: 0.06,
-            stroke: catAxis.labelColor,
-            strokeOpacity: 0.3,
-            strokeWidth: 1,
+            fillOpacity: LEVEL_BAND_OPACITY,
         };
         const widestCat = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(labelOf(g), catFont))) : 0;
 
@@ -1171,8 +1171,9 @@ export const App: React.FC<AppProps> = ({
                 : Math.max(12, step * 0.92);
 
         // 上のレベルの段。多くてもプロットを潰さないよう、ラベルと合わせてグラフの高さの半分までにする（上のレベルから落とす）
-        // 囲みは枠の上下に余白が要るので、段を少し高くする
-        const levelRowHeight = catFontSizePx + (boxedLevels ? 12 : 8);
+        // 帯は上下に余白が要るので、段を少し高くする。「段の高さ」で余白を詰められる
+        const levelPadding = LEVEL_ROW_PADDINGS[catAxis.levelRowHeight] ?? LEVEL_ROW_PADDINGS.normal;
+        const levelRowHeight = catFontSizePx + (boxedLevels ? levelPadding.boxed : levelPadding.lines);
         const levelRows = stackedLevels
             ? Math.min(catAxis.levelCount - 1, Math.max(0, Math.floor((Math.min(height * 0.5, labelRoom) - labelAreaHeight) / levelRowHeight)))
             : 0;
@@ -1197,10 +1198,12 @@ export const App: React.FC<AppProps> = ({
         const vStroke = gridLineStroke(gridlines.verticalStyle, gridlines.verticalWidth, gridlines.verticalScaleWithWidth, { dashArray: gridlines.verticalDashArray, dashCap: gridlines.verticalDashCap });
         const vOpacity = Math.max(0, Math.min(1, 1 - gridlines.verticalTransparency / 100));
 
-        // 縦グリッド線の位置: プロットの両端と、隣り合うカテゴリの中間
+        // 縦グリッド線の位置: プロットの両端と、隣り合うカテゴリの中間（「階層の区切り」なら上のレベルの区切りだけ）
         const verticalGridXs = [
             0,
-            ...groups.slice(1).map((_, k) => centerOf(k + 1) - step / 2),
+            ...categoryGridBreaks(groups.map((g) => g.levels), catAxis.levelCount, gridlines.verticalPosition === "levels", groups.map((g) => g.levelKeys)).map(
+                (i) => centerOf(i) - step / 2
+            ),
             plotWidth,
         ];
 
@@ -1525,12 +1528,12 @@ export const App: React.FC<AppProps> = ({
                 levelRunsOf(paths, level, groups.map((g) => g.levelKeys)).forEach((run, k) => {
                     const left = run.start === 0 ? 0 : edgeOf(run.start);
                     const right = run.end === groups.length - 1 ? plotWidth : edgeOf(run.end + 1);
-                    // 区切り（囲み・線の間）を押すか Enter・Space で、その区切りのカテゴリをまとめて選ぶ（Ctrl で足す。2026-09-24）
+                    // 区切り（帯・線の間）を押すか Enter・Space で、その区切りのカテゴリをまとめて選ぶ（Ctrl で足す。2026-09-24）
                     nodes.push(
                         renderLevelHit(run, level, { x: xOffset + left, y: top, width: right - left, height: levelRowHeight }, `lv-hit-${r}-${k}`)
                     );
                     if (boxedLevels) {
-                        // 囲み：区切りごとに角の丸い淡い枠。隣の枠とは少し離す
+                        // 帯：区切りごとに角の丸い淡い面。隣の帯とは少し離す
                         nodes.push(
                             <rect
                                 key={`lv-box-${r}-${k}`}
@@ -1540,7 +1543,7 @@ export const App: React.FC<AppProps> = ({
                                 height={Math.max(0, levelRowHeight - LEVEL_BOX_GAP * 2)}
                                 rx={LEVEL_BOX_RADIUS}
                                 className="level-box"
-                                style={{ ...levelBoxStyle, fillOpacity: levelPicked(run) ? 0.18 : levelBoxStyle.fillOpacity }}
+                                style={{ ...levelBoxStyle, fillOpacity: levelPicked(run) ? LEVEL_BAND_PICKED_OPACITY : LEVEL_BAND_OPACITY }}
                                 pointerEvents="none"
                             />
                         );
@@ -2626,7 +2629,7 @@ export const App: React.FC<AppProps> = ({
                     // 区切りを押すと、その区切りのカテゴリをまとめて選ぶ（縦棒と同じ）
                     nodes.push(renderLevelHit(run, level, { x: left, y: yOffset + top, width: columnWidth, height: bottom - top }, `lv-hit-${c}-${k}`));
                     if (boxed) {
-                        // 囲み：区切りごとに角の丸い淡い枠。隣の枠とは少し離す
+                        // 帯：区切りごとに角の丸い淡い面。隣の帯とは少し離す
                         nodes.push(
                             <rect
                                 key={`lv-box-${c}-${k}`}
@@ -2638,10 +2641,7 @@ export const App: React.FC<AppProps> = ({
                                 className="level-box"
                                 style={{
                                     fill: catAxis.labelColor,
-                                    fillOpacity: levelPicked(run) ? 0.18 : 0.06,
-                                    stroke: catAxis.labelColor,
-                                    strokeOpacity: 0.3,
-                                    strokeWidth: 1,
+                                    fillOpacity: levelPicked(run) ? LEVEL_BAND_PICKED_OPACITY : LEVEL_BAND_OPACITY,
                                 }}
                                 pointerEvents="none"
                             />
@@ -2710,7 +2710,13 @@ export const App: React.FC<AppProps> = ({
                 )}
                 {gridlines.verticalShow && (
                     <g className="x-gridlines-group">
-                        {[0, ...groups.slice(1).map((_, k) => centerOf(k + 1) - step / 2), plotHeight].map((y, i) => (
+                        {[
+                            0,
+                            ...categoryGridBreaks(groups.map((g) => g.levels), catAxis.levelCount, gridlines.verticalPosition === "levels", groups.map((g) => g.levelKeys)).map(
+                                (i) => centerOf(i) - step / 2
+                            ),
+                            plotHeight,
+                        ].map((y, i) => (
                             <line
                                 key={`h-grid-${i}`}
                                 x1={xOffset}
@@ -3103,7 +3109,7 @@ export const App: React.FC<AppProps> = ({
      */
     const renderLegendLineGlyph = (entry: LegendItemInfo, item: LegendItemBox, dimmed: boolean, r: number) => {
         const line = viewModel.lines[entry.index];
-        const mk = viewModel.markers;
+        const mk = line?.marker ?? viewModel.markers;
         const dim = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
         const color = line?.color ?? item.color;
         const width = Math.max(1, Math.min(3, line?.width ?? 2));

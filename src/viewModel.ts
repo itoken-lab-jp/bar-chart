@@ -17,6 +17,7 @@ import {
     ColumnTarget,
     LabelTarget,
     LineTarget,
+    LineMarkerValues,
     CHART_TYPES,
     ChartType,
     RIBBON_ORDERS,
@@ -198,6 +199,8 @@ export interface LineSeriesInfo {
     lineShow: boolean;
     /** 網掛け領域の下の辺（値 0 の高さ。軸の範囲の外なら端）の軸の比率 */
     baselineRatio: number;
+    /** この線のマーカーの書式。無ければ「すべて」（markers） */
+    marker?: MarkerSettings;
     /** 凡例のクリックで選ぶ ID（メジャー） */
     selectionId: ISelectionId;
     /**
@@ -253,22 +256,7 @@ export interface LegendItemInfo {
 }
 
 /** 折れ線のマーカー */
-export interface MarkerSettings {
-    show: boolean;
-    /** 型（"circle" | "square" | "diamond" | "triangle" | "cross" | "shortDash" | "longDash" | "plus"） */
-    shape: string;
-    size: number;
-    /** 中心で回す角度（度、時計回り。0〜359） */
-    rotation: number;
-    /** 空 = 線の色 */
-    color: string;
-    transparency: number;
-    borderShow: boolean;
-    borderMatchLine: boolean;
-    borderColor: string;
-    borderTransparency: number;
-    borderWidth: number;
-}
+export type MarkerSettings = LineMarkerValues;
 
 /** 網掛け領域の色 */
 export interface AreaSettings {
@@ -423,8 +411,10 @@ export interface CategoryAxisSettings {
     concatenateLabels: boolean;
     /** 階層のレベルの数。1 なら階層なし */
     levelCount: number;
-    /** 段に重ねた上のレベルの見せ方（"lines" 区切り線 | "boxed" 囲み） */
+    /** 段に重ねた上のレベルの見せ方（"lines" 区切り線 | "boxed" 帯） */
     hierarchyStyle: string;
+    /** 段に重ねた上のレベルの段の高さ（LEVEL_ROW_PADDINGS のキー） */
+    levelRowHeight: string;
 }
 
 export interface ValueAxisSettings {
@@ -476,6 +466,8 @@ export interface GridlinesSettings {
     verticalScaleWithWidth: boolean;
     verticalDashArray: string;
     verticalDashCap: string;
+    /** 縦の線を引く位置（"categories" カテゴリごと | "levels" 階層の区切り） */
+    verticalPosition: string;
 }
 
 export interface ColumnsSettings {
@@ -561,6 +553,8 @@ export interface ViewModel {
     lineWarning?: string;
     /** 「比較の列」の値が多すぎて重ねきれないときの警告（compareLayers.ts）。無ければ無し */
     compareWarning?: string;
+    /** 折れ線だけ（値が空）で、比較の欄にフィールドを入れたときの知らせ（compareLayers.ts）。無ければ無し */
+    compareLineOnlyWarning?: string;
     /** 「比較の列」に入れたフィールドの名前（ツールヒントでレイヤーの値の行に使う）。「比較値」で重ねたときは無し */
     compareByName?: string;
     markers: MarkerSettings;
@@ -589,6 +583,8 @@ export interface ViewModel {
     layerTooltips?: Array<TooltipSource | null>;
     /** 比較レイヤーで手前にそろえるもの（この viewModel を作ったときの値） */
     basis: { extent: ValueExtent; keepRows: number[] | null; displayOrder: number[] };
+    /** 「値」が空で「折れ線の値」だけを入れたか。棒は描かず、線を左の軸で描く */
+    lineOnly?: boolean;
     isEmpty: boolean;
 }
 
@@ -817,6 +813,7 @@ const EMPTY_CATEGORY_AXIS: CategoryAxisSettings = {
     concatenateLabels: false,
     levelCount: 1,
     hierarchyStyle: "lines",
+    levelRowHeight: "normal",
 };
 
 const EMPTY_VALUE_AXIS: ValueAxisSettings = {
@@ -865,6 +862,7 @@ const EMPTY_GRIDLINES: GridlinesSettings = {
     verticalScaleWithWidth: false,
     verticalDashArray: "",
     verticalDashCap: "none",
+    verticalPosition: "categories",
 };
 
 const EMPTY_DATA_LABELS: DataLabelsSettings = {
@@ -1201,6 +1199,26 @@ function seriesSlotsOf(
     }));
 }
 
+/**
+ * 折れ線だけのときに置く、値の無い棒の系列（どのカテゴリも空白）。軸・カテゴリの並び・ツールヒントの組み立てを、
+ * 棒があるときと同じ道筋で通すために置く。名前は無く、凡例にも出さない
+ */
+function lineOnlySlotOf(rowCount: number, groups: DataViewValueColumnGroup[], valueColumns: DataViewValueColumn[]): SeriesSlot {
+    const columns = groups[0]?.values ?? valueColumns;
+    const column = {
+        source: { displayName: "", queryName: "__lineOnly", roles: {}, index: -1 },
+        values: Array.from({ length: rowCount }, (): null => null),
+    } as unknown as DataViewValueColumn;
+    return {
+        key: "__lineOnly",
+        name: "",
+        column,
+        tooltips: columns.filter((c) => c.source?.roles?.tooltips),
+        group: groups[0],
+        objects: [],
+    };
+}
+
 /** 積み上げの棒 1 本の、始まりと量（値の単位。100% 積み上げは割合）。ハイライトの量は無ければ null */
 interface StackSegment {
     start: number;
@@ -1485,12 +1503,16 @@ export function transform(
     const groups: DataViewValueColumnGroup[] =
         categorical?.values?.grouped?.() ?? [{ values: valueColumns } as DataViewValueColumnGroup];
     const slots = seriesSlotsOf(groups, valueColumns, legendSource);
+    // 折れ線だけ：「値」が空で「折れ線の値」（率の分子を含む）があれば、値の無い棒の系列を 1 本置き、棒は描かずに線だけを描く
+    const lineOnly =
+        !slots.length && !!categories && valueColumns.some((c) => c.source?.roles?.lineMeasure || c.source?.roles?.lineRatioNumerator);
+    if (lineOnly) slots.push(lineOnlySlotOf(categories!.values.length, groups, valueColumns));
 
     if (!categories || !slots.length || !categories.values.length) {
         return EMPTY;
     }
 
-    const seriesMode = !!legendSource || slots.length > 1;
+    const seriesMode = !lineOnly && (!!legendSource || slots.length > 1);
     const rowCount = categories.values.length;
 
     // 階層。X 軸にフィールドが複数あり、展開していると、上のレベルから順に 1 列ずつ届く。
@@ -1678,7 +1700,7 @@ export function transform(
     const reverseStack = stacked && !rankOrder && (settings.columns.reverseStackOrder.value ?? false);
 
     // 複数系列の空白は棒を描かないので数えない（系列 1 本の空白は 1.4 までと同じく 0 として数える）
-    const isSkipped = (column: DataViewValueColumn, i: number) => seriesMode && isBlankAt(column, i);
+    const isSkipped = (column: DataViewValueColumn, i: number) => (seriesMode || lineOnly) && isBlankAt(column, i);
 
     // --- 並び順 ---------------------------------------------------------------
     // 表示の順（値順・逆順）は元の値で先に決める。累計はこの順に沿って足し、並べ替えは累計した値ではなく元の値で行う。
@@ -1897,7 +1919,7 @@ export function transform(
     const axis2Saved = (dataView?.metadata?.objects?.valueAxis2 as powerbi.DataViewObject | undefined)?.show;
     let onSecondary = false;
     // パレートでは右の軸を累積比（0〜100%）に使うので、「折れ線の値」の線は左の軸を共有する
-    if (lineDefs.length && !paretoOn) {
+    if (lineDefs.length && !paretoOn && !lineOnly) {
         if (percent) {
             onSecondary = true;
         } else if (typeof axis2Saved === "boolean") {
@@ -1975,7 +1997,8 @@ export function transform(
 
     // 値のメジャーの書式が % なら（構成比・率。フィールド パラメーターで円のメジャーと切り替えるときも）、100% 積み上げや
     // 第 2 Y 軸の率と同じく、表示単位によらず % で出し、単位ラベル（単位の追加文字の「円」など）を付けない
-    const measureFormats = slots.map((slot) => valueFormatter.getFormatStringByColumn(slot.column.source) ?? "");
+    // 折れ線だけのときは、左の軸の書式を線の書式で決める（線が % なら目盛りも %）
+    const measureFormats = lineOnly ? lineDefs.map((def) => def.format) : slots.map((slot) => valueFormatter.getFormatStringByColumn(slot.column.source) ?? "");
     const percentMeasure = !percent && measureFormats.length > 0 && measureFormats.every(isPercentFormat);
     /** 書式の % の前の小数の桁（0.0% なら 1）。小数点以下の桁数が「自動」のときに使う */
     const measurePercentDigits = percentDigitsOf(measureFormats[0]);
@@ -2151,12 +2174,15 @@ export function transform(
         concatenateLabels,
         levelCount: levelColumns.length - commonDepth,
         hierarchyStyle: getDropdownValue(catAxis.hierarchyStyle.value, "lines") === "boxed" ? "boxed" : "lines",
+        levelRowHeight: getDropdownValue(catAxis.levelRowHeight.value, "normal"),
     };
 
     // ユーザー設定の単位ラベル（例: "億円", "円", "bn"）を反映したタイトル生成。
     // 値が複数のときの自動のタイトルは、標準と同じく値の名前を「および」でつなぐ
     const composedUnit = percent ? "" : composeUnitText(effectiveUnitWord, unitText, unitIncludeDisplayUnit);
-    const autoValueTitle = seriesMode && !legendSource
+    const autoValueTitle = lineOnly
+        ? lineDefs.map((def) => def.name).join(" および ")
+        : seriesMode && !legendSource
         ? slots.map((slot) => slot.name).join(" および ")
         : (slots[0].column.source?.displayName ?? "");
     const rawValueTitle = valAxis.titleText.value?.trim() || autoValueTitle;
@@ -2222,6 +2248,7 @@ export function transform(
         verticalScaleWithWidth: gl.verticalScaleWithWidth.value ?? false,
         verticalDashArray: gl.verticalDashArray.value ?? "",
         verticalDashCap: String(gl.verticalDashCap.value?.value ?? "none"),
+        verticalPosition: getDropdownValue(gl.verticalPosition.value, "categories"),
     };
 
     // データラベル設定の抽出
@@ -2277,7 +2304,7 @@ export function transform(
     // 系列 1 本の棒の色：保存が無ければ、標準と同じくテーマのデータの色の 1 番目（1.28 までは #118DFF 固定で、
     // テーマの 1 番目を変えたレポートでも従わなかった）。getColor は同じ key なら同じ色を返すので、下の折れ線の色の取り方とずれない
     const singleSeriesFill =
-        seriesMode || !slots.length ? null : customColor(dataView?.metadata?.objects, "fill") ?? host.colorPalette.getColor(slots[0].key).value;
+        seriesMode || lineOnly || !slots.length ? null : customColor(dataView?.metadata?.objects, "fill") ?? host.colorPalette.getColor(slots[0].key).value;
     const columnsSettings: ColumnsSettings = {
         fill: singleSeriesFill || col.fill.value?.value || "#118DFF",
         transparency: Math.max(0, Math.min(100, col.transparency.value ?? 0)),
@@ -2911,7 +2938,8 @@ export function transform(
     };
 
     // 折れ線の色は、棒の系列の続きのテーマの色（系列 1 本の棒はテーマの 1 番目を使う扱いにして、線は 2 番目から）
-    if (lineDefs.length && !seriesMode) host.colorPalette.getColor(slots[0].key);
+    // 折れ線だけのときは棒が無いので、線はテーマの 1 番目から
+    if (lineDefs.length && !seriesMode && !lineOnly) host.colorPalette.getColor(slots[0].key);
     const lineCard = settings.lines;
     const defaultLineStyle = getDropdownValue(lineCard.lineStyle.value, LINE_STYLES.solid);
     const defaultShape = lineCard.shapeValues();
@@ -2952,6 +2980,7 @@ export function transform(
             areaShow: areasOn && (typeof ownAreaShow === "boolean" ? ownAreaShow : true),
             lineShow: typeof ownLineShow === "boolean" ? ownLineShow : lineCard.show.value ?? true,
             baselineRatio,
+            marker: settings.markers.values(def.objects?.markers),
             selectionId: measureBuilder().withMeasure(def.key).createSelectionId(),
             points: categoryGroups.map((g) => {
                 const value = def.values[g.rowIndex];
@@ -2991,6 +3020,7 @@ export function transform(
         dashCap: line.dashCap,
         scaleWithWidth: line.scaleWithWidth,
         transparency: line.transparency,
+        marker: line.marker ?? settings.markers.values(),
     }));
 
     if (paretoOn) {
@@ -3118,7 +3148,7 @@ export function transform(
                     borderWidth: seriesStyles[index].borderWidth,
                 },
             }))
-            : lines.length
+            : lines.length && !lineOnly
                 ? [{
                     kind: "bar" as const,
                     index: 0,
@@ -3233,19 +3263,7 @@ export function transform(
         lines,
         lineTargets,
         ...(lineWarning ? { lineWarning } : {}),
-        markers: {
-            show: mk.show.value ?? false,
-            shape: getDropdownValue(mk.shape.value, "circle"),
-            size: Math.max(1, Math.min(20, mk.size.value ?? 5)),
-            rotation: (((Number(mk.rotation.value) || 0) % 360) + 360) % 360,
-            color: mk.color.value?.value ?? "",
-            transparency: clampPercent(mk.transparency.value ?? 0),
-            borderShow: mk.borderShow.value ?? false,
-            borderMatchLine: mk.borderMatchLine.value ?? false,
-            borderColor: mk.borderFill.value?.value || "#605E5C",
-            borderTransparency: clampPercent(mk.borderTransparency.value ?? 0),
-            borderWidth: Math.max(1, Math.min(10, mk.borderWidth.value ?? 1)),
-        },
+        markers: mk.values(),
         areas: {
             matchLineColor: areaCard.matchLineColor.value ?? true,
             fill: areaCard.fill.value?.value || "#118DFF",
@@ -3297,7 +3315,8 @@ export function transform(
             levels: cumulativeLevels,
             reset: resetDepth < 0 ? CUMULATIVE_RESET_NONE : cumulativeReset,
         },
-        isEmpty: dataPoints.length === 0,
+        ...(lineOnly ? { lineOnly: true } : {}),
+        isEmpty: dataPoints.length === 0 && !lineOnly,
     };
 }
 

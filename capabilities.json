@@ -2071,6 +2071,12 @@
                         "enumeration": []
                     }
                 },
+                "levelRowHeight": {
+                    "displayName": "段の高さ",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "titleShow": {
                     "displayName": "タイトル",
                     "type": {
@@ -2508,6 +2514,12 @@
                         "bool": true
                     }
                 },
+                "verticalPosition": {
+                    "displayName": "線の位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "verticalDashCap": {
                     "displayName": "ダッシュ キャップ",
                     "type": {
@@ -2857,6 +2869,36 @@
         },
         {
             "conditions": [
+                {
+                    "compareBy": {
+                        "min": 1,
+                        "max": 1
+                    },
+                    "series": {
+                        "max": 0
+                    },
+                    "compare": {
+                        "max": 0
+                    },
+                    "labelDetail": {
+                        "max": 1
+                    },
+                    "dataColor": {
+                        "max": 1
+                    },
+                    "categoryLine": {
+                        "max": 4
+                    },
+                    "valueLine": {
+                        "max": 4
+                    },
+                    "labelTitle": {
+                        "max": 1
+                    },
+                    "labelValue": {
+                        "max": 1
+                    }
+                },
                 {
                     "compareBy": {
                         "min": 1,
