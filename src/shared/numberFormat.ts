@@ -133,3 +133,23 @@ export function toneOf(shownSign: number, good = 1, mode: string = TONE_MODES.bo
     const tone: Tone = shownSign * good > 0 ? "good" : "bad";
     return tone === "good" && mode === TONE_MODES.bad ? null : tone;
 }
+
+/** 値の書式が %（構成比・率）か。% の書式のメジャーは、表示単位で割らず、単位ラベルも付けずに % で出す */
+export function isPercentFormat(format: string | undefined): boolean {
+    return /%/.test(format ?? "");
+}
+
+/** % の書式の小数の桁（0.0% なら 1、0% なら 0） */
+export function percentDigitsOf(format: string | undefined): number {
+    const match = /\.(0+)\s*%/.exec(format ?? "");
+    return match ? match[1].length : 0;
+}
+
+/**
+ * 割合（0.352）を % の文字（35.2%）にする。precision は小数点以下の桁数の設定（"auto" なら書式の桁 formatDigits）。
+ * style を渡すと、マイナスと 0 の書き方（▲・±0 など）と + を当てる
+ */
+export function formatPercent(value: number, precision: string, formatDigits: number, style?: Partial<SignStyle>): string {
+    const digits = precision === "auto" ? String(formatDigits) : precision;
+    return `${style ? formatSigned(value * 100, 1, digits, style) : formatValue(value * 100, 1, digits)}%`;
+}

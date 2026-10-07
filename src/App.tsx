@@ -15,6 +15,7 @@ import { recommendedTickCount } from "./shared/ticks";
 import { gridDashOf, lineCapOf, customDashOf, CUSTOM_LINE_STYLE, CustomDash } from "./shared/gridlines";
 import { blend } from "./shared/color";
 import { haloStyle } from "./shared/halo";
+import { rotatedLabelLeadIn } from "./shared/rotatedLabels";
 import { PT_TO_PX, truncateToWidth } from "./shared/text";
 import { useScrollStart } from "./shared/scrollStart";
 import { CopyImageButton } from "./shared/CopyImageButton";
@@ -1064,14 +1065,13 @@ export const App: React.FC<AppProps> = ({
             if (!(Math.max(...widths) > step0 * 0.92) || step0 < catFontSizePx * 1.45) return 0;
             // 名前の長さの上限（下の maxAllowedLabelLen と同じ見積もり。名前の欄に使える高さでも頭を打つ）
             const maxLen = Math.min(labelExtentMax, Math.max(0, labelRoom - ROTATED_LABEL_GAP - catFontSizePx * 0.5)) / Math.SQRT1_2;
-            let need = 0;
-            widths.forEach((w, i) => {
-                // renderCategoryLabel の左端の判定（(cx − 左の余白) / sin45 までの長さなら省かない）を満たす余白。
-                // 余白を足すと帯が狭まり中心も動くので、cx = marginLeft + leadIn + (plotWidth − leadIn) × k / slots として解く（1px の余裕）
-                const k = (outerRatio + (1 - padRatio) / 2 + i) / slots;
-                const deficit = CATEGORY_LABEL_LEFT_SAFE_MARGIN + 1 + Math.min(w, maxLen) * Math.SQRT1_2 - marginLeft - plotWidth * k;
-                if (deficit > 0 && k < 1) need = Math.max(need, deficit / (1 - k));
-            });
+            // renderCategoryLabel の左端の判定（(cx − 左の余白) / sin45 までの長さなら省かない）を満たす余白（1px の余裕）
+            const need = rotatedLabelLeadIn(
+                widths.map((w, i) => ({ extent: Math.min(w, maxLen) * Math.SQRT1_2, ratio: (outerRatio + (1 - padRatio) / 2 + i) / slots })),
+                marginLeft,
+                plotWidth,
+                CATEGORY_LABEL_LEFT_SAFE_MARGIN + 1
+            );
             // 余白を足しても、帯がカテゴリの最小幅と「斜めのまま」の幅（文字の 1.45 倍）を下回らない所で止める
             // （下回ると最小幅を割る・縦に立つのに余白だけ残る）。極端に長い名前は、ビジュアルの幅の 30% までで省く
             const keepStep = Math.max(minCatWidth, catFontSizePx * 1.45);

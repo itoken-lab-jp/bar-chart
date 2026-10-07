@@ -50,7 +50,7 @@ import { TooltipSource, TooltipStack, TooltipColumn, tooltipColumnOf, formatTool
 import { ticksUpTo, tickCountOf, boundOf } from "./shared/ticks";
 import { PT_TO_PX } from "./shared/text";
 import { Halo, haloOf, NO_HALO } from "./shared/halo";
-import { formatSigned, shownSignOf, toneOf, NEGATIVE_STYLES, SignStyle, ZERO_STYLES, TONE_MODES, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR } from "./shared/numberFormat";
+import { formatSigned, shownSignOf, toneOf, NEGATIVE_STYLES, SignStyle, ZERO_STYLES, TONE_MODES, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR, isPercentFormat, percentDigitsOf, formatPercent } from "./shared/numberFormat";
 
 export { tickCountOf };
 
@@ -1973,7 +1973,14 @@ export function transform(
     const unitStyle = getDropdownValue(valAxis.unitStyle.value, "parentheses");
     const precision = getDropdownValue(valAxis.precision.value, "auto");
 
-    const unitDef = resolveUnit(unitTypeKey, maxAbs, unitNotation, precision);
+    // 値のメジャーの書式が % なら（構成比・率。フィールド パラメーターで円のメジャーと切り替えるときも）、100% 積み上げや
+    // 第 2 Y 軸の率と同じく、表示単位によらず % で出し、単位ラベル（単位の追加文字の「円」など）を付けない
+    const measureFormats = slots.map((slot) => valueFormatter.getFormatStringByColumn(slot.column.source) ?? "");
+    const percentMeasure = !percent && measureFormats.length > 0 && measureFormats.every(isPercentFormat);
+    /** 書式の % の前の小数の桁（0.0% なら 1）。小数点以下の桁数が「自動」のときに使う */
+    const measurePercentDigits = percentDigitsOf(measureFormats[0]);
+    const measurePercentText = (v: number, digits: string, sign?: Partial<SignStyle>) => formatPercent(v, digits, measurePercentDigits, sign);
+    const unitDef = percentMeasure ? resolveUnit("0", 0, unitNotation, precision) : resolveUnit(unitTypeKey, maxAbs, unitNotation, precision);
 
     const roundRange = valAxis.roundRange.value ?? true;
     const invertRange = valAxis.invertRange.value ?? false;
@@ -2061,7 +2068,7 @@ export function transform(
     // 対数スケール時は全体一律のスケーリング語（億・M等）は使わず、タイトルやバッジにはユーザー単位（円）のみ出す
     const effectiveUnitWord = isLogScaleActive ? "" : unitDef.unitWord;
     // 100% 積み上げの軸は割合なので、軸の単位ラベル（(億円) など）は出さない
-    const badgeText = percent
+    const badgeText = percent || percentMeasure
         ? ""
         : resolveBadgeText({
             unitShow,
@@ -2094,6 +2101,10 @@ export function transform(
         let label: string;
         if (percent) {
             label = `${Math.round(t * 100)}%`;
+        } else if (percentMeasure && !isLogScaleActive) {
+            // 目盛りの間隔が 1% 未満なら小数 1 桁（第 2 Y 軸の率と同じ）
+            const stepPercent = rawTicks.length > 1 ? Math.abs(rawTicks[1] - rawTicks[0]) * 100 : 1;
+            label = `${(t * 100).toFixed(precision !== "auto" ? Number(precision) : stepPercent < 1 ? 1 : 0)}%`;
         } else if (isLogScaleActive) {
             // 対数時は目盛値ごとに動的に単位付与（showUnitOnAxisがfalseならカンマ区切り生数値）
             label = formatDynamicValue(t, unitNotation, precision, showUnitOnAxis);
@@ -2361,7 +2372,9 @@ export function transform(
     const totalUnitKey = getDropdownValue(tl.unitType.value, "auto");
     const totalUnitDef = totalUnitKey === "auto" ? null : resolveUnit(totalUnitKey, maxAbs, unitNotation, totalPrecision);
     const totalText = (v: number): string =>
-        totalUnitDef
+        percentMeasure
+            ? measurePercentText(v, totalPrecision)
+            : totalUnitDef
             ? `${formatValue(v, totalUnitDef.divisor, totalPrecision)}${totalUnitDef.unitWord}`
             : formatValue(v, unitDef.divisor, totalPrecision);
     const totalLabelsSettings: TotalLabelsSettings = {
@@ -2412,7 +2425,13 @@ export function transform(
     };
     const formatted = (val: number) =>
         // 100% 積み上げの軸は割合なので、データラベルは値ごとに単位を付ける（1,250億 など）
-        isLogScaleActive || percent
+        percentMeasure && !isLogScaleActive
+            ? {
+                formattedValue: measurePercentText(val, precision),
+                dataLabelText: measurePercentText(val, labelPrecision, labelSign),
+                labelToneColor: toneColorOf(shownSignOf(val * 100, 1, labelPrecision === "auto" ? String(measurePercentDigits) : labelPrecision, labelSign)),
+            }
+            : isLogScaleActive || percent
             ? {
                 formattedValue: formatDynamicValue(val, unitNotation, precision, true),
                 dataLabelText: formatDynamicValue(val, unitNotation, labelPrecision, true, labelSign),
@@ -2861,6 +2880,8 @@ export function transform(
                 : formatValue(def.value, unitDef2.divisor, p2)
             : percent
                 ? `${(def.value * 100).toFixed(p1 === "auto" ? 0 : Number(p1))}%`
+                : percentMeasure
+                ? measurePercentText(def.value, p1)
                 : isLogScaleActive
                     ? formatDynamicValue(def.value, unitNotation, p1, true)
                     : formatValue(def.value, unitDef.divisor, p1);
