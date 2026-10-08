@@ -752,10 +752,24 @@ export class LegendCardSettings extends FormattingSettingsCompositeCard {
         value: false,
     });
 
+    /** 棒の項目と折れ線の項目を別々に出し入れする（2026-10-08 ユーザー「棒の凡例と線の凡例で個別で表示するしないの設定がほしい」） */
+    showBars = new formattingSettings.ToggleSwitch({
+        name: "showBars",
+        displayName: "棒の項目",
+        description: "凡例に棒（系列）の項目を出す。切ると折れ線の項目だけ",
+        value: true,
+    });
+    showLines = new formattingSettings.ToggleSwitch({
+        name: "showLines",
+        displayName: "折れ線の項目",
+        description: "凡例に折れ線の項目を出す。切ると棒の項目だけ",
+        value: true,
+    });
+
     optionsGroup = new FormattingSettingsGroup({
         name: "legendOptions",
         displayName: "オプション",
-        slices: [this.position, this.markerStyle, this.matchLineColor, this.reverseOrder],
+        slices: [this.position, this.showBars, this.showLines, this.markerStyle, this.matchLineColor, this.reverseOrder],
     });
     textGroup = this.parts.textGroup;
     titleGroup = this.parts.titleGroup;
@@ -764,6 +778,9 @@ export class LegendCardSettings extends FormattingSettingsCompositeCard {
 
     /** 折れ線の印の項目は、折れ線があるときだけ出す */
     applyLines(hasLines: boolean): void {
+        // 棒と折れ線の両方があるときだけ、どちらを出すかを選べる
+        this.showBars.visible = hasLines;
+        this.showLines.visible = hasLines;
         this.markerStyle.visible = hasLines;
         this.matchLineColor.visible = hasLines;
     }

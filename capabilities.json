@@ -1423,6 +1423,18 @@
                         ]
                     }
                 },
+                "showBars": {
+                    "displayName": "棒の項目",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "showLines": {
+                    "displayName": "折れ線の項目",
+                    "type": {
+                        "bool": true
+                    }
+                },
                 "legendMarkerRendering": {
                     "displayName": "スタイル",
                     "type": {

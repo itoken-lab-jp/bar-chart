@@ -3133,7 +3133,7 @@ export function transform(
         }
         : EMPTY_PARETO;
 
-    const legendEntries: LegendItemInfo[] = [
+    const allLegendEntries: LegendItemInfo[] = [
         ...(seriesMode
             ? series.map((s, index) => ({
                 kind: "bar" as const,
@@ -3165,9 +3165,13 @@ export function transform(
                 : []),
         ...lines.map((l, index) => ({ kind: "line" as const, index, name: l.name, color: l.color, selectionId: l.selectable === false ? null : l.selectionId })),
     ];
+    // 「棒の項目」「折れ線の項目」を切ったら、その種類の項目を凡例から外す（凡例を出すかは、外す前の項目の数で決める）
+    const legendEntries = allLegendEntries.filter((e) => (e.kind === "bar" ? (lg.showBars.value ?? true) : e.kind === "line" ? (lg.showLines.value ?? true) : true));
     // 表示順を反転：凡例の項目だけを逆に並べる（棒の並び・積む順は変えない）
     if (lg.reverseOrder.value ?? false) legendEntries.reverse();
-    legendInfo.show = (seriesMode || legendEntries.length > 1) && (lg.show.value ?? true);
+    legendInfo.show = (seriesMode || allLegendEntries.length > 1) && legendEntries.length > 0 && (lg.show.value ?? true);
+    // 棒の項目を外したら、凡例の欄の名前（製品など）の見出しは棒の項目の見出しなので出さない（文字で決めた見出しは残す）
+    if (seriesMode && !legendEntries.some((e) => e.kind === "bar") && !lg.titleText.value?.trim()) legendInfo.title = "";
 
     // --- X 軸の定数線 ---------------------------------------------------
     // 「X 軸の定数線」の欄のメジャーは、カテゴリ（行）ごとに Power BI が計算して返す。空白でない値を返したカテゴリに線を引く。

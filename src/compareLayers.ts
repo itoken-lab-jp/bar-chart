@@ -102,7 +102,7 @@ export function transformWithLayers(
         compareLayers,
         layerTooltips: [merged.tooltip, ...backs.map((vm) => vm.tooltip)],
         legendEntries,
-        legend: { ...merged.legend, show: (settings.legend.show.value ?? true) && (merged.seriesMode || legendEntries.length > 1) },
+        legend: { ...merged.legend, show: (settings.legend.show.value ?? true) && legendEntries.length > 0 && (merged.seriesMode || merged.legend.show || legendEntries.length > 1) },
         // リボンは系列の棒の端をつなぐので、幅を割ったレイヤーの棒とは合わない。比較のあいだは描かない
         ribbons: { ...merged.ribbons, show: false },
         ...(split?.warning ? { compareWarning: split.warning } : {}),
