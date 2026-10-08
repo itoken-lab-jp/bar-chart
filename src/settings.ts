@@ -82,6 +82,17 @@ export const RIBBON_ORDER_ITEMS: powerbi.IEnumMember[] = [
     { value: RIBBON_ORDERS.value, displayName: "値の大きい順" },
 ];
 
+/** 凡例の棒の項目の出し方：系列ごとか、灰色の 1 項目にまとめるか */
+export const LEGEND_BAR_ITEMS = {
+    series: "series",
+    single: "single",
+} as const;
+
+export const LEGEND_BAR_ITEM_ITEMS: powerbi.IEnumMember[] = [
+    { value: LEGEND_BAR_ITEMS.series, displayName: "系列ごと" },
+    { value: LEGEND_BAR_ITEMS.single, displayName: "1 つにまとめる" },
+];
+
 /** 比較レイヤーの手前の棒を置く側。縦棒は右・左、横棒は下・上 */
 export const COMPARE_DIRECTIONS = {
     rightFront: "rightFront",
@@ -759,6 +770,14 @@ export class LegendCardSettings extends FormattingSettingsCompositeCard {
         description: "凡例に棒（系列）の項目を出す。切ると折れ線の項目だけ",
         value: true,
     });
+    /** 系列に分けた棒の項目を、系列ごとに出すか、灰色の 1 項目（値の名前）にまとめるか（2026-10-08 ユーザー「単体の時は灰色でいい」） */
+    barItems = new formattingSettings.ItemDropdown({
+        name: "barItems",
+        displayName: "棒の項目の出し方",
+        description: "系列ごと：系列の色で 1 つずつ。1 つにまとめる：値の名前で灰色の 1 項目（凡例の欄の名前の見出しは出さない）",
+        items: LEGEND_BAR_ITEM_ITEMS,
+        value: LEGEND_BAR_ITEM_ITEMS[0],
+    });
     showLines = new formattingSettings.ToggleSwitch({
         name: "showLines",
         displayName: "折れ線の項目",
@@ -769,7 +788,7 @@ export class LegendCardSettings extends FormattingSettingsCompositeCard {
     optionsGroup = new FormattingSettingsGroup({
         name: "legendOptions",
         displayName: "オプション",
-        slices: [this.position, this.showBars, this.showLines, this.markerStyle, this.matchLineColor, this.reverseOrder],
+        slices: [this.position, this.showBars, this.barItems, this.showLines, this.markerStyle, this.matchLineColor, this.reverseOrder],
     });
     textGroup = this.parts.textGroup;
     titleGroup = this.parts.titleGroup;
@@ -777,6 +796,11 @@ export class LegendCardSettings extends FormattingSettingsCompositeCard {
     groups = [this.optionsGroup, this.textGroup, this.titleGroup];
 
     /** 折れ線の印の項目は、折れ線があるときだけ出す */
+    /** 棒の項目の出し方は、系列に分けた棒があるときだけ出す */
+    applySeries(seriesMode: boolean): void {
+        this.barItems.visible = seriesMode;
+    }
+
     applyLines(hasLines: boolean): void {
         // 棒と折れ線の両方があるときだけ、どちらを出すかを選べる
         this.showBars.visible = hasLines;

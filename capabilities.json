@@ -1429,6 +1429,12 @@
                         "bool": true
                     }
                 },
+                "barItems": {
+                    "displayName": "棒の項目の出し方",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "showLines": {
                     "displayName": "折れ線の項目",
                     "type": {

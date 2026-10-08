@@ -154,6 +154,7 @@ export class Visual implements IVisual {
         });
         this.formattingSettings.applySingleSeriesFill(viewModel.seriesMode, viewModel.columns.fill, options.dataViews?.[0]?.metadata?.objects);
         this.formattingSettings.applyCardVisibility(viewModel.lines.length > 0, viewModel.lineOnly ?? false);
+        this.formattingSettings.legend.applySeries(viewModel.seriesMode);
         // 「比較値」「比較の列」が無ければ「比較」のカードは出さない。「手前にする値」は「比較の列」のときだけ
         this.formattingSettings.compare.visible = hasRole(options.dataViews?.[0], "compare") || hasRole(options.dataViews?.[0], "compareBy");
         this.formattingSettings.compare.applyCompareBy(hasRole(options.dataViews?.[0], "compareBy"));

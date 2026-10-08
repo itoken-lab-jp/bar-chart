@@ -34,6 +34,7 @@ import {
     LINE_PERCENT_FORMAT,
     LinesCardSettings,
     legendPlacementValue,
+    LEGEND_BAR_ITEMS,
 } from "./settings";
 import {
     resolveUnit,
@@ -241,6 +242,9 @@ export interface ValueAxis2Settings {
 }
 
 /** 凡例の 1 項目。棒の系列のあとに折れ線が並ぶ（標準と同じ） */
+/** 凡例の棒の項目を 1 つにまとめたときの色（系列の色と混ざらない灰色。比較レイヤーの印と同じ） */
+export const SINGLE_BAR_LEGEND_GRAY = "#8A8886";
+
 export interface LegendItemInfo {
     kind: "bar" | "line" | "layer";
     /** 棒なら series の添字、折れ線なら lines の添字、比較レイヤーなら compareLayers の添字 */
@@ -3133,8 +3137,19 @@ export function transform(
         }
         : EMPTY_PARETO;
 
+    // 棒の項目を 1 つにまとめる：値の名前で、系列の色と混ざらない灰色の 1 項目（選ぶものは無い）
+    const singleBarItem = seriesMode && getDropdownValue(lg.barItems.value, LEGEND_BAR_ITEMS.series) === LEGEND_BAR_ITEMS.single;
     const allLegendEntries: LegendItemInfo[] = [
-        ...(seriesMode
+        ...(singleBarItem
+            ? [{
+                kind: "bar" as const,
+                index: 0,
+                name: legendSource ? (slots[0].column.source?.displayName ?? slots[0].name) : slots.map((slot) => slot.name).join(" および "),
+                color: SINGLE_BAR_LEGEND_GRAY,
+                selectionId: null,
+                barStyle: { transparency: 0, borderShow: false, borderColor: SINGLE_BAR_LEGEND_GRAY, borderWidth: 0 },
+            }]
+            : seriesMode
             ? series.map((s, index) => ({
                 kind: "bar" as const,
                 index,
@@ -3171,7 +3186,8 @@ export function transform(
     if (lg.reverseOrder.value ?? false) legendEntries.reverse();
     legendInfo.show = (seriesMode || allLegendEntries.length > 1) && legendEntries.length > 0 && (lg.show.value ?? true);
     // 棒の項目を外したら、凡例の欄の名前（製品など）の見出しは棒の項目の見出しなので出さない（文字で決めた見出しは残す）
-    if (seriesMode && !legendEntries.some((e) => e.kind === "bar") && !lg.titleText.value?.trim()) legendInfo.title = "";
+    // 1 つにまとめたときも、系列の見出しは要らない
+    if (seriesMode && (singleBarItem || !legendEntries.some((e) => e.kind === "bar")) && !lg.titleText.value?.trim()) legendInfo.title = "";
 
     // --- X 軸の定数線 ---------------------------------------------------
     // 「X 軸の定数線」の欄のメジャーは、カテゴリ（行）ごとに Power BI が計算して返す。空白でない値を返したカテゴリに線を引く。
