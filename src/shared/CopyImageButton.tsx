@@ -13,6 +13,8 @@
 import * as React from "react";
 
 import { ChartImage, IMAGE_SCALE, PreparedImage, SKIP_ATTRIBUTE, chartImage, writeImage } from "./copyImage";
+import { DARK_TEXT } from "./color";
+import { CONTROL_RADIUS, CONTROL_TRANSITION, FLOATING_SHADOW, controlColorsOf } from "./controls";
 
 export interface CopyImageButtonProps {
     /** 貼った先の代わりの文字（画像の alt と、文字しか受けない所へ貼ったときの文字） */
@@ -44,14 +46,20 @@ const MESSAGES: Record<Status, string> = {
 const HOST_CLASS = "copy-image-host";
 const BUTTON_CLASS = "copy-image-button";
 const LIVE_CLASS = "copy-image-live";
-/** 入れ物の hover で出す。スタイルはこの部品の中で閉じる（ビジュアルのスタイルシートに頼らない） */
+/**
+ * 入れ物の hover で出す。スタイルはこの部品の中で閉じる（ビジュアルのスタイルシートに頼らない）。
+ * 形と動きは Power BI の画面と同じ Fluent 2 の小さいボタン（角丸 4px、細い灰の枠、マウスで地が少し沈む）。グラフの上に浮くので小さい影を付ける
+ */
 const CSS = `
-.${BUTTON_CLASS}{position:absolute;z-index:10;display:flex;align-items:center;gap:4px;height:24px;padding:0 6px;
-border:1px solid var(--copy-image-border);border-radius:2px;background:var(--copy-image-bg);color:var(--copy-image-fg);
-font:12px "Segoe UI",sans-serif;cursor:pointer;opacity:0;pointer-events:none;transition:opacity .15s}
+.${BUTTON_CLASS}{position:absolute;z-index:10;display:flex;align-items:center;gap:4px;height:24px;padding:0 8px;box-sizing:border-box;
+border:1px solid var(--copy-image-border);border-radius:${CONTROL_RADIUS};background:var(--copy-image-bg);color:var(--copy-image-fg);
+box-shadow:var(--copy-image-shadow);font:12px "Segoe UI",sans-serif;cursor:pointer;opacity:0;pointer-events:none;
+transition:opacity .15s,background-color ${CONTROL_TRANSITION},border-color ${CONTROL_TRANSITION}}
 .${HOST_CLASS}:hover>.${BUTTON_CLASS},.${BUTTON_CLASS}:focus-visible,.${BUTTON_CLASS}[data-status]{opacity:1;pointer-events:auto}
-.${BUTTON_CLASS}:hover{filter:brightness(.96)}
-.${BUTTON_CLASS}:focus-visible{outline:2px solid var(--copy-image-fg);outline-offset:1px}
+.${BUTTON_CLASS}:hover{background:var(--copy-image-hover);border-color:var(--copy-image-border-hover)}
+.${BUTTON_CLASS}:active{background:var(--copy-image-pressed)}
+.${BUTTON_CLASS}:focus-visible{outline:2px solid var(--copy-image-fg);outline-offset:-2px}
+@media (prefers-reduced-motion:reduce){.${BUTTON_CLASS}{transition-duration:.01ms}}
 .${BUTTON_CLASS} svg{display:block}
 .${BUTTON_CLASS} img{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:inherit}
 .${LIVE_CLASS}{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
@@ -202,13 +210,18 @@ export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, br
     };
 
     const message = MESSAGES[status];
-    const fg = colors?.foreground ?? "#252423";
+    // ハイコントラストでは前景色と背景色の 2 色だけ。ふだんは標準の字（#252423）と白から灰の段を作る
+    const c = colors ? controlColorsOf(colors.foreground, colors.background, true) : controlColorsOf(DARK_TEXT, "#FFFFFF");
     const style = {
         right: EDGE + insets.right,
         bottom: EDGE + insets.bottom,
-        "--copy-image-fg": fg,
-        "--copy-image-bg": colors?.background ?? "rgba(255,255,255,.92)",
-        "--copy-image-border": colors ? fg : "#c8c6c4",
+        "--copy-image-fg": c.text,
+        "--copy-image-bg": c.background,
+        "--copy-image-border": c.stroke,
+        "--copy-image-border-hover": c.strokeHover,
+        "--copy-image-hover": c.hover,
+        "--copy-image-pressed": c.pressed,
+        "--copy-image-shadow": colors ? "none" : FLOATING_SHADOW,
     } as React.CSSProperties;
     return (
         <>

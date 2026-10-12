@@ -58,7 +58,8 @@ export function truncateToWidth(text: string, maxWidth: number, font: FontSpec):
     if (measureTextWidth(text, font) <= maxWidth) return text;
     const ellipsis = "…";
     for (let n = text.length - 1; n > 0; n--) {
-        const candidate = text.slice(0, n) + ellipsis;
+        // 「…」の前の空白は詰める（「製品 …」ではなく「製品…」）
+        const candidate = text.slice(0, n).trimEnd() + ellipsis;
         if (measureTextWidth(candidate, font) <= maxWidth) return candidate;
     }
     return "";

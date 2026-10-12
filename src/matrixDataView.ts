@@ -10,9 +10,11 @@
  * - 行（カテゴリ）：行の木の葉を 1 行にする。階層は上の段から 1 列ずつ。選択 ID の元になる行の節点は、カテゴリの identity の位置に入れる
  *   （「その他」にまとめたときも、行と一緒に並べ替わる）
  * - 列（凡例）：凡例の値ごとに 1 グループ。グループには列の節点を持たせる
- * - 「折れ線の値」：凡例があれば、列の小計の値を 1 列にする（凡例ごとの値は使わない）。小計が届かなければ凡例ごとの値のまま
+ * - 「折れ線の値」：凡例があれば、列の小計の値を 1 列にする（凡例ごとの値は使わない）。小計が届かなければ凡例ごとの値のまま。
+ *   棒が無く折れ線だけなら、凡例ごとの値のまま（凡例の値ごとに線を分ける）
  */
 import powerbi from "powerbi-visuals-api";
+import { ROW_LIMIT, SERIES_LIMIT } from "./shared/warnings";
 
 import DataView = powerbi.DataView;
 import DataViewCategorical = powerbi.DataViewCategorical;
@@ -84,11 +86,16 @@ function rowPathsOf(root: DataViewMatrixNode | undefined, depth: number): DataVi
     return paths;
 }
 
+/** カテゴリが無いときの、値の入った全体の行（根か、その子のうち値を持つもの）。無ければ空 */
+function totalRowOf(root: DataViewMatrixNode | undefined): DataViewMatrixNode[][] {
+    const node = root?.children?.find((child) => child.values) ?? (root?.values ? root : undefined);
+    return node ? [[node]] : [];
+}
+
 const isSeriesLevel = (level: DataViewHierarchyLevel | undefined) => !!level?.sources?.some((source) => source.roles?.series);
 
 /** capabilities の行（カテゴリ）と列（凡例）の上限。届いた数がこれに達したら、切られたとみなす */
-export const ROW_LIMIT = 30000;
-export const SERIES_LIMIT = 2000;
+export { ROW_LIMIT, SERIES_LIMIT };
 
 /**
  * matrix で届いた行（カテゴリ。階層なら葉、比較の列があればカテゴリ × 比較の列の組）と、凡例の値の数。
@@ -115,7 +122,8 @@ export function categoricalOf(dataView: DataView | undefined): DataView | undefi
     const valueSources = matrix.valueSources ?? [];
     const hasSeries = isSeriesLevel(columnLevels[0]);
     const legendSource = hasSeries ? columnLevels[0].sources[0] : undefined;
-    const paths = rowPathsOf(matrix.rows?.root, rowLevels.length);
+    // カテゴリが無ければ、値は全体の 1 行で届く。その 1 行を 1 カテゴリにする（名前は空）
+    const paths = rowLevels.length ? rowPathsOf(matrix.rows?.root, rowLevels.length) : totalRowOf(matrix.rows?.root);
     for (const path of paths) path.forEach((node, depth) => ROW_PATHS.set(node, path.slice(0, depth + 1)));
     // どのメジャーの列かは、値のセルの valueSourceIndex で決める（無ければ 0）。同じフィールドを 2 つの欄に入れると、
     // 列の葉の levelSourceIndex は重なった列の後ろの番号になり（1・1・2 など）、葉からは決められない（2026-10-03、Desktop）
@@ -133,7 +141,7 @@ export function categoricalOf(dataView: DataView | undefined): DataView | undefi
         const measure = cell ? cell.valueSourceIndex ?? 0 : leaf.measure;
         return { ...leaf, measure: measure >= 0 && measure < valueSources.length ? measure : -1 };
     });
-    if (!rowLevels.length || !paths.length) {
+    if (!paths.length) {
         const empty = Object.assign([] as DataViewValueColumn[], { grouped: (): DataViewValueColumnGroup[] => [] }) as DataViewValueColumns;
         return { ...dataView, categorical: { categories: [], values: empty } };
     }
@@ -161,7 +169,12 @@ export function categoricalOf(dataView: DataView | undefined): DataView | undefi
     const isFirst = (measure: number) => !!valueSources[measure] && merged.get(keyOf(valueSources[measure]))?.first === measure;
     const sourceOf = (measure: number) => merged.get(keyOf(valueSources[measure]))!.source;
     // 凡例をまとめたカテゴリ全体の値（列の小計）で受ける役割：「折れ線の値」「X 軸の定数線」「Y 軸の定数線」（凡例ごとに評価すると、先頭の凡例が空白のとき線が消える）
-    const wholeRolesOf = (measure: number) => WHOLE_ROLES.filter((role) => sourceOf(measure).roles?.[role]);
+    // 棒が無く、線が 1 本（「折れ線の値」か率の分子が 1 つ）なら、「折れ線の値」は凡例ごとの値で受ける（凡例の値ごとに線を分けて引く。viewModel.ts）
+    const hasBars = valueSources.some((source) => source.roles?.measure);
+    const lineCount = new Set(valueSources.filter((source) => source.roles?.lineMeasure || source.roles?.lineRatioNumerator).map(keyOf)).size;
+    const splitLines = !hasBars && lineCount === 1;
+    const wholeRolesOf = (measure: number) =>
+        WHOLE_ROLES.filter((role) => sourceOf(measure).roles?.[role] && (!splitLines || role !== "lineMeasure"));
     const isLine = (measure: number) => wholeRolesOf(measure).length > 0;
     const leafList = leaves.map((leaf, k) => ({ leaf, k })).filter(({ leaf }) => isFirst(leaf.measure));
     const subtotalLines = hasSeries ? leafList.filter(({ leaf }) => leaf.subtotal && isLine(leaf.measure)) : [];
@@ -170,7 +183,9 @@ export function categoricalOf(dataView: DataView | undefined): DataView | undefi
     const seriesSourceOf = (measure: number): DataViewMetadataColumn | null => {
         const source = sourceOf(measure);
         if (!useSubtotal || !isLine(measure)) return source;
-        const roles = Object.fromEntries(Object.entries(source.roles ?? {}).filter(([role]) => !WHOLE_ROLES.includes(role)));
+        // 小計で受ける役割だけを外す（凡例ごとに受ける「折れ線の値」は残す。同じフィールドを「X 軸の定数線」にも入れたとき）
+        const whole = wholeRolesOf(measure);
+        const roles = Object.fromEntries(Object.entries(source.roles ?? {}).filter(([role]) => !whole.includes(role)));
         return Object.keys(roles).length ? { ...source, roles } : null;
     };
     const groups: MatrixGroup[] = [];
@@ -219,8 +234,33 @@ export function categoricalOf(dataView: DataView | undefined): DataView | undefi
     return { ...dataView, categorical };
 }
 
+/** カテゴリを入れずに値だけを入れたときに置く、名前の無いカテゴリの列の印 */
+const PLACEHOLDER_CATEGORY = Symbol("placeholderCategory");
+
+/**
+ * カテゴリが無く、値が全体の 1 行で届いたなら、名前の無いカテゴリを 1 つ置く（標準と同じく、値ごとの棒を 1 か所に描く）。
+ * 選択 ID にはカテゴリを付けない（withCategoryOf がこの列を飛ばす）
+ */
+export function withPlaceholderCategory(dataView: DataView | undefined): DataView | undefined {
+    const categorical = dataView?.categorical;
+    if (!dataView || !categorical || categorical.categories?.length) return dataView;
+    const rowCount = categorical.values?.[0]?.values?.length ?? 0;
+    if (rowCount !== 1) return dataView;
+    const column = {
+        source: { displayName: "", queryName: "", roles: { category: true } } as DataViewMetadataColumn,
+        values: [""],
+        [PLACEHOLDER_CATEGORY]: true,
+    } as DataViewCategoryColumn;
+    // 詰め替えた印（MATRIX_LEVELS）も写る（スプレッドは記号のキーも写す）
+    return { ...dataView, categorical: { ...categorical, categories: [column] } };
+}
+
+/** withPlaceholderCategory で足した仮のカテゴリの列か */
+export const isPlaceholderCategory = (column: DataViewCategoryColumn) => !!(column as DataViewCategoryColumn & { [PLACEHOLDER_CATEGORY]?: boolean })[PLACEHOLDER_CATEGORY];
+
 /** カテゴリ（行）の i 番目を選択 ID に足す。matrix から詰め替えたなら行の節点で、そうでなければ今までどおり */
 export function withCategoryOf(builder: ISelectionIdBuilder, categorical: DataViewCategorical, column: DataViewCategoryColumn, i: number): ISelectionIdBuilder {
+    if (isPlaceholderCategory(column)) return builder;
     const levels = (categorical as MatrixCategorical)[MATRIX_LEVELS];
     if (!levels) return builder.withCategory(column, i);
     const node = column.identity![i] as unknown as DataViewMatrixNode;

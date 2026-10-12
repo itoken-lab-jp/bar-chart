@@ -6,20 +6,30 @@ import IViewport = powerbi.IViewport;
 import ISelectionId = powerbi.visuals.ISelectionId;
 
 import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings, ParetoRank, Tick } from "./viewModel";
-import { VisualFormattingSettingsModel, STEP_WIDTHS, LEVEL_ROW_PADDINGS } from "./settings";
-import { contrastingText, placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
+import { VisualFormattingSettingsModel, STEP_WIDTHS, LEVEL_ROW_PADDINGS, LINE_BLANKS } from "./settings";
+import { placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
+import { continuousBand, continuousTicks, positionOf } from "./continuousAxis";
 import { clusterLayout, spanOf, levelRunsOf, layerLayout, layerOpacity, categoryGridBreaks } from "./layout";
 import { layoutLegend, LegendLayout, LegendItemBox, LEGEND_MARKER_GAP, LAYER_GLYPH_THICKNESS, LAYER_GLYPH_LENGTH } from "./legend";
 import { linePath, areaPath, markerPath, XY } from "./linePath";
-import { recommendedTickCount } from "./shared/ticks";
-import { gridDashOf, lineCapOf, customDashOf, CUSTOM_LINE_STYLE, CustomDash } from "./shared/gridlines";
-import { blend } from "./shared/color";
+import { recommendedTickCount, fitTicks as fitTicksBy } from "./shared/ticks";
+import { CUSTOM_LINE_STYLE, gridLineStroke, lineStrokeOf } from "./shared/gridlines";
+
+export { gridLineStroke, lineStrokeOf };
+import { DARK_TEXT, autoLabelColor, blend, sameColor } from "./shared/color";
+import { HighContrastColors } from "./shared/highContrast";
+import { selectKeyProps, selectKeyDown } from "./shared/keyboard";
+import { LegendArrowButton } from "./shared/LegendArrowButton";
+import { valueEndBarPath } from "./shared/barShape";
+import { placeReferenceLabels, referenceLabelSvgStyle, referenceLineSvgStyle, referenceShadeSvgStyle } from "./shared/referenceLine";
 import { haloStyle } from "./shared/halo";
 import { rotatedLabelLeadIn } from "./shared/rotatedLabels";
 import { PT_TO_PX, truncateToWidth } from "./shared/text";
 import { useScrollStart } from "./shared/scrollStart";
 import { CopyImageButton } from "./shared/CopyImageButton";
+import { controlColorsOf, controlVars } from "./shared/controls";
 import { TEXT_ATTRIBUTE } from "./shared/copyImage";
+import { fontOf, fontStyleOf } from "./shared/textStyle";
 
 /** 長ければ末尾を省略した文字（軸のタイトル用）。省略したときは、マウスを乗せると全体が出る */
 function fittedText(text: string, maxWidthPx: number, font: FontSpec): React.ReactNode {
@@ -51,23 +61,31 @@ function truncateText(text: string, maxWidthPx: number, font: FontSpec): string 
     return (lo > 0 ? text.slice(0, lo).trimEnd() : text.charAt(0)) + ellipsis;
 }
 
-/** データラベルを棒の外に置いたときの、文字の下の色（ビジュアルの背景） */
-const CHART_BACKGROUND = "#FFFFFF";
 
 /**
  * データラベルの自動の文字色。文字のすぐ下の色で決める：背景を出すなら背景（透過性があれば下の色と混ぜた色）、
- * 出さないなら置いた場所の色（棒の中は棒の色）。背景を出さずに棒の外に置いた文字は濃い灰色。
- * 1.30 までは背景を出すと濃い灰色に固定していて、濃い背景に濃い文字が載った
+ * 出さないなら置いた場所の色（棒の中は棒の色、外はビジュアルの背景）。棒の中は白、外は灰色を優先し、
+ * 読めなければ白か濃い灰色の読めるほう（shared/color.ts の autoLabelColor）。
+ * ハイコントラストでは、前景色で塗った棒の中だけ背景色、それ以外は前景色
  */
-export function labelAutoColor(inside: boolean, barColor: string, dl: Pick<DataLabelsSettings, "backgroundShow" | "backgroundColor" | "backgroundTransparency">): string {
-    if (!dl.backgroundShow && !inside) return "#252423";
-    const underneath = inside ? barColor : CHART_BACKGROUND;
+export function labelAutoColor(
+    inside: boolean,
+    barColor: string,
+    dl: Pick<DataLabelsSettings, "backgroundShow" | "backgroundColor" | "backgroundTransparency">,
+    hc?: HighContrastColors | null,
+    chartBackground = "#FFFFFF"
+): string {
+    if (hc) return inside && !dl.backgroundShow && sameColor(barColor, hc.foreground) ? hc.background : hc.foreground;
+    const underneath = inside ? barColor : chartBackground;
     const base = dl.backgroundShow ? blend(dl.backgroundColor, underneath, dl.backgroundTransparency / 100) : underneath;
-    return contrastingText(base);
+    return autoLabelColor(inside, base);
 }
 
 /** 斜めのカテゴリ名を、棒の下端から離す間隔 (px) */
 const ROTATED_LABEL_GAP = 8;
+/** 前後に点の無い折れ線の 1 点に置く点の半径の下限 (px)。線が細くても見える大きさにする */
+const LONE_POINT_MIN_RADIUS = 3;
+
 /** 階層の「帯」：隣の帯とのすき間の半分と、角の丸み (px) */
 const LEVEL_BAND_OPACITY = 0.12;
 /** 選んだ区切りの帯の濃さ */
@@ -84,6 +102,10 @@ const CATEGORY_LABEL_LEFT_SAFE_MARGIN = 20;
 
 /** ハイライトで該当しない部分（棒全体）の不透明度の係数 */
 const HIGHLIGHT_DIM_FACTOR = 0.35;
+/** 累計の切り替えボタンをオンにしたときの色（枠・文字。塗りはこれを薄くしたもの） */
+const TOOLBAR_ACCENT = "#605E5C";
+/** ハイコントラストで選んだ棒を囲む線の幅 (px) */
+const HC_SELECTED_WIDTH = 3;
 
 
 interface DataLabelLine extends LabelLine {
@@ -141,7 +163,7 @@ function labelClassOf(line: DataLabelLine): string {
 }
 
 /**
- * データラベルの行の文字の見た目。色が空なら autoColor（棒の色に合わせた白か黒）。
+ * データラベルの行の文字の見た目。色が空なら autoColor（棒の中は白か濃い灰色、外は灰色。labelAutoColor）。
  * 「符号の色」は棒の外か背景を付けたラベルだけに効かせる（toneHere）。棒の中の文字を棒と別の色にすると読めなくなるので、
  * 中は今までどおり読める色（標準も棒の中のラベルは白）
  */
@@ -152,11 +174,7 @@ function labelTextStyle(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoin
         fill,
         ...(own && own.transparency > 0 ? { fillOpacity: 1 - own.transparency / 100 } : {}),
         ...(!own && dl.transparency > 0 ? { fillOpacity: 1 - dl.transparency / 100 } : {}),
-        fontSize: `${line.font.size / PT_TO_PX}pt`,
-        fontFamily: line.font.family,
-        fontWeight: line.font.bold ? "bold" : "normal",
-        fontStyle: line.font.italic ? "italic" : "normal",
-        ...(line.font.underline ? { textDecoration: "underline" } : {}),
+        ...fontStyleOf({ ...line.font, size: line.font.size / PT_TO_PX }),
         // 文字の縁。文字と縁の色が同じなら付けない（棒の中の自動の白い文字に白い縁を付けると、文字が太るだけ）
         ...haloStyle(dl.halo, fill),
     };
@@ -171,52 +189,12 @@ function labelTextStyle(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoin
  * length は描く範囲の長さ（px）、need は隣り合う目盛りの間に要る長さ（縦の軸は文字の行の高さ、横の軸はいちばん長い数字＋余白）
  */
 export function fitTicks(ticksFor: (count: number) => Tick[], target: number, length: number, need: (ticks: Tick[]) => number): Tick[] {
-    for (let count = target; count > 2; count--) {
-        const ticks = ticksFor(count);
-        if (ticks.length < 2) return ticks;
-        const gap = Math.min(...ticks.slice(1).map((tick, i) => Math.abs(tick.ratio - ticks[i].ratio))) * length;
-        if (gap >= need(ticks)) return ticks;
-    }
-    return ticksFor(2);
+    return fitTicksBy(ticksFor, target, (ticks) => Math.min(...ticks.slice(1).map((tick, i) => Math.abs(tick.ratio - ticks[i].ratio))) * length, need);
 }
 
 export { recommendedTickCount };
 
-/**
- * グリッド線の線種。標準に合わせ、点線は細かい点（長さ 1 の線に丸い端）、破線は 4px 刻み。
- * crispEdges は掛けない（標準と同じ）。画面の拡大率が整数でない（150% など）と、1px の線が
- * 物理画素 1.5 個ぶんになり、crispEdges では線ごとに 1 個か 2 個に丸められて太さがそろわない（1.29.4.0 まで）
- */
-export function gridLineStroke(style: string, width = 1, scaleWithWidth = false, custom?: CustomDash): {
-    dashArray?: string;
-    lineCap?: "round" | "square" | "butt";
-    shapeRendering: "crispEdges" | "auto";
-} {
-    // 模様は gridDashOf（「幅で拡大縮小」がオンなら線の幅に比例、オフなら幅によらず同じ模様）。点線は丸い端で細かい点にする。
-    // カスタムは、ダッシュ配列の模様とダッシュ キャップの端（模様が読めなければ実線）
-    const dashArray = gridDashOf(style, width, scaleWithWidth, custom);
-    if (!dashArray) return { shapeRendering: "auto" };
-    if (style === CUSTOM_LINE_STYLE) return { dashArray, lineCap: lineCapOf(style, custom), shapeRendering: "auto" };
-    return style === "dotted" ? { dashArray, lineCap: "round", shapeRendering: "auto" } : { dashArray, shapeRendering: "auto" };
-}
 
-/**
- * 折れ線の模様（stroke-dasharray）と端の形。破線・点線は線の幅に比例させる（「幅で拡大縮小」をオフにすると幅 1 のときの模様）。
- * カスタムはダッシュ配列の模様とダッシュ キャップの端（模様が読めなければ実線）
- */
-export function lineStrokeOf(
-    line: { lineStyle: string; dashArray: string; dashCap: string; scaleWithWidth: boolean },
-    width: number
-): { dashArray?: string; lineCap: "round" | "square" | "butt" } {
-    const w = line.scaleWithWidth ? width : 1;
-    if (line.lineStyle === "dashed") return { dashArray: `${w * 3} ${w * 2}`, lineCap: "butt" };
-    if (line.lineStyle === "dotted") return { dashArray: `${w * 0.1} ${w * 2}`, lineCap: "round" };
-    if (line.lineStyle === CUSTOM_LINE_STYLE) {
-        const custom = { dashArray: line.dashArray, dashCap: line.dashCap };
-        return { dashArray: customDashOf(line.dashArray, width, line.scaleWithWidth) ?? undefined, lineCap: lineCapOf(line.lineStyle, custom) };
-    }
-    return { lineCap: "butt" };
-}
 
 /**
  * 積み上げで下に別の棒がある棒の始まりの側を、系列間のスペース（px）だけ縮める（標準と同じく、値の端の位置は動かさない）。
@@ -228,121 +206,26 @@ export function insetSpan(lo: number, size: number, startAtLo: boolean, inset: n
 }
 
 /**
- * 棒を描く順（後に描いた棒が手前）。凡例の順のまま。重複を反転するときだけ逆にして、凡例の最初の系列を手前にする
+ * 棒を描く順（後に描いた棒が手前）。凡例の順（系列を並べ替えたら並べ替えた順）。重複を反転するときだけ逆にして、凡例の最初の系列を手前にする。
+ * 返す番号は系列の番号（位置ではない）
  */
-function drawOrderOf(points: DataPoint[], reverse: boolean): Array<[DataPoint, number]> {
-    const list = points.map((d, s) => [d, s] as [DataPoint, number]);
+function drawOrderOf(points: DataPoint[], reverse: boolean, positions: number[]): Array<[DataPoint, number]> {
+    const list = points.map((d, s) => [d, s] as [DataPoint, number]).sort(([, a], [, b]) => (positions[a] ?? a) - (positions[b] ?? b));
     return reverse ? list.reverse() : list;
 }
 
-/** 棒 (または棒のハイライト部分) の path。r > 0 なら値の向きの端だけ角を丸める */
+/** 棒 (または棒のハイライト部分) の path。r > 0 なら値の向きの端（上か下）だけ角を丸める */
 function barPathOf(left: number, top: number, width: number, height: number, r: number, roundAtTop: boolean): string {
-    if (r <= 0) {
-        return `M ${left},${top} h ${width} v ${height} h ${-width} Z`;
-    }
-    if (roundAtTop) {
-        return `M ${left},${top + height} ` +
-            `L ${left},${top + r} ` +
-            `Q ${left},${top} ${left + r},${top} ` +
-            `L ${left + width - r},${top} ` +
-            `Q ${left + width},${top} ${left + width},${top + r} ` +
-            `L ${left + width},${top + height} Z`;
-    }
-    return `M ${left},${top} ` +
-        `L ${left + width},${top} ` +
-        `L ${left + width},${top + height - r} ` +
-        `Q ${left + width},${top + height} ${left + width - r},${top + height} ` +
-        `L ${left + r},${top + height} ` +
-        `Q ${left},${top + height} ${left},${top + height - r} Z`;
+    return valueEndBarPath(left, top, width, height, r, roundAtTop ? "top" : "bottom");
 }
 
 /** 横棒 (または横棒のハイライト部分) の path。r > 0 なら値の向きの端（右か左）だけ角を丸める */
 function hBarPathOf(left: number, top: number, width: number, height: number, r: number, roundAtRight: boolean): string {
-    if (r <= 0) {
-        return `M ${left},${top} h ${width} v ${height} h ${-width} Z`;
-    }
-    if (roundAtRight) {
-        return `M ${left},${top} ` +
-            `L ${left + width - r},${top} ` +
-            `Q ${left + width},${top} ${left + width},${top + r} ` +
-            `L ${left + width},${top + height - r} ` +
-            `Q ${left + width},${top + height} ${left + width - r},${top + height} ` +
-            `L ${left},${top + height} Z`;
-    }
-    return `M ${left + width},${top} ` +
-        `L ${left + r},${top} ` +
-        `Q ${left},${top} ${left},${top + r} ` +
-        `L ${left},${top + height - r} ` +
-        `Q ${left},${top + height} ${left + r},${top + height} ` +
-        `L ${left + width},${top + height} Z`;
+    return valueEndBarPath(left, top, width, height, r, roundAtRight ? "right" : "left");
 }
 
-/**
- * X 軸の定数線のラベルの置き場所（標準の「水平方向の位置」「縦位置」）。
- * 縦棒（線は縦）：side は線の左右、end はプロットの上下の端。入らない側なら反対へ。avoid なら、ぶつかるラベルを端から内へ 1 段ずつずらす。
- * 横棒（線は横）：side は線の左端・右端、end は線の上・下。入らない側なら反対へ。avoid なら、上下が近くてぶつかるラベルを端から内へずらす。
- * at は線のカテゴリの方向の座標、clamp はその範囲、span は値の方向の範囲 [始め, 終わり]
- */
-export function placeCategoryLineLabels(
-    items: Array<{ label: string; at: number }>,
-    horizontal: boolean,
-    clamp: [number, number],
-    span: [number, number],
-    fontPx: number,
-    widthOf: (text: string) => number,
-    avoid: boolean,
-    side: "left" | "right" = "right",
-    end: "top" | "bottom" = "top"
-): Array<{ x: number; y: number; anchor: "start" | "end" }> {
-    const GAP = 3;
-    const rowHeight = fontPx * 1.25;
-    const order = items.map((_, k) => k).sort((a, b) => items[a].at - items[b].at);
-    const out = new Array<{ x: number; y: number; anchor: "start" | "end" }>(items.length);
-    if (!horizontal) {
-        const rows: Array<Array<[number, number]>> = [];
-        for (const k of order) {
-            const { label, at } = items[k];
-            const width = widthOf(label);
-            const fitsRight = at + GAP + width <= clamp[1];
-            const fitsLeft = at - GAP - width >= clamp[0];
-            const toLeft = side === "left" ? fitsLeft || !fitsRight : !fitsRight && fitsLeft;
-            const left = toLeft ? at - GAP - width : at + GAP;
-            const range: [number, number] = [left, left + width];
-            let row = 0;
-            if (avoid) {
-                while (rows[row]?.some(([a, b]) => range[0] < b + GAP && a < range[1] + GAP)) row++;
-            }
-            (rows[row] ??= []).push(range);
-            out[k] = {
-                x: toLeft ? at - GAP : at + GAP,
-                y: end === "top" ? span[0] + fontPx + row * rowHeight : span[1] - GAP - row * rowHeight,
-                anchor: toLeft ? "end" : "start",
-            };
-        }
-        return out;
-    }
-    const placedBoxes: Array<{ top: number; bottom: number; from: number; to: number }> = [];
-    for (const k of order) {
-        const { label, at } = items[k];
-        const width = widthOf(label);
-        // 線の上か下。入らない側（プロットの上下の端の線）なら反対へ
-        const aboveFits = at - GAP - fontPx >= clamp[0];
-        const belowFits = at + GAP + fontPx <= clamp[1];
-        const below = end === "bottom" ? belowFits || !aboveFits : !aboveFits;
-        const top = below ? at + GAP : at - GAP - fontPx;
-        const bottom = top + fontPx;
-        // 線の右端なら右から左へ、左端なら左から右へ。ぶつかる前のラベルがあれば、その先へ
-        let from = side === "right" ? span[1] - GAP : span[0] + GAP;
-        if (avoid) {
-            for (const box of placedBoxes) {
-                if (top < box.bottom + 1 && box.top < bottom + 1) from = side === "right" ? Math.min(from, box.to - GAP * 2) : Math.max(from, box.to + GAP * 2);
-            }
-        }
-        placedBoxes.push({ top, bottom, from, to: side === "right" ? from - width : from + width });
-        out[k] = { x: from, y: bottom, anchor: side === "right" ? "end" : "start" };
-    }
-    return out;
-}
+/** 定数線のラベルの置き場所（作りは shared/referenceLine.ts の placeReferenceLabels） */
+export const placeCategoryLineLabels = placeReferenceLabels;
 
 export interface AppProps {
     viewModel: ViewModel;
@@ -376,6 +259,8 @@ export interface AppProps {
     onChangeCumulativeReset?: (reset: string) => void;
     /** 操作を受け付けるか（ダッシュボードのタイルでは false）。false なら切り替えボタンを出さない */
     interactive?: boolean;
+    /** レポートを編集中か（Desktop・Web の編集）。閲覧中（Web の閲覧）は空のときの案内を出さず、標準と同じく何も描かない */
+    editing?: boolean;
     /** 画像のコピーのボタンの右クリックで、ブラウザーのメニュー（「画像をコピー」）を出すか（Desktop では出ないので false） */
     browserMenu?: boolean;
     /** 凡例で選んだ比較レイヤー（compareLayers の添字）。空ならすべて描く */
@@ -425,12 +310,19 @@ export const App: React.FC<AppProps> = ({
     onToggleCumulative,
     onChangeCumulativeReset,
     interactive = true,
+    editing = true,
     browserMenu = false,
     visibleLayers = NO_LAYERS,
     onSelectLayer,
     onPlotHeight,
 }) => {
     const [hoveredKey, setHoveredKey] = React.useState<string | null>(null);
+    // 凡例が入りきらないときに出しているページ。凡例の項目が変わったら最初のページに戻す
+    // （描いたあとで戻すと、前のページで 1 回描いてしまうので、項目の並びと一緒に持って描くときに比べる）
+    const legendKey = JSON.stringify(viewModel.legendEntries.map((e) => e.name));
+    const [legendPageState, setLegendPageState] = React.useState({ key: legendKey, page: 0 });
+    const legendPage = legendPageState.key === legendKey ? legendPageState.page : 0;
+    const setLegendPage = (page: number) => setLegendPageState({ key: legendKey, page });
     // 縦棒の描画で決まった値の軸の高さ。描いたあとに visual.ts へ知らせる（横棒・空のときは 0）
     const plotHeightRef = React.useRef(0);
     plotHeightRef.current = 0;
@@ -453,6 +345,20 @@ export const App: React.FC<AppProps> = ({
     });
 
     if (viewModel.isEmpty) {
+        // 何も描かなくても、背景のクリック（選択を外す）と右クリック（Power BI のメニュー）は効かせる。
+        // フィールドを入れる前の案内は、編集中だけ出す（閲覧中は標準と同じく何も描かない）
+        if (viewModel.noData || !editing)
+            return (
+                <div
+                    className="unit-bar-empty"
+                    style={{ width: viewport.width, height: viewport.height }}
+                    onClick={() => onClearSelection?.()}
+                    onContextMenu={(e) => {
+                        e.preventDefault();
+                        onContextMenu(null as unknown as ISelectionId, e.clientX, e.clientY);
+                    }}
+                />
+            );
         return (
             <div className="unit-bar-landing">
                 <p>カテゴリと値をフィールドに配置してください</p>
@@ -471,20 +377,27 @@ export const App: React.FC<AppProps> = ({
     const shownLayers = layered ? (layerFilterOn ? pickedLayers : viewModel.compareLayers.map((_, l) => l)) : [0];
     /** 系列の棒 1 本ぶんの幅に、描くレイヤーを並べる。キーはレイヤーの番号 */
     const layerDrawsFor = (slotWidth: number): Map<number, LayerDraw> => {
-        const lay = layerLayout(slotWidth, shownLayers.length, viewModel.compare.overlap, viewModel.compare.rightFront);
+        // メジャーごとに並べるときは、集合の系列と同じく「系列間のスペース」を空けて並べる（最初のメジャーが左。横棒は上）
+        const lay = viewModel.measureGroups
+            ? (({ barWidth, offsets }) => ({ width: barWidth, offsets }))(clusterLayout(slotWidth, shownLayers.length, viewModel.columns.seriesSpacing, 0))
+            : layerLayout(slotWidth, shownLayers.length, viewModel.compare.overlap, viewModel.compare.rightFront);
         return new Map(
             shownLayers.map((l, k): [number, LayerDraw] => [
                 l,
                 {
                     width: lay.width,
                     offset: lay.offsets[k],
-                    opacity: layerFilterOn ? 1 : layerOpacity(l, layerCount, viewModel.compare.backOpacity),
+                    opacity: layerFilterOn || viewModel.measureGroups ? 1 : layerOpacity(l, layerCount, viewModel.compare.backOpacity),
                     outline: layered && viewModel.compare.outline,
-                    label: k === 0,
+                    // メジャーごとに並べたときは、どの棒にもデータ ラベルを出す（比較では手前の棒だけ）
+                    label: k === 0 || !!viewModel.measureGroups,
                 },
             ])
         );
     };
+
+    /** l 枚目のレイヤーの積み上げの合計を持つカテゴリ（メジャーごとに並べたとき、合計ラベルをレイヤーごとに出す） */
+    const withLayerTotals = (g: CategoryGroup, l: number): CategoryGroup => (l === 0 ? g : { ...g, totals: g.layerTotals?.[l - 1] ?? null });
 
     // 閲覧者向けの累計の切り替え。出すぶんだけ上を空け、凡例とグラフはその下に描く
     const toolbarOn = viewModel.cumulative.toggle && interactive;
@@ -497,13 +410,14 @@ export const App: React.FC<AppProps> = ({
             // 比較レイヤーは系列・折れ線と別のまとまりにして、見出し「比較」を付ける
             entries: viewModel.legendEntries.map((e) => ({ name: e.name, color: e.color, kind: e.kind, group: e.kind === "layer" ? 1 : 0 })),
             title: lg.title,
-            // 凡例のタイトルをオフにしたら、「比較」の見出しも出さない（段は分けたまま）
+            // 凡例のタイトルをオフにしたら、「比較」の見出しも出さない（見出しの代わりに間を広げる）
             groupTitles: lg.titleShow ? { 1: "比較" } : undefined,
             font: { family: lg.fontFamily, size: legendFontPx, bold: lg.bold, italic: lg.italic, underline: lg.underline },
             position: lg.position,
             width: viewport.width,
             height: bodyHeight,
             horizontal: viewModel.orientation === "horizontal",
+            page: legendPage,
         })
         : null;
 
@@ -569,18 +483,9 @@ export const App: React.FC<AppProps> = ({
             <g
                 key={`rank-${run.start}`}
                 className="pareto-rank"
-                role="button"
-                tabIndex={0}
-                aria-label={full}
-                aria-pressed={picked}
+                {...keysOf({ label: full, onSelect: select, onClear: onClearSelection, pressed: picked })}
                 style={{ cursor: "pointer" }}
                 onClick={(e) => {
-                    e.stopPropagation();
-                    select(e.ctrlKey || e.metaKey);
-                }}
-                onKeyDown={(e) => {
-                    if (e.key !== "Enter" && e.key !== " ") return;
-                    e.preventDefault();
                     e.stopPropagation();
                     select(e.ctrlKey || e.metaKey);
                 }}
@@ -612,12 +517,31 @@ export const App: React.FC<AppProps> = ({
      * 階層の区切り（start〜end のカテゴリ）の棒の ID。系列があれば系列ごとの棒の ID（カテゴリ＋系列）、「その他」はまとめたカテゴリ全部。
      * カテゴリだけの ID にすると、系列があるとき棒の ID と一致せず選んだ棒が薄くなる（棒と同じ ID で選ぶ）
      */
-    const levelIdsOf = (run: { start: number; end: number }) =>
-        viewModel.categoryGroups.slice(run.start, run.end + 1).flatMap((g) => g.points.flatMap((d) => d.selectionIds ?? [d.selectionId]));
+    const levelIdsOf = (run: { start: number; end: number }) => {
+        const groups = viewModel.categoryGroups.slice(run.start, run.end + 1);
+        if (viewModel.lineOnly) return lineIdsAt(groups);
+        return groups.flatMap((g) => g.points.flatMap((d) => d.selectionIds ?? [d.selectionId]));
+    };
+    /**
+     * 折れ線だけのときは棒が無い（置いてある見えない棒の ID は線の点と一致せず、選ぶと線が全部薄くなる）。
+     * 区切りのカテゴリにある線の点の ID で選ぶ
+     */
+    const lineIdsAt = (groups: CategoryGroup[]) => {
+        const rows = new Set(groups.map((g) => g.rowIndex));
+        return viewModel.lines.flatMap((line) =>
+            line.points.filter((p) => rows.has(p.rowIndex) && p.value !== null).flatMap((p) => p.selectionIds ?? [p.selectionId])
+        );
+    };
     /** 区切りの棒が全部選ばれているか（区切りを押したときも、棒を Ctrl で全部選んだときも） */
     const levelPicked = (run: { start: number; end: number }) => {
-        const points = viewModel.categoryGroups.slice(run.start, run.end + 1).flatMap((g) => g.points);
-        return selectedIds.length > 0 && points.length > 0 && points.every(isPicked);
+        if (selectedIds.length === 0) return false;
+        const groups = viewModel.categoryGroups.slice(run.start, run.end + 1);
+        if (viewModel.lineOnly) {
+            const ids = lineIdsAt(groups);
+            return ids.length > 0 && ids.every((id) => selectedIds.some((s) => s.equals(id)));
+        }
+        const points = groups.flatMap((g) => g.points);
+        return points.length > 0 && points.every(isPicked);
     };
 
     /**
@@ -638,21 +562,11 @@ export const App: React.FC<AppProps> = ({
             <g
                 key={key}
                 className="level-hit"
-                role="button"
-                tabIndex={0}
-                aria-label={path}
-                aria-pressed={levelPicked(run)}
+                {...keysOf({ label: path, onSelect: select, onClear: onClearSelection, pressed: levelPicked(run) })}
                 style={{ cursor: "pointer" }}
                 onClick={(e) => {
                     e.stopPropagation();
                     select(e.ctrlKey || e.metaKey);
-                }}
-                onKeyDown={(e) => {
-                    if (e.key !== "Enter" && e.key !== " ") return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    // 押しっぱなしのキーの繰り返しでは選び直さない（選ぶ・外すが繰り返される）
-                    if (!e.repeat) select(e.ctrlKey || e.metaKey);
                 }}
             >
                 <title>{path}</title>
@@ -660,6 +574,46 @@ export const App: React.FC<AppProps> = ({
             </g>
         );
     };
+
+    /**
+     * カテゴリのラベルの当たり（標準と同じく、ラベルを押すとそのカテゴリの棒をまとめて選ぶ。Ctrl で足す、Enter・Space も）。
+     * i は表示の順のカテゴリの番号、name は読み上げの名前（上のレベルからつないだ名前）。ラベルを包む g に付ける
+     */
+    const categoryLabelHit = (i: number, name: string) => {
+        const run = { start: i, end: i };
+        const select = (multi: boolean) => onSelectMany?.(levelIdsOf(run), multi);
+        return {
+            className: "level-hit category-label-hit",
+            ...keysOf({ label: name, onSelect: select, onClear: onClearSelection, pressed: levelPicked(run) }),
+            style: { cursor: "pointer" },
+            onClick: (e: React.MouseEvent) => {
+                e.stopPropagation();
+                select(e.ctrlKey || e.metaKey);
+            },
+        };
+    };
+
+    /**
+     * 縦棒のカテゴリのラベルを当たりで包む。ラベルを出さない（欄に入らない）ときと、カテゴリを入れていないときは包まない
+     * （見えない・名前の無いボタンに Tab で止まらないように）
+     */
+    const withCategoryLabelHit = (i: number, name: string, label: React.ReactNode) => {
+        if (label === null || label === undefined || label === false) return null;
+        if (viewModel.noCategory) return label;
+        return <g {...categoryLabelHit(i, name)}>{label}</g>;
+    };
+
+    /**
+     * キーボードで選べる部品の属性。操作できない場所（ダッシュボードのタイルなど）では Tab で止めず、名前だけ付ける
+     */
+    const keysOf = (options: Parameters<typeof selectKeyProps>[0]) => (interactive ? selectKeyProps(options) : { "aria-label": options.label });
+
+    /**
+     * 透かして描いた棒の見た目の色（背景と混ざった色）。棒の中のラベルの自動の文字色を、見えている色で決める
+     * （透過性や比較レイヤーの奥で薄くなった棒の上に白い文字を置かない）
+     */
+    const seenColorOf = (color: string, opacity: number) =>
+        viewModel.highContrast || opacity >= 1 ? color : blend(color, viewModel.background ?? "#FFFFFF", 1 - opacity);
 
     /** 折れ線が選ばれているか（凡例で線ごと、または線の点） */
     const isLinePicked = (lineIndex: number): boolean => {
@@ -675,6 +629,93 @@ export const App: React.FC<AppProps> = ({
             : entry.kind === "line"
             ? isLinePicked(entry.index)
             : viewModel.dataPoints.some((d) => d.seriesIndex === entry.index && isPicked(d)));
+
+    /**
+     * 折れ線のデータ ラベル。点の上か下（横棒では右か左）に値を置く。自動は上（右）で、プロットに入らないか先に描いたラベルと重なれば反対の側。
+     * boxes に、先に描いたラベル（棒のデータ ラベル・合計ラベル・前の線のラベル）の枠があれば、重なるラベルは描かない。
+     * bounds は値の軸の向きのプロットの端（縦棒は上端・下端の y、横棒は左端・右端の x）
+     */
+    const renderLineLabels = (
+        line: LineSeriesInfo,
+        j: number,
+        posOf: (i: number) => number,
+        valueOf: (ratio: number) => number,
+        horizontal: boolean,
+        bounds: [number, number],
+        boxes: Array<{ x0: number; x1: number; y0: number; y1: number }>
+    ) => {
+        const labels = line.labels;
+        if (!labels) return null;
+        // 線ごとに変えた設定（保存の無い項目は「すべて」の値）
+        const dl = labels.settings;
+        const fontPx = dl.fontSize * PT_TO_PX;
+        const font: FontSpec = { family: dl.fontFamily, size: fontPx, bold: dl.bold, italic: dl.italic, underline: dl.underline };
+        const fill = labels.color || line.color;
+        // 点（マーカー）から離す間。マーカーが大きければその半径の外へ
+        const markerRadius = line.marker?.show ? (line.marker.size ?? 5) / 2 : line.width / 2;
+        const gap = Math.max(4, markerRadius + 3);
+        const texts = line.points.map((p, i) => {
+            const text = labels.texts[i];
+            if (text === null || text === undefined || p.ratio === null) return null;
+            const pos = posOf(i);
+            const val = valueOf(p.ratio);
+            const width = measureTextWidth(text, font);
+            // 置き方の候補。上（横棒は右）なら first=true。自動は入る側を先に、重なったら反対の側を試す
+            const placementOf = (first: boolean) => {
+                if (horizontal) {
+                    // 横棒では値の軸が横。「上」は右、「下」は左
+                    const x = first ? val + gap : val - gap;
+                    const box = first ? { x0: x, x1: x + width, y0: pos - fontPx / 2, y1: pos + fontPx / 2 } : { x0: x - width, x1: x, y0: pos - fontPx / 2, y1: pos + fontPx / 2 };
+                    return { x, y: pos + fontPx * 0.35, anchor: (first ? "start" : "end") as "start" | "end" | "middle", box, inside: first ? box.x1 <= bounds[1] : box.x0 >= bounds[0] };
+                }
+                const box = { x0: pos - width / 2, x1: pos + width / 2, y0: first ? val - gap - fontPx : val + gap, y1: first ? val - gap : val + gap + fontPx };
+                return { x: pos, y: first ? val - gap - fontPx * 0.2 : val + gap + fontPx * 0.8, anchor: "middle" as "start" | "end" | "middle", box, inside: first ? box.y0 >= bounds[0] : box.y1 <= bounds[1] };
+            };
+            const overlaps = (box: { x0: number; x1: number; y0: number; y1: number }) =>
+                boxes.some((b) => b.x0 < box.x1 - 1 && box.x0 < b.x1 - 1 && b.y0 < box.y1 - 1 && box.y0 < b.y1 - 1);
+            const candidates =
+                labels.position === "above" ? [placementOf(true)] : labels.position === "below" ? [placementOf(false)] : [placementOf(true), placementOf(false)];
+            if (labels.position === "auto" && !candidates[0].inside) candidates.reverse();
+            // 自動ではプロットからはみ出す側には置かない（切れて読めなくなる）。どちらの側も入らないか重なれば描かない
+            const chosen = candidates.find((c) => !overlaps(c.box) && (labels.position !== "auto" || c.inside));
+            if (!chosen) return null;
+            const { x, y, anchor, box } = chosen;
+            boxes.push(box);
+            // 背景は棒のラベルと同じく「背景」がオンのとき。棒の上で読みにくければ、線ごとに「文字の縁」を付ける
+            return [
+                dl.backgroundShow && (
+                    <rect
+                        key={`line-label-bg-${j}-${i}`}
+                        className="line-data-label-bg"
+                        x={box.x0 - 2}
+                        y={box.y0 - 1}
+                        width={box.x1 - box.x0 + 4}
+                        height={box.y1 - box.y0 + 2}
+                        rx={2}
+                        pointerEvents="none"
+                        style={{ fill: dl.backgroundColor, fillOpacity: 1 - dl.backgroundTransparency / 100 }}
+                    />
+                ),
+                <text
+                    key={`line-label-${j}-${i}`}
+                    className="line-data-label"
+                    x={x}
+                    y={y}
+                    textAnchor={anchor}
+                    pointerEvents="none"
+                    style={{
+                        fill,
+                        ...(dl.transparency > 0 ? { fillOpacity: 1 - dl.transparency / 100 } : {}),
+                        ...fontStyleOf(fontOf(dl)),
+                        ...haloStyle(dl.halo, fill),
+                    }}
+                >
+                    {text}
+                </text>,
+            ];
+        });
+        return <g key={`line-labels-${j}`} className="line-data-labels">{texts}</g>;
+    };
 
     /**
      * 折れ線 1 本。点はカテゴリの中心に置き、値の無いカテゴリでは線を切る。
@@ -693,6 +734,8 @@ export const App: React.FC<AppProps> = ({
         stepBounds: [number, number],
         barBand: number
     ) => {
+        // 空白の前後をつなぐか（「線」カードの「空白の値」）。ビジュアルが計算した線（パレートの累積比）は対象外
+        const connectBlanks = viewModel.lineBlanks === LINE_BLANKS.connect && line.selectable !== false;
         const pts = line.points.map((p, i) => {
             const pos = posOf(i);
             const val = p.ratio === null ? null : valueOf(p.ratio);
@@ -709,6 +752,8 @@ export const App: React.FC<AppProps> = ({
                 run = [];
             }
             if (pt.at === null) {
+                // 前後をつなぐなら、空白を飛ばして同じ並びに続ける
+                if (connectBlanks) continue;
                 if (run.length) runs.push(run);
                 run = [];
                 continue;
@@ -724,7 +769,10 @@ export const App: React.FC<AppProps> = ({
             stepConnect: line.stepConnect,
             stepLevelWidth: line.stepWidth === STEP_WIDTHS.bar ? barBand : 0,
         };
-        const path = runs.map((r) => linePath(r, shape, horizontal, stepExtension, stepBounds)).join(" ");
+        const runPaths = runs.map((r) => linePath(r, shape, horizontal, stepExtension, stepBounds));
+        const path = runPaths.join(" ");
+        // 前後に点の無い 1 点は、線が長さ 0 になって見えない。マーカーを出していなくても、線の色の点を置く（標準と同じ）
+        const lonePoints = runs.filter((r, k) => r.length === 1 && !/[LCQ]/.test(runPaths[k])).map((r) => r[0]);
         const dimmed = !viewModel.hasHighlights && selectedIds.length > 0 && !isLinePicked(j);
         const opacity = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
         const stroke = lineStrokeOf(line, line.width);
@@ -769,6 +817,20 @@ export const App: React.FC<AppProps> = ({
                         pointerEvents="none"
                     />
                 )}
+                {line.lineShow &&
+                    !mk.show &&
+                    lonePoints.map((at, k) => (
+                        <circle
+                            key={`lone-${j}-${k}`}
+                            cx={at.x}
+                            cy={at.y}
+                            r={Math.max(LONE_POINT_MIN_RADIUS, line.width)}
+                            className="line-lone-point"
+                            fill={line.color}
+                            fillOpacity={lineOpacity}
+                            pointerEvents="none"
+                        />
+                    ))}
                 {pts.map((pt) =>
                     pt.at === null ? null : (
                         <g key={`pt-${j}-${pt.i}`}>
@@ -917,11 +979,7 @@ export const App: React.FC<AppProps> = ({
                 textAnchor="start"
                 pointerEvents="visiblePainted"
                 style={{
-                    fontSize: `${viewModel.categoryAxis.fontSize}pt`,
-                    fontFamily: font.family,
-                    fontWeight: font.bold ? "bold" : "normal",
-                    fontStyle: font.italic ? "italic" : "normal",
-                    textDecoration: font.underline ? "underline" : undefined,
+                    ...fontStyleOf({ ...font, size: viewModel.categoryAxis.fontSize }),
                     fill: viewModel.categoryAxis.labelColor,
                 }}
             >
@@ -1030,7 +1088,9 @@ export const App: React.FC<AppProps> = ({
         const minCatWidth = Math.max(0, catAxis.minCategoryWidth || 0);
         // minCategoryWidth が設定されていて、count * minCategoryWidth が viewWidth を上回る場合に横スクロール発動
         const neededWidth = minCatWidth > 0 ? Math.ceil(count * minCatWidth) : 0;
-        const scrolls = minCatWidth > 0 && neededWidth > viewWidth + 1;
+        // X 軸の種類が「連続」なら、値の間隔どおりに置く（スクロールしない。名前の代わりに目盛りを出す）
+        const continuous = viewModel.continuousAxis;
+        const scrolls = !continuous && minCatWidth > 0 && neededWidth > viewWidth + 1;
         const SCROLLBAR_HEIGHT = scrolls ? 12 : 0;
 
         // X軸タイトル高さ (タイトル領域は高さ最大値の判定外で独立確保し、重なりを防止)
@@ -1062,7 +1122,7 @@ export const App: React.FC<AppProps> = ({
         // 斜めの名前は棒の中心から左下へ伸びるので、左の端で「…」に省かれないよう、はみ出す分だけ棒の並びの前を空ける
         // （スクロールするとき・縦に立てるときは空けない）
         const leadIn = (() => {
-            if (!catAxis.show || stackedLevels || scrolls || !count) return 0;
+            if (!catAxis.show || stackedLevels || scrolls || !count || continuous) return 0;
             const step0 = plotWidth / slots;
             const widths = groups.map((g) => measureTextWidth(labelOf(g), catFont));
             if (!(Math.max(...widths) > step0 * 0.92) || step0 < catFontSizePx * 1.45) return 0;
@@ -1080,9 +1140,43 @@ export const App: React.FC<AppProps> = ({
             const keepStep = Math.max(minCatWidth, catFontSizePx * 1.45);
             return Math.max(0, Math.min(need, plotWidth * 0.3, plotWidth - keepStep * slots));
         })();
-        const step = (plotWidth - leadIn) / slots;
+        // 連続：いちばん狭い値の間隔を棒 1 本ぶんの帯にし、両端は帯の半分ずつ空ける
+        const continuousLayout = continuous ? continuousBand(continuous, plotWidth) : null;
+        const step = continuousLayout ? continuousLayout.band : (plotWidth - leadIn) / slots;
         /** i 番目のカテゴリの中心 (プロット左端からの x) */
-        const centerOf = (i: number) => leadIn + step * (outerRatio + (1 - padRatio) / 2 + i);
+        const centerOf = (i: number) =>
+            continuous && continuousLayout
+                ? continuousLayout.edge + positionOf(continuous, continuous.values[i]) * (plotWidth - 2 * continuousLayout.edge)
+                : leadIn + step * (outerRatio + (1 - padRatio) / 2 + i);
+        /**
+         * 連続の目盛り（プロット左端からの x・文字の中心 cx と文字）。端の文字はプロットの外へはみ出さないよう内側へ寄せる（線の位置 x は変えない）。
+         * 寄せたあとの文字が隣と 16px 空く本数まで減らす。2 本でも入らなければ、標準と同じく末尾を「…」で省く
+         * （2026-10-12 ユーザー「細くしたときに二つ目の日付が重なる」。前は端へ寄せた文字が重なっていた）
+         */
+        const continuousTickXs = (() => {
+            if (!continuous || !continuousLayout) return [];
+            const usable = plotWidth - 2 * continuousLayout.edge;
+            const at = (ratio: number) => continuousLayout.edge + ratio * usable;
+            const ticksOf = (max: number) => continuousTicks(continuous, max).filter((t) => t.ratio >= -1e-9 && t.ratio <= 1 + 1e-9);
+            const laid = (ticks: ReturnType<typeof ticksOf>, labelOf: (label: string) => string) =>
+                ticks.map((t) => {
+                    const label = labelOf(t.label);
+                    const width = measureTextWidth(label, catFont);
+                    const x = at(t.ratio);
+                    return { x, cx: Math.max(width / 2, Math.min(plotWidth - width / 2, x)), label, width };
+                });
+            const fits = (items: ReturnType<typeof laid>, gap: number) => items.every((t, k) => k === 0 || t.cx - t.width / 2 >= items[k - 1].cx + items[k - 1].width / 2 + gap);
+            for (let max = Math.max(2, Math.floor(plotWidth / 60)); max >= 2; max--) {
+                const items = laid(ticksOf(max), (label) => label);
+                if (fits(items, 16)) return items;
+            }
+            const ticks = ticksOf(2);
+            for (let room = Math.max(...ticks.map((t) => measureTextWidth(t.label, catFont))); room > 0; room -= 2) {
+                const items = laid(ticks, (label) => truncateToWidth(label, room, catFont));
+                if (fits(items, 4)) return items;
+            }
+            return [];
+        })();
         // カテゴリ 1 つぶんの帯に、系列の棒を並べる（系列 1 本なら帯いっぱいの 1 本）。
         // 積み上げは系列を 1 本の棒に積むので、帯いっぱいの 1 本ぶんの幅
         const stacked = viewModel.chartType !== "clustered";
@@ -1094,24 +1188,20 @@ export const App: React.FC<AppProps> = ({
             columnsSettings.overlap
         );
         const barWidth = cluster.barWidth;
-        const drawOrder = (points: DataPoint[]) => drawOrderOf(points, columnsSettings.overlapReverse);
+        const drawOrder = (points: DataPoint[]) => drawOrderOf(points, columnsSettings.overlapReverse, viewModel.seriesPositions);
         const clusterSpan = spanOf(cluster);
         // 比較レイヤー：系列の棒 1 本ぶんの幅に、レイヤーの棒を少しずつずらして重ねる。合計ラベルは手前のレイヤーの棒の上に出す
         const layerDraws = layerDrawsFor(barWidth);
         const frontTotals = !layered || shownLayers[0] === 0;
         const frontShift = layered ? layerDraws.get(shownLayers[0])!.offset : 0;
-        // 積み上げのデータラベルは棒の中に置く。外側の指定（自動・外側の上）は中央に読み替える
-        const labelPosition =
-            stacked && (viewModel.dataLabels.position === "auto" || viewModel.dataLabels.position === "outsideEnd")
-                ? "insideCenter"
-                : viewModel.dataLabels.position;
+        // 積み上げのデータラベルは棒の中に置く。外側の指定（自動・外側の上）は中央に読み替える。系列ごとに変えた位置があればそれ
+        const labelPositionOf = (d: DataPoint) => {
+            const position = (d.labelSettings ?? viewModel.dataLabels).position;
+            return stacked && (position === "auto" || position === "outsideEnd") ? "insideCenter" : position;
+        };
 
         const categoryLabelStyle: React.CSSProperties = {
-            fontSize: `${catAxis.fontSize}pt`,
-            fontFamily: catAxis.fontFamily,
-            fontWeight: catAxis.bold ? "bold" : "normal",
-            fontStyle: catAxis.italic ? "italic" : "normal",
-            textDecoration: catAxis.underline ? "underline" : undefined,
+            ...fontStyleOf(fontOf(catAxis)),
             fill: catAxis.labelColor,
         };
         const boxedLevels = stackedLevels && catAxis.hierarchyStyle === "boxed";
@@ -1129,7 +1219,7 @@ export const App: React.FC<AppProps> = ({
             fill: catAxis.labelColor,
             fillOpacity: LEVEL_BAND_OPACITY,
         };
-        const widestCat = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(labelOf(g), catFont))) : 0;
+        const widestCat = !catAxis.show ? 0 : continuous ? 0 : Math.max(0, ...groups.map((g) => measureTextWidth(labelOf(g), catFont)));
 
         // バンド幅に収まらなければ斜め -45 度に回転
         const shouldRotateCat = catAxis.show && widestCat > step * 0.92;
@@ -1199,7 +1289,7 @@ export const App: React.FC<AppProps> = ({
         const vOpacity = Math.max(0, Math.min(1, 1 - gridlines.verticalTransparency / 100));
 
         // 縦グリッド線の位置: プロットの両端と、隣り合うカテゴリの中間（「階層の区切り」なら上のレベルの区切りだけ）
-        const verticalGridXs = [
+        const verticalGridXs = continuous ? continuousTickXs.map((t) => t.x) : [
             0,
             ...categoryGridBreaks(groups.map((g) => g.levels), catAxis.levelCount, gridlines.verticalPosition === "levels", groups.map((g) => g.levelKeys)).map(
                 (i) => centerOf(i) - step / 2
@@ -1317,10 +1407,12 @@ export const App: React.FC<AppProps> = ({
             const fillOpacity = dimFactor * baseFillOpacity;
             const ownBorder = d.borderShow && !outlineOnly;
             // 比較レイヤーの輪郭線は、棒の色で濃く引く（薄い棒どうしの境目を見せる）
-            const stroke = layer?.outline ? d.color : ownBorder ? d.borderColor : "none";
+            const stroke = layer?.outline ? (viewModel.highContrast?.foreground ?? d.color) : ownBorder ? d.borderColor : "none";
             const strokeWidth = layer?.outline ? 1 : ownBorder ? d.borderWidth : 0;
             const strokeOpacity = dimFactor * (d.borderShow ? Math.max(0, Math.min(1, 1 - d.borderTransparency / 100)) : 1);
             const seriesName = viewModel.seriesMode ? viewModel.series[d.seriesIndex]?.name : undefined;
+            // ハイコントラストでは、選んだ棒を選択の色で太く囲む（薄くするだけでは見分けにくい）
+            const hcPicked = !!viewModel.highContrast && selectedIds.length > 0 && isPicked(d);
 
             return (
                 <g
@@ -1338,8 +1430,12 @@ export const App: React.FC<AppProps> = ({
                     }}
                     onMouseEnter={() => setHoveredKey(key)}
                     onMouseLeave={() => setHoveredKey(null)}
-                    role="graphics-symbol"
-                    aria-label={seriesName ? `${d.category} ${seriesName}: ${d.formattedValue}` : `${d.category}: ${d.formattedValue}`}
+                    {...keysOf({
+                        label: seriesName ? `${d.category} ${seriesName}: ${d.formattedValue}` : `${d.category}: ${d.formattedValue}`,
+                        onSelect: (multi) => (d.selectionIds ? onSelectMany?.(d.selectionIds, multi) : onSelect(d.selectionId, multi)),
+                        onClear: onClearSelection,
+                        pressed: selectedIds.length > 0 && isPicked(d),
+                    })}
                 >
                     <path
                         d={barPath}
@@ -1347,9 +1443,10 @@ export const App: React.FC<AppProps> = ({
                         style={{
                             fill: d.color,
                             fillOpacity,
-                            stroke,
-                            strokeWidth,
+                            stroke: hcPicked ? viewModel.highContrast!.selected : stroke,
+                            strokeWidth: hcPicked ? HC_SELECTED_WIDTH : strokeWidth,
                             strokeOpacity,
+                            strokeDasharray: hcPicked ? undefined : d.borderDash || undefined,
                         }}
                         onMouseEnter={(e) => onTooltipShow?.(d, e.clientX, e.clientY)}
                         onMouseMove={(e) => onTooltipMove?.(d, e.clientX, e.clientY)}
@@ -1363,7 +1460,8 @@ export const App: React.FC<AppProps> = ({
                             className="bar-highlight"
                             pointerEvents="none"
                             style={{
-                                fill: d.color,
+                                // ハイコントラストでは、背景色で塗った棒でも該当分が見えるよう選択の色で塗る
+                                fill: viewModel.highContrast?.selected ?? d.color,
                                 fillOpacity: baseFillOpacity,
                             }}
                         />
@@ -1371,7 +1469,8 @@ export const App: React.FC<AppProps> = ({
 
                     {/* データラベル。描くのは棒の後ろ（labelLayer） */}
                     {void labelLayer.push((() => {
-                        const dl = viewModel.dataLabels;
+                        // 系列ごとに変えた設定があればそれ（保存の無い項目は「すべて」の値）
+                        const dl = d.labelSettings ?? viewModel.dataLabels;
                         if (!dl.show || !d.labelShow || barH <= 0 || layer?.label === false) return null;
 
                         const lines = labelLinesOf(dl, d);
@@ -1380,7 +1479,7 @@ export const App: React.FC<AppProps> = ({
 
                         const barBottom = barTop + barH;
                         const placed = placeLabel({
-                            position: labelPosition,
+                            position: labelPositionOf(d),
                             top: barTop,
                             bottom: barBottom,
                             barWidth: bw,
@@ -1405,7 +1504,7 @@ export const App: React.FC<AppProps> = ({
                         // 先に描いたラベルと重なるラベルは出さない（標準と同じ。棒の幅より長いラベルを外に出すと隣と重なる）
                         if (labelBoxes.some((b) => b.x0 < ownBox.x1 - 1 && ownBox.x0 < b.x1 - 1 && b.y0 < ownBox.y1 - 1 && ownBox.y0 < b.y1 - 1)) return null;
                         labelBoxes.push(ownBox);
-                        const autoColor = labelAutoColor(!placed.outside, d.color, dl);
+                        const autoColor = labelAutoColor(!placed.outside, seenColorOf(d.color, baseFillOpacity), dl, viewModel.highContrast, viewModel.background);
                         const toneHere = placed.outside || dl.backgroundShow;
                         const bgOpacity = (100 - dl.backgroundTransparency) / 100;
 
@@ -1492,11 +1591,7 @@ export const App: React.FC<AppProps> = ({
                             textAnchor="middle"
                             style={{
                                 fill: tl.color,
-                                fontSize: `${tl.fontSize}pt`,
-                                fontFamily: tl.fontFamily,
-                                fontWeight: tl.bold ? "bold" : "normal",
-                                fontStyle: tl.italic ? "italic" : "normal",
-                                textDecoration: tl.underline ? "underline" : undefined,
+                                ...fontStyleOf(fontOf(tl)),
                             }}
                         >
                             {label.text}
@@ -1807,18 +1902,37 @@ export const App: React.FC<AppProps> = ({
                                           [...shownLayers].reverse().flatMap((l) => {
                                               const draw = layerDraws.get(l)!;
                                               return drawOrder(layerPointsOf(g, l)).map(([d, s]) =>
-                                                  renderBar(d, cx + (stacked ? 0 : cluster.offsets[s] ?? 0) + draw.offset, `${i}-${s}-${l}`, draw)
+                                                  renderBar(d, cx + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0) + draw.offset, `${i}-${s}-${l}`, draw)
                                               );
                                           })
-                                        : drawOrder(g.points).map(([d, s]) => renderBar(d, cx + (stacked ? 0 : cluster.offsets[s] ?? 0), `${i}-${s}`))}
+                                        : drawOrder(g.points).map(([d, s]) => renderBar(d, cx + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0), `${i}-${s}`))}
                                     {outlineOnly && !layered && renderStackOutline(g, cx)}
-                                    {frontTotals && renderTotalLabels(g, cx + frontShift)}
-                                    {catAxis.show && i % categoryLabelEvery === 0 && renderCategoryLabel(labelOf(g), cx)}
+                                    {viewModel.measureGroups
+                                        ? shownLayers.map((l) => <g key={`totals-${l}`}>{renderTotalLabels(withLayerTotals(g, l), cx + layerDraws.get(l)!.offset)}</g>)
+                                        : frontTotals && renderTotalLabels(g, cx + frontShift)}
+                                    {catAxis.show && !continuous && i % categoryLabelEvery === 0 && withCategoryLabelHit(i, g.category, renderCategoryLabel(labelOf(g), cx))}
                                 </g>
                             );
                         })}
                     </g>
                     <g className="data-labels-group">{labelLayer}</g>
+                    {/* 連続の X 軸の目盛り。棒ごとの名前の代わりに、切りのいい日付・数値に出す */}
+                    {catAxis.show && continuous && (
+                        <g className="x-continuous-ticks">
+                            {continuousTickXs.map((t, k) => (
+                                <text
+                                    key={`x-tick-${k}`}
+                                    x={xOffset + t.cx}
+                                    y={marginTop + plotHeight + catFontSizePx + 4}
+                                    className="x-category-label"
+                                    textAnchor="middle"
+                                    style={categoryLabelStyle}
+                                >
+                                    {t.label}
+                                </text>
+                            ))}
+                        </g>
+                    )}
 
                     {levelRows > 0 && renderLevelRows(xOffset)}
                     {rankBandOn && renderRankBand(xOffset)}
@@ -1830,6 +1944,18 @@ export const App: React.FC<AppProps> = ({
                             {/* 網掛け領域はすべての線の下に塗る */}
                             {viewModel.lines.map((line, j) => renderLine(line, j, xOffset, "area"))}
                             {viewModel.lines.map((line, j) => renderLine(line, j, xOffset, "line"))}
+                            {/* 線のデータ ラベル。棒のラベルと重なるものは描かない */}
+                            {viewModel.lines.map((line, j) =>
+                                renderLineLabels(
+                                    line,
+                                    j,
+                                    (i) => xOffset + centerOf(i),
+                                    (ratio) => (onAxis2(line) ? marginTop + plotHeight * (1 - Math.max(0, Math.min(1, ratio))) : yOfRatio(ratio)),
+                                    false,
+                                    [marginTop, marginTop + plotHeight],
+                                    labelBoxes
+                                )
+                            )}
                         </g>
                     )}
                     {/* X 軸の定数線。いちばん上に重ねる */}
@@ -1917,11 +2043,7 @@ export const App: React.FC<AppProps> = ({
                             dominantBaseline={isRightAxis ? "central" : undefined}
                             className="y-axis-title"
                             style={{
-                                fontSize: `${valAxis.titleFontSize}pt`,
-                                fontFamily: valAxis.titleFontFamily,
-                                fontWeight: valAxis.titleBold ? "bold" : "normal",
-                                fontStyle: valAxis.titleItalic ? "italic" : "normal",
-                                textDecoration: valAxis.titleUnderline ? "underline" : undefined,
+                                ...fontStyleOf(fontOf(valAxis, "title")),
                                 fill: valAxis.titleColor,
                             }}
                         >
@@ -1948,11 +2070,7 @@ export const App: React.FC<AppProps> = ({
                                             className="y-tick-label"
                                             textAnchor={tickTextAnchor}
                                             style={{
-                                                fontSize: `${valAxis.fontSize}pt`,
-                                                fontFamily: valAxis.fontFamily,
-                                                fontWeight: valAxis.bold ? "bold" : "normal",
-                                                fontStyle: valAxis.italic ? "italic" : "normal",
-                                                textDecoration: valAxis.underline ? "underline" : undefined,
+                                                ...fontStyleOf(fontOf(valAxis)),
                                                 fill: valAxis.labelColor,
                                             }}
                                         >
@@ -1985,11 +2103,7 @@ export const App: React.FC<AppProps> = ({
                             dominantBaseline="central"
                             className="y2-axis-title"
                             style={{
-                                fontSize: `${axis2.titleFontSize}pt`,
-                                fontFamily: axis2.titleFontFamily,
-                                fontWeight: axis2.titleBold ? "bold" : "normal",
-                                fontStyle: axis2.titleItalic ? "italic" : "normal",
-                                textDecoration: axis2.titleUnderline ? "underline" : undefined,
+                                ...fontStyleOf(fontOf(axis2, "title")),
                                 fill: axis2.titleColor,
                             }}
                         >
@@ -2025,11 +2139,7 @@ export const App: React.FC<AppProps> = ({
                                 className="y2-tick-label"
                                 textAnchor={onRight ? "start" : "end"}
                                 style={{
-                                    fontSize: `${axis2.fontSize}pt`,
-                                    fontFamily: axis2.fontFamily,
-                                    fontWeight: axis2.bold ? "bold" : "normal",
-                                    fontStyle: axis2.italic ? "italic" : "normal",
-                                    textDecoration: axis2.underline ? "underline" : undefined,
+                                    ...fontStyleOf(fontOf(axis2)),
                                     fill: axis2.labelColor,
                                 }}
                             >
@@ -2074,7 +2184,7 @@ export const App: React.FC<AppProps> = ({
                             height: `${height - SCROLLBAR_HEIGHT}px`,
                             display: "block",
                         }}
-                        role="img"
+                        role="group"
                         aria-label="単位つき棒グラフ（プロット）"
                     >
                         {renderPlot(0)}
@@ -2122,11 +2232,7 @@ export const App: React.FC<AppProps> = ({
                             className="x-axis-title"
                             {...{ [TEXT_ATTRIBUTE]: "" }}
                             style={{
-                                fontSize: `${catAxis.titleFontSize}pt`,
-                                fontFamily: catAxis.titleFontFamily,
-                                fontWeight: catAxis.titleBold ? "bold" : "normal",
-                                fontStyle: catAxis.titleItalic ? "italic" : "normal",
-                                textDecoration: catAxis.titleUnderline ? "underline" : undefined,
+                                ...fontStyleOf(fontOf(catAxis, "title")),
                                 color: catAxis.titleColor,
                                 whiteSpace: "nowrap",
                             }}
@@ -2149,7 +2255,7 @@ export const App: React.FC<AppProps> = ({
                 width={width}
                 height={height}
                 className="unit-bar-svg"
-                role="img"
+                role="group"
                 aria-label="単位つき棒グラフ"
             >
                 {/* 軸上バッジ (plotTopRight 配置の場合) */}
@@ -2172,11 +2278,7 @@ export const App: React.FC<AppProps> = ({
                         className="x-axis-title"
                         textAnchor="middle"
                         style={{
-                            fontSize: `${catAxis.titleFontSize}pt`,
-                            fontFamily: catAxis.titleFontFamily,
-                            fontWeight: catAxis.titleBold ? "bold" : "normal",
-                            fontStyle: catAxis.titleItalic ? "italic" : "normal",
-                            textDecoration: catAxis.titleUnderline ? "underline" : undefined,
+                            ...fontStyleOf(fontOf(catAxis, "title")),
                             fill: catAxis.titleColor,
                         }}
                     >
@@ -2337,7 +2439,7 @@ export const App: React.FC<AppProps> = ({
             columnsSettings.overlap
         );
         const thickness = cluster.barWidth;
-        const drawOrder = (points: DataPoint[]) => drawOrderOf(points, columnsSettings.overlapReverse);
+        const drawOrder = (points: DataPoint[]) => drawOrderOf(points, columnsSettings.overlapReverse, viewModel.seriesPositions);
         const clusterSpan = spanOf(cluster);
         // 比較レイヤー（縦棒と同じ。手前の棒は下か上の端）
         const layerDrawsX = layerDrawsFor(thickness);
@@ -2396,11 +2498,13 @@ export const App: React.FC<AppProps> = ({
         const categoryOpacity = Math.max(0, Math.min(1, 1 - gridlines.verticalTransparency / 100));
 
         const dl = viewModel.dataLabels;
+        /** 描いた棒のデータ ラベルの枠。線のデータ ラベルはこれと重なるものを描かない */
+        const hLabelBoxes: Array<{ x0: number; x1: number; y0: number; y1: number }> = [];
         // 横棒のデータラベルの位置。「自動」は集合なら外側の端、積み上げなら中央（積み上げでは外側に置かない）
-        const hLabelPosition =
-            dl.position === "auto" || (stacked && dl.position === "outsideEnd")
-                ? (stacked ? "insideCenter" : "outsideEnd")
-                : dl.position;
+        const hLabelPositionOf = (d: DataPoint) => {
+            const position = (d.labelSettings ?? dl).position;
+            return position === "auto" || (stacked && position === "outsideEnd") ? (stacked ? "insideCenter" : "outsideEnd") : position;
+        };
 
         /** 横棒の折れ線。第 2 X 軸には範囲の反転が無いので、そのまま左から右へ */
         const renderHLine = (line: LineSeriesInfo, j: number, xOffset: number, yOffset: number, part: "area" | "line") =>
@@ -2445,13 +2549,17 @@ export const App: React.FC<AppProps> = ({
             const dimFactor = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
             const baseFillOpacity = Math.max(0, Math.min(1, 1 - d.transparency / 100)) * (layer?.opacity ?? 1);
             const ownBorder = d.borderShow && !outlineOnlyX;
-            const stroke = layer?.outline ? d.color : ownBorder ? d.borderColor : "none";
+            const stroke = layer?.outline ? (viewModel.highContrast?.foreground ?? d.color) : ownBorder ? d.borderColor : "none";
             const strokeWidth = layer?.outline ? 1 : ownBorder ? d.borderWidth : 0;
             const strokeOpacity = dimFactor * (d.borderShow ? Math.max(0, Math.min(1, 1 - d.borderTransparency / 100)) : 1);
             const seriesName = viewModel.seriesMode ? viewModel.series[d.seriesIndex]?.name : undefined;
+            // ハイコントラストでは、選んだ棒を選択の色で太く囲む（縦棒と同じ）
+            const hcPicked = !!viewModel.highContrast && selectedIds.length > 0 && isPicked(d);
 
             // データラベル（横に並べる。「縦」の方向は横棒では使わない）
             const label = (() => {
+                // 系列ごとに変えた設定があればそれ（保存の無い項目は「すべて」の値）
+                const dl = d.labelSettings ?? viewModel.dataLabels;
                 if (!dl.show || !d.labelShow || w <= 0 || layer?.label === false) return null;
                 const lines = labelLinesOf(dl, d);
                 if (!lines.length) return null;
@@ -2461,6 +2569,7 @@ export const App: React.FC<AppProps> = ({
                 let x: number;
                 let anchor: "start" | "middle" | "end";
                 let inside = true;
+                const hLabelPosition = hLabelPositionOf(d);
                 if (hLabelPosition === "insideTop") {
                     // 内側の端
                     x = rightward ? right - LABEL_PADDING : left + LABEL_PADDING;
@@ -2483,7 +2592,7 @@ export const App: React.FC<AppProps> = ({
                 // 積み上げでは隣が別の棒なので、値の向きに入りきらないラベルは出さない
                 if (inside && stacked && !fitsLength) return null;
                 if (inside && !(fitsLength && fitsThickness) && !dl.overflow) return null;
-                const autoColor = labelAutoColor(inside, d.color, dl);
+                const autoColor = labelAutoColor(inside, seenColorOf(d.color, baseFillOpacity), dl, viewModel.highContrast, viewModel.background);
                 const toneHere = !inside || dl.backgroundShow;
                 const midY = top + th / 2;
                 // 背景は 1 行なら 1.10 までと同じ高さ、複数行ならまとまりの上端から下端
@@ -2493,6 +2602,7 @@ export const App: React.FC<AppProps> = ({
                 const boxX = anchor === "start" ? x - LABEL_PADDING : anchor === "end" ? x - textW - LABEL_PADDING : x - textW / 2 - LABEL_PADDING;
                 // 行はまとまりの中心から置く（左・右そろえと単一行は、行ごとに x が違う）
                 const blockCenter = boxX + LABEL_PADDING + textW / 2;
+                hLabelBoxes.push({ x0: boxX, x1: boxX + textW + LABEL_PADDING * 2, y0: bgTop, y1: bgTop + bgHeight });
                 // 中央そろえは、どの行も棒に対する同じ位置（x・anchor）で描ける（1.35 までと同じ書き方）
                 const centered = block.anchor === "middle";
                 return (
@@ -2540,19 +2650,35 @@ export const App: React.FC<AppProps> = ({
                     }}
                     onMouseEnter={() => setHoveredKey(key)}
                     onMouseLeave={() => setHoveredKey(null)}
-                    role="graphics-symbol"
-                    aria-label={seriesName ? `${d.category} ${seriesName}: ${d.formattedValue}` : `${d.category}: ${d.formattedValue}`}
+                    {...keysOf({
+                        label: seriesName ? `${d.category} ${seriesName}: ${d.formattedValue}` : `${d.category}: ${d.formattedValue}`,
+                        onSelect: (multi) => (d.selectionIds ? onSelectMany?.(d.selectionIds, multi) : onSelect(d.selectionId, multi)),
+                        onClear: onClearSelection,
+                        pressed: selectedIds.length > 0 && isPicked(d),
+                    })}
                 >
                     <path
                         d={barPath}
                         className="bar-rect"
-                        style={{ fill: d.color, fillOpacity: dimFactor * baseFillOpacity, stroke, strokeWidth, strokeOpacity }}
+                        style={{
+                            fill: d.color,
+                            fillOpacity: dimFactor * baseFillOpacity,
+                            stroke: hcPicked ? viewModel.highContrast!.selected : stroke,
+                            strokeWidth: hcPicked ? HC_SELECTED_WIDTH : strokeWidth,
+                            strokeOpacity,
+                            strokeDasharray: hcPicked ? undefined : d.borderDash || undefined,
+                        }}
                         onMouseEnter={(e) => onTooltipShow?.(d, e.clientX, e.clientY)}
                         onMouseMove={(e) => onTooltipMove?.(d, e.clientX, e.clientY)}
                         onMouseLeave={() => onTooltipHide?.()}
                     />
                     {highlightPath && (
-                        <path d={highlightPath} className="bar-highlight" pointerEvents="none" style={{ fill: d.color, fillOpacity: baseFillOpacity }} />
+                        <path
+                            d={highlightPath}
+                            className="bar-highlight"
+                            pointerEvents="none"
+                            style={{ fill: viewModel.highContrast?.selected ?? d.color, fillOpacity: baseFillOpacity }}
+                        />
                     )}
                     {label}
                 </g>
@@ -2586,11 +2712,7 @@ export const App: React.FC<AppProps> = ({
                         pointerEvents="none"
                         style={{
                             fill: tl.color,
-                            fontSize: `${tl.fontSize}pt`,
-                            fontFamily: tl.fontFamily,
-                            fontWeight: tl.bold ? "bold" : "normal",
-                            fontStyle: tl.italic ? "italic" : "normal",
-                            textDecoration: tl.underline ? "underline" : undefined,
+                            ...fontStyleOf(fontOf(tl)),
                         }}
                     >
                         {label.text}
@@ -2664,11 +2786,7 @@ export const App: React.FC<AppProps> = ({
                             textAnchor={boxed ? "middle" : "end"}
                             pointerEvents="none"
                             style={{
-                                fontSize: `${catAxis.fontSize}pt`,
-                                fontFamily: catAxis.fontFamily,
-                                fontWeight: catAxis.bold ? "bold" : "normal",
-                                fontStyle: catAxis.italic ? "italic" : "normal",
-                                textDecoration: catAxis.underline ? "underline" : undefined,
+                                ...fontStyleOf(fontOf(catAxis)),
                                 fill: catAxis.labelColor,
                             }}
                         >
@@ -2758,32 +2876,32 @@ export const App: React.FC<AppProps> = ({
                                     ? [...shownLayers].reverse().flatMap((l) => {
                                           const draw = layerDrawsX.get(l)!;
                                           return drawOrder(layerPointsOf(g, l)).map(([d, s]) =>
-                                              renderHBar(d, cy + (stacked ? 0 : cluster.offsets[s] ?? 0) + draw.offset, `${i}-${s}-${l}`, xOffset, yOffset, draw)
+                                              renderHBar(d, cy + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0) + draw.offset, `${i}-${s}-${l}`, xOffset, yOffset, draw)
                                           );
                                       })
                                     : drawOrder(g.points).map(([d, s]) =>
-                                          renderHBar(d, cy + (stacked ? 0 : cluster.offsets[s] ?? 0), `${i}-${s}`, xOffset, yOffset)
+                                          renderHBar(d, cy + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0), `${i}-${s}`, xOffset, yOffset)
                                       )}
                                 {outlineOnlyX && !layered && renderHStackOutline(g, cy, xOffset, yOffset)}
-                                {frontTotalsX && renderHTotals(g, cy + frontShiftX, xOffset, yOffset)}
-                                {namesShown && nameOf(g) !== null && (
-                                    <text
-                                        x={labelRightX}
-                                        y={yOffset + cy + catFontPx * 0.35}
-                                        className="x-category-label"
-                                        textAnchor="end"
-                                        style={{
-                                            fontSize: `${catAxis.fontSize}pt`,
-                                            fontFamily: catAxis.fontFamily,
-                                            fontWeight: catAxis.bold ? "bold" : "normal",
-                                            fontStyle: catAxis.italic ? "italic" : "normal",
-                                            textDecoration: catAxis.underline ? "underline" : undefined,
-                                            fill: catAxis.labelColor,
-                                        }}
-                                    >
-                                        {nameOf(g)}
-                                        <title>{g.category}</title>
-                                    </text>
+                                {viewModel.measureGroups
+                                    ? shownLayers.map((l) => <g key={`totals-${l}`}>{renderHTotals(withLayerTotals(g, l), cy + layerDrawsX.get(l)!.offset, xOffset, yOffset)}</g>)
+                                    : frontTotalsX && renderHTotals(g, cy + frontShiftX, xOffset, yOffset)}
+                                {namesShown && nameOf(g) !== null && !viewModel.noCategory && (
+                                    <g {...categoryLabelHit(i, g.category)}>
+                                        <text
+                                            x={labelRightX}
+                                            y={yOffset + cy + catFontPx * 0.35}
+                                            className="x-category-label"
+                                            textAnchor="end"
+                                            style={{
+                                                ...fontStyleOf(fontOf(catAxis)),
+                                                fill: catAxis.labelColor,
+                                            }}
+                                        >
+                                            {nameOf(g)}
+                                            <title>{g.category}</title>
+                                        </text>
+                                    </g>
                                 )}
                             </g>
                         );
@@ -2802,11 +2920,7 @@ export const App: React.FC<AppProps> = ({
                                 { x: left + 2, y: yOffset + top + 2, width: rankBandWidth - 4, height: bottom - top - 4 },
                                 catFont,
                                 {
-                                    fontSize: `${catAxis.fontSize}pt`,
-                                    fontFamily: catAxis.fontFamily,
-                                    fontWeight: catAxis.bold ? "bold" : "normal",
-                                    fontStyle: catAxis.italic ? "italic" : "normal",
-                                    textDecoration: catAxis.underline ? "underline" : undefined,
+                                    ...fontStyleOf(fontOf(catAxis)),
                                     fill: catAxis.labelColor,
                                 }
                             );
@@ -2838,6 +2952,20 @@ export const App: React.FC<AppProps> = ({
                     <g className="lines-group">
                         {viewModel.lines.map((line, j) => renderHLine(line, j, xOffset, yOffset, "area"))}
                         {viewModel.lines.map((line, j) => renderHLine(line, j, xOffset, yOffset, "line"))}
+                        {(() => {
+                            const boxes = hLabelBoxes;
+                            return viewModel.lines.map((line, j) =>
+                                renderLineLabels(
+                                    line,
+                                    j,
+                                    (i) => yOffset + centerOf(i),
+                                    (ratio) => xOffset + (onAxis2(line) ? plotWidth * Math.max(0, Math.min(1, ratio)) : xOfRatio(ratio)),
+                                    true,
+                                    [xOffset, xOffset + plotWidth],
+                                    boxes
+                                )
+                            );
+                        })()}
                     </g>
                 )}
                 {/* Y 軸（カテゴリの軸）の定数線 */}
@@ -2869,11 +2997,7 @@ export const App: React.FC<AppProps> = ({
                                 className="y2-tick-label"
                                 textAnchor="middle"
                                 style={{
-                                    fontSize: `${axis2.fontSize}pt`,
-                                    fontFamily: axis2.fontFamily,
-                                    fontWeight: axis2.bold ? "bold" : "normal",
-                                    fontStyle: axis2.italic ? "italic" : "normal",
-                                    textDecoration: axis2.underline ? "underline" : undefined,
+                                    ...fontStyleOf(fontOf(axis2)),
                                     fill: axis2.labelColor,
                                 }}
                             >
@@ -2887,11 +3011,7 @@ export const App: React.FC<AppProps> = ({
                             className="y2-axis-title"
                             textAnchor="middle"
                             style={{
-                                fontSize: `${axis2.titleFontSize}pt`,
-                                fontFamily: axis2.titleFontFamily,
-                                fontWeight: axis2.titleBold ? "bold" : "normal",
-                                fontStyle: axis2.titleItalic ? "italic" : "normal",
-                                textDecoration: axis2.titleUnderline ? "underline" : undefined,
+                                ...fontStyleOf(fontOf(axis2, "title")),
                                 fill: axis2.titleColor,
                             }}
                         >
@@ -2925,11 +3045,7 @@ export const App: React.FC<AppProps> = ({
                 ? marginTop - tickRowHeight - valTitleHeight - 4
                 : marginTop + viewHeight + tickRowHeight + valTitleHeight + badgeFontPx + 2;
             const valueTextStyle = {
-                fontSize: `${valAxis.fontSize}pt`,
-                fontFamily: valAxis.fontFamily,
-                fontWeight: valAxis.bold ? "bold" : "normal",
-                fontStyle: valAxis.italic ? "italic" : "normal",
-                textDecoration: valAxis.underline ? "underline" : undefined,
+                ...fontStyleOf(fontOf(valAxis)),
                 fill: valAxis.labelColor,
             };
             return (
@@ -2957,11 +3073,7 @@ export const App: React.FC<AppProps> = ({
                             className="y-axis-title"
                             textAnchor="middle"
                             style={{
-                                fontSize: `${valAxis.titleFontSize}pt`,
-                                fontFamily: valAxis.titleFontFamily,
-                                fontWeight: valAxis.titleBold ? "bold" : "normal",
-                                fontStyle: valAxis.titleItalic ? "italic" : "normal",
-                                textDecoration: valAxis.titleUnderline ? "underline" : undefined,
+                                ...fontStyleOf(fontOf(valAxis, "title")),
                                 fill: valAxis.titleColor,
                             }}
                         >
@@ -2995,11 +3107,7 @@ export const App: React.FC<AppProps> = ({
                             dominantBaseline="central"
                             className="x-axis-title"
                             style={{
-                                fontSize: `${catAxis.titleFontSize}pt`,
-                                fontFamily: catAxis.titleFontFamily,
-                                fontWeight: catAxis.titleBold ? "bold" : "normal",
-                                fontStyle: catAxis.titleItalic ? "italic" : "normal",
-                                textDecoration: catAxis.titleUnderline ? "underline" : undefined,
+                                ...fontStyleOf(fontOf(catAxis, "title")),
                                 fill: catAxis.titleColor,
                             }}
                         >
@@ -3039,7 +3147,7 @@ export const App: React.FC<AppProps> = ({
                             height={plotHeight}
                             className="unit-bar-plot-svg"
                             style={{ display: "block" }}
-                            role="img"
+                            role="group"
                             aria-label="単位つき棒グラフ（プロット）"
                         >
                             {renderHPlot(labelAreaWidth, 0, labelAreaWidth - 6)}
@@ -3059,7 +3167,7 @@ export const App: React.FC<AppProps> = ({
             );
         }
         return (
-            <svg width={width} height={height} className="unit-bar-svg" role="img" aria-label="単位つき棒グラフ">
+            <svg width={width} height={height} className="unit-bar-svg" role="group" aria-label="単位つき棒グラフ">
                 {renderHPlot(marginLeft, marginTop, marginLeft - 6)}
                 {renderHAxes()}
             </svg>
@@ -3097,6 +3205,7 @@ export const App: React.FC<AppProps> = ({
                     stroke: style?.borderShow ? style.borderColor : "none",
                     strokeWidth: style?.borderShow ? Math.min(2, style.borderWidth) : 0,
                     strokeOpacity: dim,
+                    strokeDasharray: style?.borderDash || undefined,
                 }}
             />
         );
@@ -3202,9 +3311,7 @@ export const App: React.FC<AppProps> = ({
         shadeOf: (at: number) => [number, number]
     ) => {
         if (!style.show || !items.length) return null;
-        const w = style.width;
-        const stroke = lineStrokeOf(style, w);
-        const opacity = Math.max(0, Math.min(1, 1 - style.transparency / 100));
+        const lineStyle = referenceLineSvgStyle(style);
         const drawLines = (style.layer === "back") === (part === "back");
         const lineOf = (key: string, at: number) => (
             <line
@@ -3214,7 +3321,7 @@ export const App: React.FC<AppProps> = ({
                 x2={lineHorizontal ? span[1] : at}
                 y2={lineHorizontal ? at : span[1]}
                 className={kind}
-                style={{ stroke: style.color, strokeOpacity: opacity, strokeWidth: w, strokeDasharray: stroke.dashArray, strokeLinecap: stroke.lineCap }}
+                style={lineStyle}
             />
         );
         if (part === "back") {
@@ -3232,7 +3339,7 @@ export const App: React.FC<AppProps> = ({
                                     y={lineHorizontal ? from : span[0]}
                                     width={lineHorizontal ? span[1] - span[0] : to - from}
                                     height={lineHorizontal ? to - from : span[1] - span[0]}
-                                    style={{ fill: style.shadeColor, fillOpacity: Math.max(0, Math.min(1, 1 - style.shadeTransparency / 100)) }}
+                                    style={referenceShadeSvgStyle(style)}
                                 />
                             );
                         })}
@@ -3242,7 +3349,7 @@ export const App: React.FC<AppProps> = ({
         }
         const fontPx = style.labelFontSize * PT_TO_PX;
         const font: FontSpec = { family: viewModel.categoryAxis.fontFamily, size: fontPx, bold: false, italic: false, underline: false };
-        const placed = placeCategoryLineLabels(
+        const placed = placeReferenceLabels(
             items,
             lineHorizontal,
             clamp,
@@ -3265,16 +3372,8 @@ export const App: React.FC<AppProps> = ({
                                 y={placed[k].y}
                                 textAnchor={placed[k].anchor}
                                 className={`${kind}-label`}
-                                // 棒や隣の線の上でも読めるよう、文字のまわりに白い縁を付ける（縁を先に塗って、文字を上に描く）
-                                style={{
-                                    fontSize: `${style.labelFontSize}pt`,
-                                    fontFamily: viewModel.categoryAxis.fontFamily,
-                                    fill: style.labelColor,
-                                    stroke: "#FFFFFF",
-                                    strokeWidth: 3,
-                                    strokeLinejoin: "round",
-                                    paintOrder: "stroke",
-                                }}
+                                // 棒や隣の線の上でも読めるよう、文字のまわりに白い縁を付ける
+                                style={referenceLabelSvgStyle(style, viewModel.categoryAxis.fontFamily, viewModel.highContrast?.background ?? "#FFFFFF")}
                             >
                                 {label}
                             </text>
@@ -3327,20 +3426,19 @@ export const App: React.FC<AppProps> = ({
     const renderLegend = (layout: LegendLayout) => {
         const r = layout.markerRadius;
         const anyPicked = selectedIds.length > 0 && !viewModel.hasHighlights;
-        const textStyle = {
-            fontSize: `${lg.fontSize}pt`,
-            fontFamily: lg.fontFamily,
-            fontStyle: lg.italic ? "italic" : "normal",
-            textDecoration: lg.underline ? "underline" : undefined,
-            fill: lg.color,
-        };
+        // ページ送りの矢印の色（Fluent 2 の枠なしのボタン。テーマの地から作る。ハイコントラストでは前景色と背景色だけ）
+        const legendArrowColors = viewModel.highContrast
+            ? controlColorsOf(viewModel.highContrast.foreground, viewModel.highContrast.background, true)
+            : controlColorsOf(DARK_TEXT, viewModel.background ?? "#FFFFFF");
+        // 太字は項目ごと（凡例の題は太字、項目は書式の太字）
+        const textStyle = { ...fontStyleOf(fontOf(lg)), fill: lg.color };
         return (
             <svg
                 className="unit-bar-legend"
                 width={layout.box.width}
                 height={layout.box.height}
                 style={{ position: "absolute", left: layout.box.x, top: layout.box.y, overflow: "hidden" }}
-                role="list"
+                role="group"
                 aria-label="凡例"
             >
                 {layout.title && (
@@ -3358,21 +3456,46 @@ export const App: React.FC<AppProps> = ({
                         {t.text}
                     </text>
                 ))}
+                {layout.arrows &&
+                    [layout.arrows.prev, layout.arrows.next].map((arrow, k) => (
+                        <LegendArrowButton
+                            key={`legend-arrow-${k}`}
+                            arrow={arrow}
+                            color={lg.color}
+                            colors={legendArrowColors}
+                            label={k === 0 ? "凡例の前のページ" : "凡例の次のページ"}
+                            onPress={() => setLegendPage(Math.max(0, Math.min(layout.pageCount - 1, layout.page + (k === 0 ? -1 : 1))))}
+                        />
+                    ))}
+                {/* 一覧の選択肢は項目だけ（矢印・タイトルは一覧の外） */}
+                <g role="listbox" aria-multiselectable={true} aria-label="凡例の項目">
                 {layout.items.map((item) => {
                     const entry = viewModel.legendEntries[item.index];
                     // 比較レイヤーは、凡例で選んだレイヤー以外を薄くする（通常の選択では薄くしない）
                     const dimmed = entry?.kind === "layer" ? layerFilterOn && !pickedLayers.includes(entry.index) : anyPicked && !isEntryPicked(entry);
+                    const selectEntry = (multi: boolean) => {
+                        if (entry?.kind === "layer") onSelectLayer?.(entry.index, multi);
+                        else if (entry?.selectionId) onSelect(entry.selectionId, multi);
+                    };
                     return (
                         <g
                             key={`legend-${item.index}`}
                             className="legend-item"
-                            role="listitem"
-                            aria-label={item.name}
                             onClick={(e) => {
                                 e.stopPropagation();
-                                if (entry?.kind === "layer") onSelectLayer?.(entry.index, e.ctrlKey || e.metaKey);
-                                else if (entry?.selectionId) onSelect(entry.selectionId, e.ctrlKey || e.metaKey);
+                                selectEntry(e.ctrlKey || e.metaKey);
                             }}
+                            // 押せる項目は Tab で止まる。凡例の一覧の項目のまま（読み上げは「一覧の項目」）
+                            // 凡例は一覧の選択肢。選べる項目だけ Tab で止まり、選ばれているかを読み上げる
+                            {...(entry && (entry.kind === "layer" || entry.selectionId) && interactive
+                                ? {
+                                      tabIndex: 0,
+                                      onKeyDown: selectKeyDown(selectEntry, onClearSelection),
+                                      "aria-selected": entry.kind === "layer" ? !layerFilterOn || pickedLayers.includes(entry.index) : anyPicked && isEntryPicked(entry),
+                                  }
+                                : { "aria-disabled": true })}
+                            role="option"
+                            aria-label={item.name}
                         >
                             {entry?.kind === "layer"
                                 ? renderLegendLayerGlyph(entry, item, dimmed, r)
@@ -3391,6 +3514,7 @@ export const App: React.FC<AppProps> = ({
                         </g>
                     );
                 })}
+                </g>
             </svg>
         );
     };
@@ -3407,15 +3531,20 @@ export const App: React.FC<AppProps> = ({
     const renderToolbar = () => {
         const cumulative = viewModel.cumulative;
         const on = cumulative.enabled;
-        const accent = viewModel.series[0]?.color ?? viewModel.categoryAxis.labelColor;
+        // ハイコントラストでは 1 本目の系列が背景色なので、前景色にする
+        // オンのときの色は、棒の色に引きずられない固定の灰色（ハイコントラストでは前景色）
+        const accent = viewModel.highContrast?.foreground ?? TOOLBAR_ACCENT;
         const textColor = viewModel.categoryAxis.labelColor;
         const font: React.CSSProperties = { fontFamily: viewModel.categoryAxis.fontFamily, fontSize: "9pt" };
+        // ボタンの枠・押した地の灰は、標準の字（#252423）と白から作る（形と動きは visual.less）。ハイコントラストでは前景色と背景色だけ
+        const hc = viewModel.highContrast;
+        const controls = controlVars(hc ? controlColorsOf(hc.foreground, hc.background, true) : controlColorsOf(DARK_TEXT, "#FFFFFF"));
         const stop = (e: React.SyntheticEvent) => e.stopPropagation();
         const resetItems = [{ value: "none", displayName: "区切らない" }, ...cumulative.levels];
         return (
             <div
                 className="cumulative-toolbar"
-                style={{ position: "absolute", top: 0, right: 0, height: TOOLBAR_HEIGHT, display: "flex", alignItems: "center", gap: 6, paddingRight: 4, whiteSpace: "nowrap" }}
+                style={{ position: "absolute", top: 0, right: 0, height: TOOLBAR_HEIGHT, display: "flex", alignItems: "center", gap: 6, paddingRight: 4, whiteSpace: "nowrap", ...controls } as React.CSSProperties}
                 onClick={stop}
                 onContextMenu={stop}
             >
@@ -3425,7 +3554,7 @@ export const App: React.FC<AppProps> = ({
                         aria-label="累計の区切り"
                         value={cumulative.reset}
                         onChange={(e) => onChangeCumulativeReset?.(e.target.value)}
-                        style={{ ...font, width: "auto", maxWidth: 180, flexShrink: 0, color: textColor, height: 22, border: `1px solid ${withAlpha(textColor, 0.4)}`, borderRadius: 11, padding: "0 6px", background: "transparent" }}
+                        style={{ ...font, color: textColor }}
                     >
                         {resetItems.map((item) => (
                             <option key={String(item.value)} value={String(item.value)}>
@@ -3439,26 +3568,9 @@ export const App: React.FC<AppProps> = ({
                     className="cumulative-toggle"
                     aria-pressed={on}
                     onClick={() => onToggleCumulative?.()}
-                    style={{
-                        ...font,
-                        height: 22,
-                        padding: "0 10px 0 8px",
-                        borderRadius: 11,
-                        border: `1px solid ${on ? accent : withAlpha(textColor, 0.4)}`,
-                        background: on ? withAlpha(accent, 0.16) : "transparent",
-                        color: on ? accent : textColor,
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 6,
-                        cursor: "pointer",
-                        whiteSpace: "nowrap",
-                        flexShrink: 0,
-                    }}
+                    style={{ ...font, color: on ? accent : textColor, "--toggle-accent": accent } as React.CSSProperties}
                 >
-                    <span
-                        aria-hidden="true"
-                        style={{ width: 9, height: 9, borderRadius: "50%", background: on ? accent : "transparent", border: on ? "none" : `1px solid ${withAlpha(textColor, 0.5)}` }}
-                    />
+                    <span aria-hidden="true" className="cumulative-dot" />
                     累計
                 </button>
             </div>
@@ -3490,7 +3602,8 @@ export const App: React.FC<AppProps> = ({
     return (
         <div
             className="unit-bar-container"
-            style={{ width, height: viewport.height, position: "relative" }}
+            // キーで移ったときの枠の色（ハイコントラストでは選択の色）。style/visual.less の --focus-color
+            style={{ width, height: viewport.height, position: "relative", ["--focus-color" as string]: viewModel.highContrast?.selected ?? "#252423" }}
             // 棒のクリック・右クリックは棒側で止めるので、ここに来るのは棒以外の所だけ。
             // （以前は target === currentTarget で判定していたが、SVG が全面を覆うため常に偽だった）
             onClick={() => onClearSelection?.()}
@@ -3519,21 +3632,24 @@ export const App: React.FC<AppProps> = ({
                         fontFamily: viewModel.categoryAxis.fontFamily,
                         fontSize: "8pt",
                         color: viewModel.categoryAxis.labelColor,
-                        background: "rgba(255, 255, 255, 0.85)",
+                        background: viewModel.highContrast?.background ?? "rgba(255, 255, 255, 0.85)",
                         pointerEvents: "none",
                     }}
                 >
                     {viewModel.notice}
                 </div>
             )}
-            {interactive && viewModel.copyButton && <CopyImageButton alt="グラフの画像" stamp={[viewModel, viewport.width, viewport.height, selectedIds]} browserMenu={browserMenu} />}
+            {interactive && viewModel.copyButton && (
+                <CopyImageButton
+                    alt="グラフの画像"
+                    stamp={[viewModel, viewport.width, viewport.height, selectedIds, legendPage]}
+                    {...(viewModel.highContrast
+                        ? { background: viewModel.highContrast.background, colors: { foreground: viewModel.highContrast.foreground, background: viewModel.highContrast.background } }
+                        : {})}
+                    browserMenu={browserMenu}
+                />
+            )}
         </div>
     );
 };
 
-/** 色に透明度を付ける（#RRGGBB のときだけ。ほかの書き方ならそのまま） */
-function withAlpha(color: string, alpha: number): string {
-    if (!/^#[0-9a-fA-F]{6}$/.test(color)) return color;
-    const a = Math.round(Math.max(0, Math.min(1, alpha)) * 255).toString(16).padStart(2, "0");
-    return `${color}${a}`;
-}

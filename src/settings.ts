@@ -13,11 +13,26 @@ import FormattingSettingsModel = formattingSettings.Model;
 
 import { UNIT_TYPES, UNIT_NOTATIONS, PRECISIONS } from "./shared/units";
 import { LEGEND_POSITIONS, LEGEND_POSITION_ITEMS, standardLegendPosition, legendPlacementValue } from "./shared/legend";
-import { AUTO_PLACEHOLDER, AutoNumUpDown, itemOf } from "./shared/formatting";
+import { AUTO_PLACEHOLDER, AutoNumUpDown, itemOf, TITLE_STYLES, TITLE_STYLE_ITEMS, LABEL_ORIENTATIONS, LABEL_ORIENTATION_ITEMS } from "./shared/formatting";
 import { SCROLL_START_ITEMS } from "./shared/scrollStart";
 import { NEGATIVE_STYLE_ITEMS, ZERO_STYLE_ITEMS, SIGN_TONE_MODE_ITEMS, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR } from "./shared/numberFormat";
-import { CUSTOM_LINE_STYLE, CUSTOM_LINE_STYLE_ITEM, DASH_CAP_ITEMS } from "./shared/gridlines";
-import { legendParts, gridlineParts, categoryAxisParts, valueAxisParts, labelValueParts, labelBackgroundParts, labelHaloParts } from "./shared/formatCards";
+import { CUSTOM_LINE_STYLE, CUSTOM_LINE_STYLE_ITEM, DASH_CAP_ITEMS, LINE_STYLES, LINE_STYLE_ITEMS } from "./shared/gridlines";
+import { applyThemeBasics } from "./shared/theme";
+import {
+    REFERENCE_LINE_LAYERS,
+    REFERENCE_LINE_LAYER_ITEMS,
+    REFERENCE_LABEL_SIDES,
+    REFERENCE_LABEL_SIDE_ITEMS,
+    REFERENCE_LABEL_ENDS,
+    REFERENCE_LABEL_END_ITEMS,
+    REFERENCE_LABEL_TEXTS,
+    REFERENCE_LABEL_TEXT_ITEMS,
+    referenceLineParts,
+    syncReferenceLineVisibility,
+    VALUE_SHADE_REGIONS,
+    VALUE_SHADE_REGION_ITEMS,
+} from "./shared/referenceLine";
+import { fontControl, legendParts, gridlineParts, categoryAxisParts, valueAxisParts, labelValueParts, labelBackgroundParts, labelHaloParts } from "./shared/formatCards";
 
 export interface ColumnTarget {
     name: string;
@@ -397,14 +412,33 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
     // --- レイアウト (カード全体) ---
     reverseOrder = new formattingSettings.ToggleSwitch({
         name: "reverseOrder",
-        displayName: "順序を逆にする",
+        displayName: "カテゴリの順序を逆にする",
         value: false,
     });
 
     sortByValue = new formattingSettings.ToggleSwitch({
         name: "sortByValue",
-        displayName: "値順で並べ替え",
+        displayName: "カテゴリを値順で並べ替え",
         value: false,
+    });
+
+    /**
+     * 系列（凡例・複数の値）の並び。集合では棒を横に並べる順、積み上げでは 0 から積む順を、全カテゴリの合計の大きい順にする
+     * （標準の「列 > レイアウト」の並べ替えは系列に効く）。上の 2 つ（カテゴリの並び）とは別。複数系列のときだけ出す
+     */
+    seriesSortByValue = new formattingSettings.ToggleSwitch({
+        name: "seriesSortByValue",
+        displayName: "凡例を値順で並べ替え",
+        value: false,
+        visible: false,
+    });
+
+    /** 集合で、系列の棒を並べる順を逆にする。積み上げは「積み上げ順を逆にする」を使うので、集合のときだけ出す */
+    seriesReverseOrder = new formattingSettings.ToggleSwitch({
+        name: "seriesReverseOrder",
+        displayName: "凡例の順序を逆にする",
+        value: false,
+        visible: false,
     });
 
     /**
@@ -447,7 +481,7 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
     /** 積み上げで、凡例の順と逆の順に積む（標準の積み上げの複合の「積み上げ順を逆にする」） */
     reverseStackOrder = new formattingSettings.ToggleSwitch({
         name: "reverseStackOrder",
-        displayName: "積み上げ順を逆にする",
+        displayName: "凡例の積み上げ順を逆にする",
         value: false,
     });
 
@@ -513,14 +547,26 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
      * グラフの種類で、レイアウトの項目を出し分ける。集合の系列間のスペース（%）と、積み上げの系列間のスペース・系列の展開は別の項目
      * （標準も積み上げでは単位が px か % になる）。系列の展開は折れ線があると使えない
      */
-    applyChartType(stacked: boolean, hasLines: boolean): void {
-        this.seriesSpacing.visible = !stacked;
+    private seriesModeShown = false;
+    private stackedShown = false;
+
+    /** 系列の並びの項目は複数系列のときだけ。逆にするのは集合のときだけ（呼ぶ順によらず同じになるよう、両方の状態を持つ） */
+    private refreshSeriesOrder(): void {
+        this.seriesSortByValue.visible = this.seriesModeShown;
+        this.seriesReverseOrder.visible = this.seriesModeShown && !this.stackedShown;
+    }
+
+    /** measureGroups は、凡例＋値が 2 つ以上でメジャーごとに棒を並べるとき（積み上げでも、並べた棒のすき間に系列間のスペースを使う） */
+    applyChartType(stacked: boolean, hasLines: boolean, measureGroups = false): void {
+        this.seriesSpacing.visible = !stacked || measureGroups;
         this.overlap.visible = !stacked;
         this.overlapReverse.visible = !stacked && (this.overlap.value ?? false);
         this.stackedSpacing.visible = stacked;
         this.stackedExplode.visible = stacked && !hasLines;
         this.borderOutlineOnly.visible = stacked;
         this.reverseStackOrder.visible = stacked;
+        this.stackedShown = stacked;
+        this.refreshSeriesOrder();
         const explode = stacked && !hasLines && (this.stackedExplode.value ?? false);
         this.stackedSpacing.displayName = explode ? "系列間のスペース (%)" : "系列間のスペース (px)";
     }
@@ -534,12 +580,20 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
         }),
     });
 
+    /**
+     * 並べ替え。カテゴリ（X 軸）の並びと凡例（系列）の並びを 1 か所にまとめ、どちらの並びかを名前に書く
+     * （2026-10-12 ユーザー「4 つのトグルが書式ペインの中で離れているし、カテゴリの並びか凡例の並びかが分かりにくい」）
+     */
+    sortGroup = new FormattingSettingsGroup({
+        name: "columnsSort",
+        displayName: "並べ替え",
+        slices: [this.sortByValue, this.reverseOrder, this.seriesSortByValue, this.seriesReverseOrder, this.reverseStackOrder],
+    });
+
     layoutGroup = new FormattingSettingsGroup({
         name: "columnsLayout",
         displayName: "レイアウト",
         slices: [
-            this.reverseOrder,
-            this.sortByValue,
             this.outerPadding,
             this.categorySpacing,
             this.seriesSpacing,
@@ -547,7 +601,6 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
             this.overlapReverse,
             this.stackedSpacing,
             this.stackedExplode,
-            this.reverseStackOrder,
             this.maxBarWidth,
             this.cornerRadius,
         ],
@@ -584,13 +637,15 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
         slices: [this.otherCount, this.otherLabel, this.otherFill],
     });
 
-    groups = [this.targetGroup, this.layoutGroup, this.otherGroup];
+    groups = [this.targetGroup, this.sortGroup, this.layoutGroup, this.otherGroup];
 
     /**
      * 「設定の適用先」に対象を並べる。系列が 1 本ならカテゴリ、複数なら系列が対象になる
      * （標準の集合縦棒と同じ）。対象の selector はどちらも viewModel が作る
      */
     applyTargets(targets: ColumnTarget[], seriesMode = false): void {
+        this.seriesModeShown = seriesMode;
+        this.refreshSeriesOrder();
         this.targetGroup.container = new FormattingSettingsContainer({
             displayName: "設定の適用先",
             containerItems: [
@@ -663,16 +718,6 @@ export const LABEL_POSITION_ITEMS: powerbi.IEnumMember[] = [
     { value: LABEL_POSITIONS.insideBottom, displayName: "内側の下" },
 ];
 
-export const LABEL_ORIENTATIONS = {
-    horizontal: "horizontal",
-    vertical: "vertical",
-} as const;
-
-export const LABEL_ORIENTATION_ITEMS: powerbi.IEnumMember[] = [
-    { value: LABEL_ORIENTATIONS.horizontal, displayName: "横" },
-    { value: LABEL_ORIENTATIONS.vertical, displayName: "縦" },
-];
-
 /** データラベルを系列ごとに変えるときの対象（複数系列のときだけ） */
 export const DETAIL_CONTENTS = {
     percentOfTotal: "percentOfTotal",
@@ -707,12 +752,77 @@ export const LABEL_LAYOUT_ITEMS: powerbi.IEnumMember[] = [
     { value: LABEL_LAYOUTS.singleLine, displayName: "単一行" },
 ];
 
+/** 折れ線のデータ ラベルの位置（標準の「位置 (行)」と同じ選択肢） */
+export const LINE_LABEL_POSITIONS = {
+    auto: "auto",
+    above: "above",
+    below: "below",
+} as const;
+
+export const LINE_LABEL_POSITION_ITEMS: powerbi.IEnumMember[] = [
+    { value: LINE_LABEL_POSITIONS.auto, displayName: "自動" },
+    { value: LINE_LABEL_POSITIONS.above, displayName: "上" },
+    { value: LINE_LABEL_POSITIONS.below, displayName: "下" },
+];
+
+/** 系列・線ごとのデータ ラベルの項目の値（viewModel の DataLabelsSettings のうち、書式ペインに出すもの） */
+export interface LabelTargetValues {
+    position: string;
+    valueShow: boolean;
+    fontFamily: string;
+    fontSize: number;
+    bold: boolean;
+    italic: boolean;
+    underline: boolean;
+    transparency: number;
+    precision: string;
+    titleShow: boolean;
+    titleFontFamily: string;
+    titleFontSize: number;
+    titleBold: boolean;
+    titleItalic: boolean;
+    titleUnderline: boolean;
+    titleColor: string;
+    titleTransparency: number;
+    detailShow: boolean;
+    detailFontFamily: string;
+    detailFontSize: number;
+    detailBold: boolean;
+    detailItalic: boolean;
+    detailUnderline: boolean;
+    detailColor: string;
+    detailTransparency: number;
+    backgroundShow: boolean;
+    backgroundColor: string;
+    backgroundTransparency: number;
+    singleLine: boolean;
+    horizontalAlignment: string;
+    halo: { color: string; width: number };
+}
+
 export interface LabelTarget {
     name: string;
     selector: powerbi.data.Selector;
     show: boolean;
     /** 空 = 自動（棒の色に合わせて白か黒） */
     color: string;
+    /** 棒の系列か折れ線か。折れ線は位置の選択肢が 自動・上・下で、タイトル・詳細・レイアウトは無い（値の行だけ） */
+    kind?: "bar" | "line";
+    /**
+     * この系列・線のデータ ラベルの設定（保存の無い項目は「すべて」の値で埋めたもの）。書式ペインにそのまま出す。
+     * 省略は「すべて」の値
+     */
+    values?: LabelTargetValues;
+    /** 折れ線の位置（LINE_LABEL_POSITIONS の値） */
+    linePosition?: string;
+}
+
+/** 「設定の適用先」の項目の中のまとまり。toggle は見出しのトグル */
+interface TargetSection {
+    name: string;
+    displayName: string;
+    toggle?: FormattingSettingsSlice;
+    slices: FormattingSettingsSlice[];
 }
 
 class LabelTargetItem extends FormattingSettingsCard {
@@ -726,6 +836,7 @@ class LabelTargetItem extends FormattingSettingsCard {
 }
 
 export { LEGEND_POSITIONS, LEGEND_POSITION_ITEMS, standardLegendPosition, legendPlacementValue };
+export { TITLE_STYLES, TITLE_STYLE_ITEMS, LABEL_ORIENTATIONS, LABEL_ORIENTATION_ITEMS };
 
 /** 凡例。系列が複数のとき（値が 2 つ以上か、凡例にフィールドがあるとき）だけ描く */
 export class LegendCardSettings extends FormattingSettingsCompositeCard {
@@ -763,14 +874,14 @@ export class LegendCardSettings extends FormattingSettingsCompositeCard {
         value: false,
     });
 
-    /** 棒の項目と折れ線の項目を別々に出し入れする（2026-10-08 ユーザー「棒の凡例と線の凡例で個別で表示するしないの設定がほしい」） */
+    /** 棒の項目と折れ線の項目を別々に出し入れする（2026-10-08 ユーザー決定。棒の項目と線の項目を個別に出し入れしたい） */
     showBars = new formattingSettings.ToggleSwitch({
         name: "showBars",
         displayName: "棒の項目",
         description: "凡例に棒（系列）の項目を出す。切ると折れ線の項目だけ",
         value: true,
     });
-    /** 系列に分けた棒の項目を、系列ごとに出すか、灰色の 1 項目（値の名前）にまとめるか（2026-10-08 ユーザー「単体の時は灰色でいい」） */
+    /** 系列に分けた棒の項目を、系列ごとに出すか、灰色の 1 項目（値の名前）にまとめるか（2026-10-08 ユーザー決定。1 項目にまとめるときは灰色でよい） */
     barItems = new formattingSettings.ItemDropdown({
         name: "barItems",
         displayName: "棒の項目の出し方",
@@ -942,35 +1053,7 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
         value: DETAIL_CONTENT_ITEMS[0],
     });
 
-    detailFont = new formattingSettings.FontControl({
-        name: "detailFont",
-        displayName: "フォント",
-        fontFamily: new formattingSettings.FontPicker({
-            name: "detailFontFamily",
-            displayName: "フォント",
-            value: "Segoe UI",
-        }),
-        fontSize: new formattingSettings.NumUpDown({
-            name: "detailFontSize",
-            displayName: "文字サイズ",
-            value: 9,
-        }),
-        bold: new formattingSettings.ToggleSwitch({
-            name: "detailBold",
-            displayName: "太字",
-            value: false,
-        }),
-        italic: new formattingSettings.ToggleSwitch({
-            name: "detailItalic",
-            displayName: "斜体",
-            value: false,
-        }),
-        underline: new formattingSettings.ToggleSwitch({
-            name: "detailUnderline",
-            displayName: "下線",
-            value: false,
-        }),
-    });
+    detailFont = fontControl({ controlName: "detailFont", prefix: "detail", displayName: "フォント", size: 9 });
 
     /** 空 = 自動（値の行と同じく、棒の色に合わせて白か黒） */
     detailColor = new formattingSettings.ColorPicker({
@@ -1014,35 +1097,7 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
         value: TITLE_CONTENT_ITEMS[0],
     });
 
-    titleFont = new formattingSettings.FontControl({
-        name: "titleFont",
-        displayName: "フォント",
-        fontFamily: new formattingSettings.FontPicker({
-            name: "titleFontFamily",
-            displayName: "フォント",
-            value: "Segoe UI",
-        }),
-        fontSize: new formattingSettings.NumUpDown({
-            name: "titleFontSize",
-            displayName: "文字サイズ",
-            value: 9,
-        }),
-        bold: new formattingSettings.ToggleSwitch({
-            name: "titleBold",
-            displayName: "太字",
-            value: false,
-        }),
-        italic: new formattingSettings.ToggleSwitch({
-            name: "titleItalic",
-            displayName: "斜体",
-            value: false,
-        }),
-        underline: new formattingSettings.ToggleSwitch({
-            name: "titleUnderline",
-            displayName: "下線",
-            value: false,
-        }),
-    });
+    titleFont = fontControl({ controlName: "titleFont", prefix: "title", displayName: "フォント", size: 9 });
 
     /** 空 = 自動（値の行と同じく、棒の色に合わせて白か黒） */
     titleColor = new formattingSettings.ColorPicker({
@@ -1238,36 +1293,208 @@ export class DataLabelsCardSettings extends FormattingSettingsCompositeCard {
     }
 
     /**
-     * 複数系列のとき、「設定の適用先」に系列を並べ、系列ごとに表示とカラーを変えられるようにする。
-     * 系列が 1 本なら何も足さない（1.4 までと同じ）
+     * 複数系列のときと折れ線があるとき、標準と同じく「設定の適用先」の先頭に「すべて」を置き、続けて系列と線を並べる。
+     * 「すべて」で系列・線に共通の値を変え、系列・線を選ぶとその系列だけを上書きする（線の位置は 上・下）
+     * （2026-10-12 ユーザー「「すべて」っていう設定で全部共通設定をいじれる適用先の選択肢がほしい」）。
+     * 系列ごとに変えられる項目は「すべて」に移し、系列ごとに変えられない項目（タイトルの中身・単位など）だけを下のまとまりに残す。
+     * 適用先の中も、標準と同じくタイトル・値などのまとまりに分ける（sectionTargetItems）。
+     * 系列が 1 本で折れ線も無ければ何も足さない（1.4 までと同じ）
      */
     applyTargets(targets: LabelTarget[]): void {
         const base = [this.optionsGroup, this.titleGroup, this.valuesGroup, this.detailGroup, this.backgroundGroup, this.haloGroup, this.layoutGroup];
+        this.targetSections = [];
         if (!targets.length) {
             this.groups = base;
             return;
         }
+        this.targetSections = [this.allSections(), ...targets.slice(0, MAX_COLUMN_TARGETS).map((target) => this.sectionsOf(target))];
+        const names = ["すべて", ...targets.slice(0, MAX_COLUMN_TARGETS).map((target) => target.name)];
         const container = new FormattingSettingsContainer({
             displayName: "設定の適用先",
-            containerItems: targets.slice(0, MAX_COLUMN_TARGETS).map(
-                (target) =>
-                    new LabelTargetItem(target.name, [
-                        new formattingSettings.ToggleSwitch({
-                            name: "show",
-                            displayName: "このシリーズに表示",
-                            value: target.show,
-                            selector: target.selector,
-                        }),
-                        new formattingSettings.ColorPicker({
-                            name: "color",
-                            displayName: "カラー",
-                            value: { value: target.color },
-                            selector: target.selector,
-                        }),
-                    ])
+            containerItems: this.targetSections.map(
+                (sections, i) => new LabelTargetItem(names[i], sections.flatMap((section) => [...(section.toggle ? [section.toggle] : []), ...section.slices]))
             ),
         });
-        this.groups = [new FormattingSettingsGroup({ name: "labelTargets", slices: [], container }), ...base];
+        const rest = (name: string, displayName: string, slices: FormattingSettingsSlice[]) => new FormattingSettingsGroup({ name, displayName, slices });
+        this.groups = [
+            new FormattingSettingsGroup({ name: "labelTargets", slices: [], container }),
+            rest("labelOptions", "オプション", [this.orientation, this.overflow, this.optimizeLabelDisplay, this.labelMaxWidth]),
+            rest("labelTitle", "タイトル", [this.titleContent, this.titleUnitType, this.titlePrecision, this.titleShowBlankAs]),
+            rest("labelValues", "値", [this.negativeStyle, this.zeroStyle, this.negativeZero, this.toneMode, this.positiveColor, this.negativeColor, this.valueShowBlankAs]),
+            rest("labelDetail", "詳細", [this.detailContent, this.detailUnitType, this.detailPrecision, this.detailShowBlankAs]),
+        ];
+    }
+
+    /** 適用先の項目ごとのまとまり（applyTargets が作る。並びは「すべて」、系列・線の順） */
+    targetSections: TargetSection[][] = [];
+
+    /** 「すべて」の項目。系列・線ごとの項目（sectionsOf）と同じまとまり・並び・名前で、カードの値そのものを出す */
+    private allSections(): TargetSection[] {
+        const named = <T extends { displayName?: string }>(slice: T, displayName: string): T => {
+            slice.displayName = displayName;
+            return slice;
+        };
+        const valueFont = new formattingSettings.FontControl({
+            name: "valueAllFont",
+            displayName: "フォント",
+            fontFamily: this.fontFamily,
+            fontSize: this.fontSize,
+            bold: this.bold,
+            italic: this.italic,
+            underline: this.underline,
+        });
+        return [
+            { name: "Options", displayName: "オプション", slices: [this.position] },
+            { name: "Title", displayName: "タイトル", toggle: this.titleShow, slices: [this.titleFont, this.titleColor, this.titleTransparency] },
+            { name: "Values", displayName: "値", toggle: this.valueShow, slices: [valueFont, named(this.color, "カラー"), this.transparency, named(this.precision, "小数点以下の桁数")] },
+            { name: "Detail", displayName: "詳細", toggle: this.detailShow, slices: [this.detailFont, this.detailColor, this.detailTransparency] },
+            { name: "Background", displayName: "背景", toggle: this.backgroundShow, slices: [this.backgroundColor, this.backgroundTransparency] },
+            { name: "Layout", displayName: "レイアウト", slices: [this.labelContentLayout, this.horizontalAlignment] },
+            { name: "Halo", displayName: "文字の縁", toggle: this.haloShow, slices: [this.haloColor, this.haloWidth] },
+        ];
+    }
+
+    /**
+     * 系列・線ごとの項目（標準と同じく、カードのほぼすべての項目を系列ごとに変えられる）。保存名は「すべて」と同じで、
+     * 系列・線の selector に保存する。保存が無い項目は「すべて」の値を出す。折れ線は値の行だけなので、タイトル・詳細・レイアウトは出さない
+     */
+    private sectionsOf(target: LabelTarget): TargetSection[] {
+        const selector = target.selector;
+        const line = target.kind === "line";
+        const v = target.values;
+        const toggle = (name: string, displayName: string, value: boolean) => new formattingSettings.ToggleSwitch({ name, displayName, value, selector });
+        const color = (name: string, displayName: string, value: string) => new formattingSettings.ColorPicker({ name, displayName, value: { value }, selector });
+        const number = (name: string, displayName: string, value: number) => new formattingSettings.NumUpDown({ name, displayName, value, selector });
+        const dropdown = (name: string, displayName: string, items: powerbi.IEnumMember[], value: string) =>
+            new formattingSettings.ItemDropdown({ name, displayName, items, value: items.find((item) => item.value === value) ?? items[0], selector });
+        const font = (prefix: string, f: { family: string; size: number; bold: boolean; italic: boolean; underline: boolean }) => {
+            // 値の行は fontFamily…、タイトル・詳細は titleFontFamily…（「すべて」と同じ保存名）
+            const name = (base: string) => (prefix ? `${prefix}${base[0].toUpperCase()}${base.slice(1)}` : base);
+            return new formattingSettings.FontControl({
+                name: `${prefix || "value"}TargetFont`,
+                displayName: "フォント",
+                fontFamily: new formattingSettings.FontPicker({ name: name("fontFamily"), displayName: "フォント", value: f.family, selector }),
+                fontSize: new formattingSettings.NumUpDown({ name: name("fontSize"), displayName: "文字サイズ", value: f.size, selector }),
+                bold: new formattingSettings.ToggleSwitch({ name: name("bold"), displayName: "太字", value: f.bold, selector }),
+                italic: new formattingSettings.ToggleSwitch({ name: name("italic"), displayName: "斜体", value: f.italic, selector }),
+                underline: new formattingSettings.ToggleSwitch({ name: name("underline"), displayName: "下線", value: f.underline, selector }),
+            });
+        };
+        const halo = labelHaloParts();
+        halo.haloShow.value = v ? v.halo.width > 0 : this.haloShow.value;
+        halo.haloColor.value = { value: v?.halo.color ?? this.haloColor.value?.value ?? "#FFFFFF" };
+        halo.haloWidth.value = v && v.halo.width > 0 ? v.halo.width : this.haloWidth.value;
+        for (const slice of [halo.haloShow, halo.haloColor, halo.haloWidth]) slice.selector = selector;
+        const show = toggle("show", "このシリーズに表示", target.show);
+        if (!v) return [{ name: "Options", displayName: "オプション", slices: [show, color("color", "カラー", target.color)] }];
+        const sections: TargetSection[] = [
+            {
+                name: "Options",
+                displayName: "オプション",
+                slices: [
+                    show,
+                    line
+                        ? dropdown("linePosition", "位置", LINE_LABEL_POSITION_ITEMS, target.linePosition ?? LINE_LABEL_POSITIONS.auto)
+                        : dropdown("position", "位置", LABEL_POSITION_ITEMS, v.position),
+                ],
+            },
+        ];
+        if (!line) {
+            sections.push({
+                name: "Title",
+                displayName: "タイトル",
+                toggle: toggle("titleShow", "タイトル", v.titleShow),
+                slices: [
+                    font("title", { family: v.titleFontFamily, size: v.titleFontSize, bold: v.titleBold, italic: v.titleItalic, underline: v.titleUnderline }),
+                    color("titleColor", "カラー", v.titleColor),
+                    number("titleTransparency", "透過性 (%)", v.titleTransparency),
+                ],
+            });
+        }
+        sections.push({
+            name: "Values",
+            displayName: "値",
+            ...(line ? {} : { toggle: toggle("valueShow", "値", v.valueShow) }),
+            slices: [
+                font("", { family: v.fontFamily, size: v.fontSize, bold: v.bold, italic: v.italic, underline: v.underline }),
+                color("color", "カラー", target.color),
+                number("transparency", "透過性 (%)", v.transparency),
+                dropdown("precision", "小数点以下の桁数", PRECISIONS, v.precision),
+            ],
+        });
+        if (!line) {
+            sections.push({
+                name: "Detail",
+                displayName: "詳細",
+                toggle: toggle("detailShow", "詳細", v.detailShow),
+                slices: [
+                    font("detail", { family: v.detailFontFamily, size: v.detailFontSize, bold: v.detailBold, italic: v.detailItalic, underline: v.detailUnderline }),
+                    color("detailColor", "カラー", v.detailColor),
+                    number("detailTransparency", "透過性 (%)", v.detailTransparency),
+                ],
+            });
+        }
+        sections.push({
+            name: "Background",
+            displayName: "背景",
+            toggle: toggle("backgroundShow", "背景", v.backgroundShow),
+            slices: [color("backgroundColor", "カラー", v.backgroundColor), number("backgroundTransparency", "透過性 (%)", v.backgroundTransparency)],
+        });
+        if (!line) {
+            sections.push({
+                name: "Layout",
+                displayName: "レイアウト",
+                slices: [
+                    dropdown("labelContentLayout", "レイアウト", LABEL_LAYOUT_ITEMS, v.singleLine ? LABEL_LAYOUTS.singleLine : LABEL_LAYOUTS.multiLine),
+                    new formattingSettings.AlignmentGroup({
+                        name: "horizontalAlignment",
+                        displayName: "水平方向の配置",
+                        mode: "horizontalAlignment" as powerbi.visuals.AlignmentGroupMode,
+                        value: v.horizontalAlignment,
+                        selector,
+                    }),
+                ],
+            });
+        }
+        sections.push({ name: "Halo", displayName: "文字の縁", toggle: halo.haloShow, slices: [halo.haloColor, halo.haloWidth] });
+        return sections;
+    }
+
+    /**
+     * 組み立てた書式モデルの「設定の適用先」の各項目を、タイトル・値などのまとまりに分ける（Power BI の API は項目の中にまとまりを持てるが、
+     * powerbi-visuals-utils-formattingmodel は項目に並べたスライスしか組まない）。適用先が無ければ何もしない。
+     * まとまりの見出しのトグルは、標準と同じく見出しの右に出す
+     */
+    sectionTargetItems(model: powerbi.visuals.FormattingModel): void {
+        if (!this.targetSections.length) return;
+        const card = (model.cards as powerbi.visuals.FormattingCard[]).find((c) => c.uid === `${this.name}-card`);
+        const group = card?.groups.find((g) => (g as powerbi.visuals.FormattingGroup).uid === "labelTargets-group") as powerbi.visuals.FormattingGroup | undefined;
+        const items = group?.container?.containerItems;
+        if (!items || items.length !== this.targetSections.length) return;
+        const visible = (slice: FormattingSettingsSlice) => slice.visible !== false;
+        items.forEach((item, i) => {
+            item.groups = this.targetSections[i]
+                .filter((section) => (section.toggle && visible(section.toggle)) || section.slices.some(visible))
+                .map((section) => {
+                    const sectionGroup: powerbi.visuals.FormattingGroup = {
+                        uid: `labelTargets-${i}-${section.name}-group`,
+                        displayName: section.displayName,
+                        slices: section.slices.filter(visible).map((slice) => {
+                            const built = slice.getFormattingSlice(this.name) as powerbi.visuals.FormattingSlice;
+                            built.uid = `${built.uid}-target${i}`;
+                            return built;
+                        }),
+                    };
+                    if (section.toggle && visible(section.toggle)) {
+                        const built = section.toggle.getFormattingSlice(this.name) as powerbi.visuals.EnabledSlice;
+                        built.uid = `${built.uid}-target${i}`;
+                        built.suppressDisplayName = true;
+                        sectionGroup.topLevelToggle = built;
+                    }
+                    return sectionGroup;
+                });
+            item.slices = [];
+        });
     }
 }
 
@@ -1288,35 +1515,7 @@ export class TotalLabelsCardSettings extends FormattingSettingsCompositeCard {
 
     topLevelSlice = this.show;
 
-    font = new formattingSettings.FontControl({
-        name: "font",
-        displayName: "フォント",
-        fontFamily: new formattingSettings.FontPicker({
-            name: "fontFamily",
-            displayName: "フォント",
-            value: "Segoe UI",
-        }),
-        fontSize: new formattingSettings.NumUpDown({
-            name: "fontSize",
-            displayName: "文字サイズ",
-            value: 9,
-        }),
-        bold: new formattingSettings.ToggleSwitch({
-            name: "bold",
-            displayName: "太字",
-            value: false,
-        }),
-        italic: new formattingSettings.ToggleSwitch({
-            name: "italic",
-            displayName: "斜体",
-            value: false,
-        }),
-        underline: new formattingSettings.ToggleSwitch({
-            name: "underline",
-            displayName: "下線",
-            value: false,
-        }),
-    });
+    font = fontControl({ controlName: "font", displayName: "フォント", size: 9 });
 
     color = new formattingSettings.ColorPicker({
         name: "color",
@@ -1380,17 +1579,7 @@ export class TotalLabelsCardSettings extends FormattingSettingsCompositeCard {
     groups = [this.valuesGroup, this.backgroundGroup];
 }
 
-export const LINE_STYLES = {
-    solid: "solid",
-    dashed: "dashed",
-    dotted: "dotted",
-} as const;
-
-export const LINE_STYLE_ITEMS: powerbi.IEnumMember[] = [
-    { value: LINE_STYLES.dotted, displayName: "点線" },
-    { value: LINE_STYLES.dashed, displayName: "破線" },
-    { value: LINE_STYLES.solid, displayName: "実線" },
-];
+export { LINE_STYLES, LINE_STYLE_ITEMS };
 
 /** 線の結合の種類。標準の日本語の表示は「マイター」「四捨五入」「ベベル」（Round の訳）だが、読みやすさを優先して「ラウンド」にする */
 /** 折れ線の線のスタイル。最後に「カスタム」（ダッシュ配列とダッシュ キャップを自分で決める）を足す */
@@ -1449,6 +1638,19 @@ export const STEP_WIDTHS = {
     bar: "bar",
 } as const;
 
+/** 折れ線の値が空白のカテゴリの描き方 */
+export const LINE_BLANKS = {
+    /** 線を切る（空白の前後をつながない） */
+    break: "break",
+    /** 空白を飛ばして前後の点をつなぐ */
+    connect: "connect",
+} as const;
+
+export const LINE_BLANK_ITEMS: powerbi.IEnumMember[] = [
+    { value: LINE_BLANKS.break, displayName: "線を切る" },
+    { value: LINE_BLANKS.connect, displayName: "前後をつなぐ" },
+];
+
 export const STEP_WIDTH_ITEMS: powerbi.IEnumMember[] = [
     { value: STEP_WIDTHS.step, displayName: "カテゴリの間隔" },
     { value: STEP_WIDTHS.bar, displayName: "棒の幅" },
@@ -1487,18 +1689,6 @@ export const MARKER_SHAPE_ITEMS: powerbi.IEnumMember[] = [
     { value: "plus", displayName: "＋ プラス" },
 ];
 
-export const TITLE_STYLES = {
-    showTitleOnly: "showTitleOnly",
-    showUnitOnly: "showUnitOnly",
-    showBoth: "showBoth",
-} as const;
-
-export const TITLE_STYLE_ITEMS: powerbi.IEnumMember[] = [
-    { value: TITLE_STYLES.showTitleOnly, displayName: "タイトルのみを表示" },
-    { value: TITLE_STYLES.showUnitOnly, displayName: "単位のみを表示" },
-    { value: TITLE_STYLES.showBoth, displayName: "両方を表示" },
-];
-
 /** 階層の上のレベルの見せ方。区切り線は標準と同じ、帯は標準に無い見せ方（保存値は 1.36 までの「囲み」と同じ boxed） */
 export const HIERARCHY_STYLES = {
     lines: "lines",
@@ -1521,6 +1711,17 @@ export const LEVEL_ROW_HEIGHT_ITEMS: powerbi.IEnumMember[] = [
     { value: "normal", displayName: "標準" },
     { value: "compact", displayName: "詰める" },
     { value: "tight", displayName: "もっと詰める" },
+];
+
+/** X 軸の種類。カテゴリ（既定）は棒を等間隔に並べ、連続は日付・数値の値の間隔どおりに置く（標準の「種類」） */
+export const AXIS_KINDS = {
+    categorical: "categorical",
+    continuous: "continuous",
+} as const;
+
+export const AXIS_KIND_ITEMS: powerbi.IEnumMember[] = [
+    { value: AXIS_KINDS.continuous, displayName: "連続" },
+    { value: AXIS_KINDS.categorical, displayName: "カテゴリ" },
 ];
 
 export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
@@ -1576,6 +1777,26 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
         value: LEVEL_ROW_HEIGHT_ITEMS[0],
     });
 
+    /**
+     * 種類（カテゴリ・連続）。X 軸が日付か数値の 1 列のときだけ出す（visual.ts が viewModel を見て出し入れする）。
+     * 既定はカテゴリ（1.36 までと同じ並び。標準は日付・数値なら連続が既定）
+     */
+    axisKind = new formattingSettings.ItemDropdown({
+        name: "axisKind",
+        displayName: "種類",
+        description: "連続にすると、日付・数値の X 軸を値の間隔どおりに描き、目盛りを切りのいい日付・数値に置く。並べ替えは効かない（値の小さい順）",
+        items: AXIS_KIND_ITEMS,
+        value: AXIS_KIND_ITEMS[1],
+        visible: false,
+    });
+
+    kindGroup = new FormattingSettingsGroup({
+        name: "categoryKind",
+        displayName: "種類",
+        slices: [this.axisKind],
+        visible: false,
+    });
+
     valuesGroup = new FormattingSettingsGroup({
         name: "categoryValues",
         displayName: "値",
@@ -1586,7 +1807,13 @@ export class CategoryAxisCardSettings extends FormattingSettingsCompositeCard {
     titleGroup = this.parts.titleGroup;
     layoutGroup = this.parts.layoutGroup;
 
-    groups = [this.valuesGroup, this.titleGroup, this.layoutGroup];
+    groups = [this.kindGroup, this.valuesGroup, this.titleGroup, this.layoutGroup];
+
+    /** 種類を出すか（X 軸が日付か数値の 1 列のとき） */
+    applyAxisKind(available: boolean): void {
+        this.axisKind.visible = available;
+        this.kindGroup.visible = available;
+    }
 }
 
 export class ValueAxisCardSettings extends FormattingSettingsCompositeCard {
@@ -1758,35 +1985,7 @@ export class ValueAxis2CardSettings extends FormattingSettingsCompositeCard {
         value: true,
     });
 
-    font = new formattingSettings.FontControl({
-        name: "font",
-        displayName: "フォント",
-        fontFamily: new formattingSettings.FontPicker({
-            name: "fontFamily",
-            displayName: "フォント",
-            value: "Segoe UI",
-        }),
-        fontSize: new formattingSettings.NumUpDown({
-            name: "fontSize",
-            displayName: "文字サイズ",
-            value: 9,
-        }),
-        bold: new formattingSettings.ToggleSwitch({
-            name: "bold",
-            displayName: "太字",
-            value: false,
-        }),
-        italic: new formattingSettings.ToggleSwitch({
-            name: "italic",
-            displayName: "斜体",
-            value: false,
-        }),
-        underline: new formattingSettings.ToggleSwitch({
-            name: "underline",
-            displayName: "下線",
-            value: false,
-        }),
-    });
+    font = fontControl({ controlName: "font", displayName: "フォント", size: 9 });
 
     labelColor = new formattingSettings.ColorPicker({
         name: "labelColor",
@@ -1814,35 +2013,7 @@ export class ValueAxis2CardSettings extends FormattingSettingsCompositeCard {
         placeholder: "自動",
     });
 
-    titleFont = new formattingSettings.FontControl({
-        name: "titleFont",
-        displayName: "フォント",
-        fontFamily: new formattingSettings.FontPicker({
-            name: "titleFontFamily",
-            displayName: "フォント",
-            value: "DIN",
-        }),
-        fontSize: new formattingSettings.NumUpDown({
-            name: "titleFontSize",
-            displayName: "文字サイズ",
-            value: 12,
-        }),
-        bold: new formattingSettings.ToggleSwitch({
-            name: "titleBold",
-            displayName: "太字",
-            value: false,
-        }),
-        italic: new formattingSettings.ToggleSwitch({
-            name: "titleItalic",
-            displayName: "斜体",
-            value: false,
-        }),
-        underline: new formattingSettings.ToggleSwitch({
-            name: "titleUnderline",
-            displayName: "下線",
-            value: false,
-        }),
-    });
+    titleFont = fontControl({ controlName: "titleFont", prefix: "title", displayName: "フォント", size: 12, family: "DIN" });
 
     titleColor = new formattingSettings.ColorPicker({
         name: "titleColor",
@@ -2236,6 +2407,15 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
         value: itemOf(STEP_WIDTH_ITEMS, LINE_SHAPE_DEFAULTS.stepWidth),
     });
 
+    /** 値が空白のカテゴリの描き方。既定は線を切る（1.36 までと同じ）。すべての線に効く */
+    blanks = new formattingSettings.ItemDropdown({
+        name: "blanks",
+        displayName: "空白の値",
+        description: "折れ線の値が空白のカテゴリで、線を切るか、前後の点をつなぐか。すべての線に効く（パレートの累積比の線は除く）",
+        items: LINE_BLANK_ITEMS,
+        value: LINE_BLANK_ITEMS[0],
+    });
+
     formatMode = new formattingSettings.ItemDropdown({
         name: "formatMode",
         displayName: "書式",
@@ -2293,6 +2473,7 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
             this.stepPosition,
             this.stepConnect,
             this.stepWidth,
+            this.blanks,
             this.formatMode,
             this.customFormat,
         ]);
@@ -2588,12 +2769,9 @@ export class CompareCardSettings extends FormattingSettingsCard {
     }
 }
 
-/** X 軸の定数線を、棒の後ろに描くか前に描くか（標準の「位置」。標準の表示は「遅延」「前面」で、遅延は Behind の訳し違えなので背面と書く） */
-export const CATEGORY_LINE_LAYERS = { back: "back", front: "front" } as const;
-export const CATEGORY_LINE_LAYER_ITEMS: powerbi.IEnumMember[] = [
-    { value: CATEGORY_LINE_LAYERS.back, displayName: "背面" },
-    { value: CATEGORY_LINE_LAYERS.front, displayName: "前面" },
-];
+/** 定数線の選択肢（作りは shared/referenceLine.ts。名前は今までのまま） */
+export const CATEGORY_LINE_LAYERS = REFERENCE_LINE_LAYERS;
+export const CATEGORY_LINE_LAYER_ITEMS = REFERENCE_LINE_LAYER_ITEMS;
 
 /** 網掛け領域を、線のどちら側に塗るか（標準の「次の値より前:」「次の値より後:」。カテゴリの軸なので線を基準に書く） */
 export const CATEGORY_LINE_SHADE_REGIONS = { before: "before", after: "after" } as const;
@@ -2602,27 +2780,12 @@ export const CATEGORY_LINE_SHADE_REGION_ITEMS: powerbi.IEnumMember[] = [
     { value: CATEGORY_LINE_SHADE_REGIONS.after, displayName: "線より後ろ" },
 ];
 
-/** データ ラベルを線のどちら側に置くか（標準の「水平方向の位置」の「左へ移動」「右へ移動」） */
-export const CATEGORY_LINE_LABEL_SIDES = { left: "left", right: "right" } as const;
-export const CATEGORY_LINE_LABEL_SIDE_ITEMS: powerbi.IEnumMember[] = [
-    { value: CATEGORY_LINE_LABEL_SIDES.left, displayName: "左へ移動" },
-    { value: CATEGORY_LINE_LABEL_SIDES.right, displayName: "右へ移動" },
-];
-
-/** データ ラベルを上に置くか下に置くか（標準の「縦位置」） */
-export const CATEGORY_LINE_LABEL_ENDS = { top: "top", bottom: "bottom" } as const;
-export const CATEGORY_LINE_LABEL_END_ITEMS: powerbi.IEnumMember[] = [
-    { value: CATEGORY_LINE_LABEL_ENDS.top, displayName: "上" },
-    { value: CATEGORY_LINE_LABEL_ENDS.bottom, displayName: "下" },
-];
-
-/** データ ラベルの中身（標準の「スタイル」。標準の「双方向」は Both の訳し違えなので両方と書く） */
-export const CATEGORY_LINE_LABEL_TEXTS = { value: "value", name: "name", both: "both" } as const;
-export const CATEGORY_LINE_LABEL_TEXT_ITEMS: powerbi.IEnumMember[] = [
-    { value: CATEGORY_LINE_LABEL_TEXTS.value, displayName: "データ値" },
-    { value: CATEGORY_LINE_LABEL_TEXTS.name, displayName: "名前" },
-    { value: CATEGORY_LINE_LABEL_TEXTS.both, displayName: "両方" },
-];
+export const CATEGORY_LINE_LABEL_SIDES = REFERENCE_LABEL_SIDES;
+export const CATEGORY_LINE_LABEL_SIDE_ITEMS = REFERENCE_LABEL_SIDE_ITEMS;
+export const CATEGORY_LINE_LABEL_ENDS = REFERENCE_LABEL_ENDS;
+export const CATEGORY_LINE_LABEL_END_ITEMS = REFERENCE_LABEL_END_ITEMS;
+export const CATEGORY_LINE_LABEL_TEXTS = REFERENCE_LABEL_TEXTS;
+export const CATEGORY_LINE_LABEL_TEXT_ITEMS = REFERENCE_LABEL_TEXT_ITEMS;
 
 /**
  * X 軸の定数線（標準の分析ペインの「X 軸の定数線」は連続の軸だけ。カテゴリの軸でも引けるようにした）。
@@ -2650,63 +2813,17 @@ export class CategoryLineCardSettings extends FormattingSettingsCompositeCard {
         value: CATEGORY_LINE_POSITION_ITEMS[0],
     });
 
-    color = new formattingSettings.ColorPicker({
-        name: "color",
-        displayName: "カラー",
-        value: { value: "#605E5C" },
-    });
-
-    transparency = new formattingSettings.NumUpDown({
-        name: "transparency",
-        displayName: "透過性 (%)",
-        value: 0,
-    });
-
-    lineStyle = new formattingSettings.ItemDropdown({
-        name: "lineStyle",
-        displayName: "線のスタイル",
-        items: LINE_STROKE_STYLE_ITEMS,
-        value: LINE_STROKE_STYLE_ITEMS.find((item) => item.value === LINE_STYLES.dashed)!,
-    });
-
-    dashArray = new formattingSettings.TextInput({
-        name: "dashArray",
-        displayName: "ダッシュ配列",
-        value: "",
-        placeholder: "例: 5 5 0 5",
-    });
-
-    scaleWithWidth = new formattingSettings.ToggleSwitch({
-        name: "scaleWithWidth",
-        displayName: "幅で拡大縮小",
-        value: true,
-    });
-
-    dashCap = new formattingSettings.ItemDropdown({
-        name: "dashCap",
-        displayName: "ダッシュ キャップ",
-        items: DASH_CAP_ITEMS,
-        value: DASH_CAP_ITEMS[0],
-    });
-
-    width = new formattingSettings.NumUpDown({
-        name: "width",
-        displayName: "幅 (px)",
-        value: 1,
-    });
-
-    layer = new formattingSettings.ItemDropdown({
-        name: "layer",
-        displayName: "位置",
-        items: CATEGORY_LINE_LAYER_ITEMS,
-        value: CATEGORY_LINE_LAYER_ITEMS[1],
-    });
-
-    shadeShow = new formattingSettings.ToggleSwitch({
-        name: "shadeShow",
-        displayName: "網掛け領域",
-        value: false,
-    });
+    /** 線・網掛け領域・データ ラベルの部品（標準の X 軸の定数線と同じく、ラベルの既定は右） */
+    readonly parts = referenceLineParts({ labelHorizontal: "right" });
+    color = this.parts.color;
+    transparency = this.parts.transparency;
+    lineStyle = this.parts.lineStyle;
+    dashArray = this.parts.dashArray;
+    scaleWithWidth = this.parts.scaleWithWidth;
+    dashCap = this.parts.dashCap;
+    width = this.parts.width;
+    layer = this.parts.layer;
+    shadeShow = this.parts.shadeShow;
 
     shadeRegion = new formattingSettings.ItemDropdown({
         name: "shadeRegion",
@@ -2715,70 +2832,16 @@ export class CategoryLineCardSettings extends FormattingSettingsCompositeCard {
         value: CATEGORY_LINE_SHADE_REGION_ITEMS[0],
     });
 
-    shadeMatchLine = new formattingSettings.ToggleSwitch({
-        name: "shadeMatchLine",
-        displayName: "線の色を一致させる",
-        value: false,
-    });
-
-    /** 網掛けの色。棒の後ろに広く塗るので、既定は淡い灰色（標準は線の色と同じ青。透過性 40% でも棒と見分けにくい） */
-    shadeColor = new formattingSettings.ColorPicker({
-        name: "shadeColor",
-        displayName: "カラー",
-        value: { value: "#E1DFDD" },
-    });
-
-    shadeTransparency = new formattingSettings.NumUpDown({
-        name: "shadeTransparency",
-        displayName: "透過性 (%)",
-        value: 40,
-    });
-
-    labelShow = new formattingSettings.ToggleSwitch({
-        name: "labelShow",
-        displayName: "データ ラベル",
-        value: true,
-    });
-
-    labelHorizontal = new formattingSettings.ItemDropdown({
-        name: "labelHorizontal",
-        displayName: "水平方向の位置",
-        items: CATEGORY_LINE_LABEL_SIDE_ITEMS,
-        value: CATEGORY_LINE_LABEL_SIDE_ITEMS[1],
-    });
-
-    labelVertical = new formattingSettings.ItemDropdown({
-        name: "labelVertical",
-        displayName: "縦位置",
-        items: CATEGORY_LINE_LABEL_END_ITEMS,
-        value: CATEGORY_LINE_LABEL_END_ITEMS[0],
-    });
-
-    labelText = new formattingSettings.ItemDropdown({
-        name: "labelText",
-        displayName: "スタイル",
-        items: CATEGORY_LINE_LABEL_TEXT_ITEMS,
-        value: CATEGORY_LINE_LABEL_TEXT_ITEMS[0],
-    });
-
-    labelColor = new formattingSettings.ColorPicker({
-        name: "labelColor",
-        displayName: "カラー",
-        value: { value: "#605E5C" },
-    });
-
-    labelFontSize = new formattingSettings.NumUpDown({
-        name: "labelFontSize",
-        displayName: "テキストのサイズ",
-        value: 9,
-    });
-
-    /** 線が近くてラベルがぶつかるとき、ずらす（縦棒は段を変え、横棒は横へ）。オフなら重ねたまま。標準に無い項目 */
-    labelAvoidOverlap = new formattingSettings.ToggleSwitch({
-        name: "labelAvoidOverlap",
-        displayName: "ラベルの重なりを避ける",
-        value: true,
-    });
+    shadeMatchLine = this.parts.shadeMatchLine;
+    shadeColor = this.parts.shadeColor;
+    shadeTransparency = this.parts.shadeTransparency;
+    labelShow = this.parts.labelShow;
+    labelHorizontal = this.parts.labelHorizontal;
+    labelVertical = this.parts.labelVertical;
+    labelText = this.parts.labelText;
+    labelColor = this.parts.labelColor;
+    labelFontSize = this.parts.labelFontSize;
+    labelAvoidOverlap = this.parts.labelAvoidOverlap;
 
     lineGroup = new FormattingSettingsGroup({
         name: "categoryLineLine",
@@ -2804,10 +2867,7 @@ export class CategoryLineCardSettings extends FormattingSettingsCompositeCard {
 
     /** カスタムの線の項目は、線のスタイルがカスタムのときだけ。網掛けの色は、線の色に合わせないときだけ */
     syncVisibility(): void {
-        const custom = String(this.lineStyle.value?.value) === CUSTOM_LINE_STYLE;
-        this.dashArray.visible = custom;
-        this.dashCap.visible = custom;
-        this.shadeColor.visible = !(this.shadeMatchLine.value ?? false);
+        syncReferenceLineVisibility(this.parts);
     }
 }
 
@@ -2818,12 +2878,8 @@ export const VALUE_LINE_AXIS_ITEMS: powerbi.IEnumMember[] = [
     { value: VALUE_LINE_AXES.secondary, displayName: "第 2 Y 軸" },
 ];
 
-/** Y 軸の定数線の網掛け領域を、値の小さい側に塗るか大きい側に塗るか（標準の「次の値より前:」「次の値より後:」） */
-export const VALUE_LINE_SHADE_REGIONS = { below: "below", above: "above" } as const;
-export const VALUE_LINE_SHADE_REGION_ITEMS: powerbi.IEnumMember[] = [
-    { value: VALUE_LINE_SHADE_REGIONS.below, displayName: "値より小さい側" },
-    { value: VALUE_LINE_SHADE_REGIONS.above, displayName: "値より大きい側" },
-];
+export const VALUE_LINE_SHADE_REGIONS = VALUE_SHADE_REGIONS;
+export const VALUE_LINE_SHADE_REGION_ITEMS = VALUE_SHADE_REGION_ITEMS;
 
 /**
  * Y 軸の定数線（標準の分析ペインの「Y 軸の定数線」にあたる。カスタム ビジュアルは標準の定数線を使えないので、書式ペインのカードにした）。
@@ -2849,28 +2905,17 @@ export class ValueLineCardSettings extends FormattingSettingsCompositeCard {
     /** 線が値の軸の範囲の外なら、軸を広げて線を入れる（標準は広げずに描かない。既定は標準と同じ） */
     extendAxis = new formattingSettings.ToggleSwitch({ name: "extendAxis", displayName: "軸を線に合わせて広げる", value: false });
 
-    color = new formattingSettings.ColorPicker({ name: "color", displayName: "カラー", value: { value: "#605E5C" } });
-
-    transparency = new formattingSettings.NumUpDown({ name: "transparency", displayName: "透過性 (%)", value: 0 });
-
-    lineStyle = new formattingSettings.ItemDropdown({
-        name: "lineStyle",
-        displayName: "線のスタイル",
-        items: LINE_STROKE_STYLE_ITEMS,
-        value: LINE_STROKE_STYLE_ITEMS.find((item) => item.value === LINE_STYLES.dashed)!,
-    });
-
-    dashArray = new formattingSettings.TextInput({ name: "dashArray", displayName: "ダッシュ配列", value: "", placeholder: "例: 5 5 0 5" });
-
-    scaleWithWidth = new formattingSettings.ToggleSwitch({ name: "scaleWithWidth", displayName: "幅で拡大縮小", value: true });
-
-    dashCap = new formattingSettings.ItemDropdown({ name: "dashCap", displayName: "ダッシュ キャップ", items: DASH_CAP_ITEMS, value: DASH_CAP_ITEMS[0] });
-
-    width = new formattingSettings.NumUpDown({ name: "width", displayName: "幅 (px)", value: 1 });
-
-    layer = new formattingSettings.ItemDropdown({ name: "layer", displayName: "位置", items: CATEGORY_LINE_LAYER_ITEMS, value: CATEGORY_LINE_LAYER_ITEMS[1] });
-
-    shadeShow = new formattingSettings.ToggleSwitch({ name: "shadeShow", displayName: "網掛け領域", value: false });
+    /** 線・網掛け領域・データ ラベルの部品（標準の Y 軸の定数線と同じく、ラベルの既定は左） */
+    readonly parts = referenceLineParts({ labelHorizontal: "left" });
+    color = this.parts.color;
+    transparency = this.parts.transparency;
+    lineStyle = this.parts.lineStyle;
+    dashArray = this.parts.dashArray;
+    scaleWithWidth = this.parts.scaleWithWidth;
+    dashCap = this.parts.dashCap;
+    width = this.parts.width;
+    layer = this.parts.layer;
+    shadeShow = this.parts.shadeShow;
 
     shadeRegion = new formattingSettings.ItemDropdown({
         name: "shadeRegion",
@@ -2879,44 +2924,20 @@ export class ValueLineCardSettings extends FormattingSettingsCompositeCard {
         value: VALUE_LINE_SHADE_REGION_ITEMS[0],
     });
 
-    shadeMatchLine = new formattingSettings.ToggleSwitch({ name: "shadeMatchLine", displayName: "線の色を一致させる", value: false });
-
-    shadeColor = new formattingSettings.ColorPicker({ name: "shadeColor", displayName: "カラー", value: { value: "#E1DFDD" } });
-
-    shadeTransparency = new formattingSettings.NumUpDown({ name: "shadeTransparency", displayName: "透過性 (%)", value: 40 });
-
-    labelShow = new formattingSettings.ToggleSwitch({ name: "labelShow", displayName: "データ ラベル", value: true });
-
-    /** 標準の Y 軸の定数線と同じく、既定は左（線の左端） */
-    labelHorizontal = new formattingSettings.ItemDropdown({
-        name: "labelHorizontal",
-        displayName: "水平方向の位置",
-        items: CATEGORY_LINE_LABEL_SIDE_ITEMS,
-        value: CATEGORY_LINE_LABEL_SIDE_ITEMS[0],
-    });
-
-    labelVertical = new formattingSettings.ItemDropdown({
-        name: "labelVertical",
-        displayName: "縦位置",
-        items: CATEGORY_LINE_LABEL_END_ITEMS,
-        value: CATEGORY_LINE_LABEL_END_ITEMS[0],
-    });
-
-    labelText = new formattingSettings.ItemDropdown({
-        name: "labelText",
-        displayName: "スタイル",
-        items: CATEGORY_LINE_LABEL_TEXT_ITEMS,
-        value: CATEGORY_LINE_LABEL_TEXT_ITEMS[0],
-    });
-
-    labelColor = new formattingSettings.ColorPicker({ name: "labelColor", displayName: "カラー", value: { value: "#605E5C" } });
-
-    labelFontSize = new formattingSettings.NumUpDown({ name: "labelFontSize", displayName: "テキストのサイズ", value: 9 });
+    shadeMatchLine = this.parts.shadeMatchLine;
+    shadeColor = this.parts.shadeColor;
+    shadeTransparency = this.parts.shadeTransparency;
+    labelShow = this.parts.labelShow;
+    labelHorizontal = this.parts.labelHorizontal;
+    labelVertical = this.parts.labelVertical;
+    labelText = this.parts.labelText;
+    labelColor = this.parts.labelColor;
+    labelFontSize = this.parts.labelFontSize;
 
     /** 値の表示単位は、載せた軸の表示単位に従う（データ ラベルと同じ）。小数点以下の桁数だけ選べる */
     labelPrecision = new formattingSettings.ItemDropdown({ name: "labelPrecision", displayName: "小数点以下桁数の値", items: PRECISIONS, value: PRECISIONS[0] });
 
-    labelAvoidOverlap = new formattingSettings.ToggleSwitch({ name: "labelAvoidOverlap", displayName: "ラベルの重なりを避ける", value: true });
+    labelAvoidOverlap = this.parts.labelAvoidOverlap;
 
     lineGroup = new FormattingSettingsGroup({
         name: "valueLineLine",
@@ -2942,10 +2963,7 @@ export class ValueLineCardSettings extends FormattingSettingsCompositeCard {
 
     /** カスタムの線の項目はカスタムのときだけ。網掛けの色は線の色に合わせないときだけ。軸は第 2 Y 軸があるときだけ、広げるのは Y 軸のときだけ */
     syncVisibility(hasSecondary: boolean): void {
-        const custom = String(this.lineStyle.value?.value) === CUSTOM_LINE_STYLE;
-        this.dashArray.visible = custom;
-        this.dashCap.visible = custom;
-        this.shadeColor.visible = !(this.shadeMatchLine.value ?? false);
+        syncReferenceLineVisibility(this.parts);
         this.axis.visible = hasSecondary;
         this.extendAxis.visible = !hasSecondary || String(this.axis.value?.value) !== VALUE_LINE_AXES.secondary;
     }
@@ -3233,8 +3251,8 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
     displayName = "グリッド線";
 
     // 横（水平・Y 軸の目盛線）と縦（垂直・X 軸の目盛線）。既定の線のスタイルは点線
-    private horizontal = gridlineParts({ prefix: "horizontal", showDisplayName: "横", show: true, styleItems: LINE_STYLE_ITEMS, style: LINE_STYLE_ITEMS[0] });
-    private vertical = gridlineParts({ prefix: "vertical", showDisplayName: "縦", show: false, styleItems: LINE_STYLE_ITEMS, style: LINE_STYLE_ITEMS[0] });
+    private horizontal = gridlineParts({ prefix: "horizontal", showDisplayName: "横", show: true, styleItems: LINE_STYLE_ITEMS, style: itemOf(LINE_STYLE_ITEMS, LINE_STYLES.dotted) });
+    private vertical = gridlineParts({ prefix: "vertical", showDisplayName: "縦", show: false, styleItems: LINE_STYLE_ITEMS, style: itemOf(LINE_STYLE_ITEMS, LINE_STYLES.dotted) });
 
     horizontalShow = this.horizontal.show;
     horizontalColor = this.horizontal.color;
@@ -3342,41 +3360,23 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
      * 凡例の位置は 1.26 までの保存値（topLeft など）を標準の値に読み替える
      */
     applyThemeDefaults(objects: powerbi.DataViewObjects | undefined): void {
-        const raw = (card: string, prop: string): unknown => objects?.[card]?.[prop];
-        const inherit = (slice: formattingSettings.ToggleSwitch, card: string, own: string, standard: string) => {
-            const themeValue = raw(card, standard);
-            if (raw(card, own) == null && typeof themeValue === "boolean") slice.value = themeValue;
-        };
-        inherit(this.categoryAxis.titleShow, "categoryAxis", "titleShow", "showAxisTitle");
-        inherit(this.valueAxis.titleShow, "valueAxis", "titleShow", "showAxisTitle");
-        inherit(this.legend.titleShow, "legend", "titleShow", "showTitle");
-        const position = standardLegendPosition(raw("legend", "position"));
-        if (position) this.legend.position.value = LEGEND_POSITION_ITEMS.find((i) => i.value === position)!;
-
-        // 項目名の欄の上限：標準は categoryAxis の maxMarginFactor で持つ（Fluent 2 は 50）。描画と同じ 0〜100 に丸める
-        const marginFactor = raw("categoryAxis", "maxMarginFactor");
-        if (raw("categoryAxis", "maxHeight") == null && typeof marginFactor === "number") {
-            this.categoryAxis.maxHeight.value = Math.max(0, Math.min(100, marginFactor));
-        }
-
-        // グリッド線：標準は軸のカードの中（gridlineShow・gridlineColor・gridlineStyle・gridlineThickness）。
+        // 項目名の欄の上限は描画と同じ 0〜100、グリッド線の幅は 1〜10 に丸める。
         // 自作の「グリッド線」カードの横（horizontal*）は数値の軸の線、縦（vertical*）はカテゴリの軸の線（縦棒・横棒で入れ替わらない）
-        const gridlines: Array<[axis: string, prefix: "horizontal" | "vertical"]> = [
-            ["valueAxis", "horizontal"],
-            ["categoryAxis", "vertical"],
-        ];
-        for (const [axis, prefix] of gridlines) {
-            const own = (prop: string) => raw("gridlines", `${prefix}${prop}`) != null;
-            const show = raw(axis, "gridlineShow");
-            if (!own("Show") && typeof show === "boolean") this.gridlines[`${prefix}Show`].value = show;
-            const color = (raw(axis, "gridlineColor") as powerbi.Fill | undefined)?.solid?.color;
-            if (!own("Color") && typeof color === "string" && color) this.gridlines[`${prefix}Color`].value = { value: color };
-            const style = LINE_STYLE_ITEMS.find((i) => i.value === raw(axis, "gridlineStyle"));
-            if (!own("Style") && style) this.gridlines[`${prefix}Style`].value = style;
-            const thickness = raw(axis, "gridlineThickness");
-            // 描画と同じ 1〜10 に丸める（書式ペインの値と描画の幅をずらさない）
-            if (!own("Width") && typeof thickness === "number" && thickness > 0) this.gridlines[`${prefix}Width`].value = Math.max(1, Math.min(10, thickness));
-        }
+        const g = this.gridlines;
+        applyThemeBasics(objects, {
+            categoryTitleShow: this.categoryAxis.titleShow,
+            valueTitleShow: this.valueAxis.titleShow,
+            legendTitleShow: this.legend.titleShow,
+            legendPosition: this.legend.position,
+            categoryMaxHeight: this.categoryAxis.maxHeight,
+            maxHeightMin: 0,
+            gridlines: [
+                { axis: "valueAxis", prefix: "horizontal", show: g.horizontalShow, color: g.horizontalColor, style: g.horizontalStyle, width: g.horizontalWidth },
+                { axis: "categoryAxis", prefix: "vertical", show: g.verticalShow, color: g.verticalColor, style: g.verticalStyle, width: g.verticalWidth },
+            ],
+            lineStyleItems: LINE_STYLE_ITEMS,
+            gridlineWidthMin: 1,
+        });
     }
 
     /**
@@ -3465,7 +3465,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
      * lineOnly は「値」が空で折れ線だけを描くとき true（棒にしか効かない合計ラベル・リボン・第 2 Y 軸を隠す。
      * 「棒」カードは並び順・カテゴリ間のスペース・その他のまとめ方が線にも効くので残す）
      */
-    applyCardVisibility(hasLines: boolean, lineOnly = false): void {
+    applyCardVisibility(hasLines: boolean, lineOnly = false, measureGroups = false): void {
         const chartType = String(this.chart.chartType.value?.value ?? CHART_TYPES.clustered);
         const horizontal = String(this.chart.orientation.value?.value ?? ORIENTATIONS.vertical) === ORIENTATIONS.horizontal;
         // 折れ線の値は、どの種類・向きでも描く（横棒は既定でマーカーだけ）
@@ -3478,7 +3478,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.lines.visible = linesDrawn;
         this.areas.visible = linesDrawn;
         this.markers.visible = linesDrawn;
-        this.columns.applyChartType(chartType !== CHART_TYPES.clustered, linesDrawn);
+        this.columns.applyChartType(chartType !== CHART_TYPES.clustered, linesDrawn, measureGroups);
         this.legend.applyLines(linesDrawn);
         this.gridlines.syncCustomDash();
         this.categoryLine.syncVisibility();

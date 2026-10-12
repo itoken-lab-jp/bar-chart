@@ -106,13 +106,75 @@
 }
 
 
-/* 押せる帯（階層の区切り・パレートのランク）は、マウスで押したときはフォーカスの枠を出さない。キーボードで移ったときだけ出す */
+/* 押せるもの（棒・凡例の項目・階層の区切り・パレートのランク）は、マウスで押したときはフォーカスの枠を出さない。キーボードで移ったときだけ出す */
+.bar-item:focus:not(:focus-visible),
+.legend-item:focus:not(:focus-visible),
 .level-hit:focus:not(:focus-visible),
 .pareto-rank:focus:not(:focus-visible) {
     outline: none;
 }
 
+/* キーで移ったときの枠。色は描画側が --focus-color で渡す（ハイコントラストでは選択の色） */
+.bar-item:focus-visible,
+.legend-item:focus-visible,
+.level-hit:focus-visible,
+.pareto-rank:focus-visible {
+    outline: 2px solid var(--focus-color, #252423);
+    outline-offset: 1px;
+}
+
 /* 階層の区切りの線は当たりの上に描くので、押しても当たり（区切りを選ぶ）に届くようにする */
 .level-separator {
     pointer-events: none;
+}
+
+/*
+ * 累計の切り替えボタンと区切りの選択。形と動きは Power BI の画面と同じ Fluent 2 の小さいボタン（角丸 4px、細い灰の枠、
+ * マウスを乗せると地が少し沈む、押してある間は一段濃い地）。色は App.tsx が --ctl-* と --toggle-accent で渡す
+ */
+.cumulative-toggle,
+.cumulative-reset {
+    height: 22px;
+    box-sizing: border-box;
+    border: 1px solid var(--ctl-stroke);
+    border-radius: var(--ctl-radius);
+    background: transparent;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background-color var(--ctl-transition), border-color var(--ctl-transition);
+
+    &:hover { background: var(--ctl-hover); border-color: var(--ctl-stroke-hover); }
+    &:focus-visible { outline: 2px solid var(--ctl-focus); outline-offset: -2px; }
+}
+
+.cumulative-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px;
+    white-space: nowrap;
+
+    &:active { background: var(--ctl-pressed); }
+    &[aria-pressed="true"] { background: var(--ctl-selected); }
+}
+
+.cumulative-reset {
+    width: auto;
+    max-width: 180px;
+    padding: 0 4px;
+    border-bottom-color: var(--ctl-stroke-accessible);
+}
+
+/* オンのしるし：オンは塗った丸、オフは輪 */
+.cumulative-dot {
+    width: 9px;
+    height: 9px;
+    box-sizing: border-box;
+    border-radius: 50%;
+    border: 1px solid var(--toggle-accent);
+}
+.cumulative-toggle[aria-pressed="true"] .cumulative-dot { background: var(--toggle-accent); }
+
+@media (prefers-reduced-motion: reduce) {
+    .cumulative-toggle, .cumulative-reset { transition-duration: 0.01ms; }
 }

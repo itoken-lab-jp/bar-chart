@@ -38,3 +38,16 @@ export function boundOf(text: string | undefined | null): number | null {
     const value = Number(trimmed);
     return Number.isFinite(value) ? value : null;
 }
+
+/**
+ * 目盛りの数字が重ならない本数まで減らして取り直す（標準と同じく、どの目盛りも切りのいい数のまま間隔が広がる）。
+ * target から 1 本ずつ減らし、隣の目盛りとの間隔（spacing）が数字に要る幅か高さ（need）以上になる本数で止める。2 本まで減らしても重なれば 2 本
+ */
+export function fitTicks<T>(ticksFor: (count: number) => T[], target: number, spacing: (ticks: T[]) => number, need: (ticks: T[]) => number): T[] {
+    for (let count = target; count > 2; count--) {
+        const ticks = ticksFor(count);
+        if (ticks.length < 2) return ticks;
+        if (spacing(ticks) >= need(ticks)) return ticks;
+    }
+    return ticksFor(2);
+}

@@ -301,13 +301,25 @@
                     }
                 },
                 "reverseOrder": {
-                    "displayName": "順序を逆にする",
+                    "displayName": "カテゴリの順序を逆にする",
                     "type": {
                         "bool": true
                     }
                 },
                 "sortByValue": {
-                    "displayName": "値順で並べ替え",
+                    "displayName": "カテゴリを値順で並べ替え",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "seriesSortByValue": {
+                    "displayName": "凡例を値順で並べ替え",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "seriesReverseOrder": {
+                    "displayName": "凡例の順序を逆にする",
                     "type": {
                         "bool": true
                     }
@@ -355,7 +367,7 @@
                     }
                 },
                 "reverseStackOrder": {
-                    "displayName": "積み上げ順を逆にする",
+                    "displayName": "凡例の積み上げ順を逆にする",
                     "type": {
                         "bool": true
                     }
@@ -727,6 +739,12 @@
                 },
                 "stepWidth": {
                     "displayName": "段の幅",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "blanks": {
+                    "displayName": "空白の値",
                     "type": {
                         "enumeration": []
                     }
@@ -1555,6 +1573,12 @@
                         "enumeration": []
                     }
                 },
+                "linePosition": {
+                    "displayName": "折れ線の位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "orientation": {
                     "displayName": "方向",
                     "type": {
@@ -2009,6 +2033,12 @@
         "categoryAxis": {
             "displayName": "X 軸",
             "properties": {
+                "axisKind": {
+                    "displayName": "種類",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "titleStyle": {
                     "displayName": "スタイル",
                     "type": {
@@ -2780,6 +2810,39 @@
                     },
                     "compare": {
                         "max": 4
+                    },
+                    "compareBy": {
+                        "max": 0
+                    },
+                    "categoryLine": {
+                        "max": 4
+                    },
+                    "valueLine": {
+                        "max": 4
+                    },
+                    "labelTitle": {
+                        "max": 1
+                    },
+                    "labelValue": {
+                        "max": 1
+                    }
+                },
+                {
+                    "series": {
+                        "min": 1,
+                        "max": 1
+                    },
+                    "measure": {
+                        "min": 2
+                    },
+                    "labelDetail": {
+                        "max": 1
+                    },
+                    "dataColor": {
+                        "max": 1
+                    },
+                    "compare": {
+                        "max": 0
                     },
                     "compareBy": {
                         "max": 0

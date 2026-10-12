@@ -1,5 +1,6 @@
 "use strict";
 
+import { ReferenceLineStyle, referenceLineStyleOf, referenceLabelOf } from "./shared/referenceLine";
 import powerbi from "powerbi-visuals-api";
 import { scaleLinear } from "d3-scale";
 import { valueFormatter } from "powerbi-visuals-utils-formattingutils";
@@ -31,11 +32,15 @@ import {
     CALCULATION_MODES,
     CUMULATIVE_RESET_NONE,
     LINE_FORMAT_MODES,
+    LINE_LABEL_POSITIONS,
     LINE_PERCENT_FORMAT,
     LinesCardSettings,
     legendPlacementValue,
     LEGEND_BAR_ITEMS,
+    LINE_BLANKS,
+    AXIS_KINDS,
 } from "./settings";
+import { ContinuousAxis, axisValueOf } from "./continuousAxis";
 import {
     resolveUnit,
     formatValue,
@@ -47,12 +52,16 @@ import {
     UNIT_DEFINITIONS,
 } from "./unitUtils";
 import { collapseOthers, lineIndependenceOf } from "./others";
-import { categoricalOf, withCategoryOf, withSeriesOf } from "./matrixDataView";
+import { categoricalOf, isPlaceholderCategory, withCategoryOf, withPlaceholderCategory, withSeriesOf } from "./matrixDataView";
 import { TooltipSource, TooltipStack, TooltipColumn, tooltipColumnOf, formatTooltipValue, categoryTooltipRows, BLANK_TEXT } from "./tooltip";
 import { ticksUpTo, tickCountOf, boundOf } from "./shared/ticks";
 import { PT_TO_PX } from "./shared/text";
 import { Halo, haloOf, NO_HALO } from "./shared/halo";
-import { formatSigned, shownSignOf, toneOf, NEGATIVE_STYLES, SignStyle, ZERO_STYLES, TONE_MODES, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR, isPercentFormat, percentDigitsOf, formatPercent } from "./shared/numberFormat";
+import { enumValue } from "./shared/formatting";
+import { clampFontSize, fontFields, titleFontFields } from "./shared/textStyle";
+import { DRILL_PATH_SEPARATOR, SERIES_TRUNCATED_TITLE, SERIES_TRUNCATED_NOTICE } from "./shared/warnings";
+import { HighContrastColors, highContrastOf, highContrastPattern, withHighContrastColors } from "./shared/highContrast";
+import { formatSigned, shownSignOf, toneOf, NEGATIVE_STYLES, SignStyle, ZERO_STYLES, TONE_MODES, sentimentTextColors, ownToneColor, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR, isPercentFormat, percentDigitsOf, formatPercent } from "./shared/numberFormat";
 
 export { tickCountOf };
 
@@ -103,10 +112,14 @@ export interface DataPoint {
     borderColor: string;
     borderTransparency: number;
     borderWidth: number;
+    /** 罫線の模様（stroke-dasharray）。ハイコントラストで系列を見分けるときだけ。無ければ実線 */
+    borderDash?: string;
     /** データラベルを出すか（系列ごとの「このシリーズに表示」）。カード全体の表示とは別に効く */
     labelShow: boolean;
     /** データラベルの文字色。空 = 自動（棒の色に合わせて白か黒） */
     labelColor: string;
+    /** 系列ごとに変えたデータ ラベルの設定（保存の無い項目は「すべて」の値で埋めたもの）。無ければ「すべて」の設定 */
+    labelSettings?: DataLabelsSettings;
     /** 比較レイヤーの番号（0 が手前の「値」、1 から奥の「比較値」）。比較が無ければ無し */
     layerIndex?: number;
 }
@@ -151,6 +164,8 @@ export interface CategoryGroup {
     totals: StackTotals | null;
     /** 比較レイヤーの奥の棒（[0] が 2 枚目＝「比較値」の 1 つ目）。並びは points と同じ系列の順。比較が無ければ無し */
     layerPoints?: DataPoint[][];
+    /** 奥のレイヤーの積み上げの合計（layerPoints と同じ並び）。メジャーごとに棒を並べるときだけ */
+    layerTotals?: Array<StackTotals | null>;
 }
 
 /** 折れ線の点 1 つ。並びは categoryGroups と同じ（並べ替えのあと） */
@@ -212,6 +227,19 @@ export interface LineSeriesInfo {
     points: LinePoint[];
     /** ツールヒント用。values は DataView の行番号で引く */
     tooltip: TooltipColumn;
+    /** データ ラベル。線ごとの「このシリーズに表示」がオンのときだけ（既定はオフ） */
+    labels?: LineLabelInfo;
+}
+
+/** 折れ線のデータ ラベル。texts は points と同じ並び（値が空白なら null） */
+export interface LineLabelInfo {
+    /** 点の上か下か。自動は上で、プロットの上に入らなければ下 */
+    position: "auto" | "above" | "below";
+    /** 空 = 「すべて」のカラー（それも空なら線の色） */
+    color: string;
+    /** 線ごとに変えたデータ ラベルの設定（保存の無い項目は「すべて」の値）。フォント・透過性・背景・文字の縁を使う */
+    settings: DataLabelsSettings;
+    texts: Array<string | null>;
 }
 
 export interface ValueAxis2Settings {
@@ -254,7 +282,7 @@ export interface LegendItemInfo {
     /** クリックで選ぶ ID。系列 1 本の棒は null（選ばない） */
     selectionId: ISelectionId | null;
     /** 棒の見た目（凡例の四角を棒に合わせる）。折れ線の見た目は lines[index] とマーカーを見る */
-    barStyle?: { transparency: number; borderShow: boolean; borderColor: string; borderWidth: number };
+    barStyle?: { transparency: number; borderShow: boolean; borderColor: string; borderWidth: number; borderDash?: string };
     /** 比較レイヤーの印の濃さ（0〜1） */
     layerOpacity?: number;
 }
@@ -553,6 +581,12 @@ export interface ViewModel {
     /** 折れ線（複合）。無ければ空 */
     lines: LineSeriesInfo[];
     lineTargets: LineTarget[];
+    /** X 軸が日付か数値の 1 列で、種類「連続」を選べる */
+    continuousAvailable?: boolean;
+    /** X 軸の種類「連続」で描くときの値（categoryGroups と同じ並び）。カテゴリの軸なら無し */
+    continuousAxis?: ContinuousAxis;
+    /** 折れ線の値が空白のカテゴリの描き方（LINE_BLANKS：線を切る・前後をつなぐ・0 として描く）。無ければ線を切る */
+    lineBlanks?: string;
     /** 折れ線の率の分子と分母の数が合わないときの警告（組にならない分は描かない）。無ければ無し */
     lineWarning?: string;
     /** 「比較の列」の値が多すぎて重ねきれないときの警告（compareLayers.ts）。無ければ無し */
@@ -585,11 +619,26 @@ export interface ViewModel {
     compare: CompareSettings;
     /** 比較レイヤーごとのツールヒントの元データ（[0] は tooltip と同じ）。比較が無ければ無し */
     layerTooltips?: Array<TooltipSource | null>;
+    /**
+     * 凡例があり「値」にメジャーが 2 つ以上：メジャーごとに 1 本の棒を隣り合わせに並べ、その中を凡例で積む。
+     * 比較レイヤーの仕組みで描く（重ねずに並べ、薄くせず、どのレイヤーにもデータ ラベルと合計ラベルを出す）
+     */
+    measureGroups?: boolean;
     /** 比較レイヤーで手前にそろえるもの（この viewModel を作ったときの値） */
-    basis: { extent: ValueExtent; keepRows: number[] | null; displayOrder: number[] };
+    basis: { extent: ValueExtent; keepRows: number[] | null; displayOrder: number[]; seriesOrder: number[] };
+    /** 系列の番号から、集合で並べる位置（左から何番目か）。系列の並びを変えていなければ番号のまま */
+    seriesPositions: number[];
     /** 「値」が空で「折れ線の値」だけを入れたか。棒は描かず、線を左の軸で描く */
     lineOnly?: boolean;
+    /** カテゴリを入れずに値だけ。カテゴリのラベルを出さない（押して選ぶ当たりも置かない） */
+    noCategory?: boolean;
+    /** ビジュアルの背景（テーマの背景色）。棒の外のデータ ラベルの自動の文字色を決めるのに使う */
+    background?: string;
+    /** ハイコントラストのテーマのときの 3 色。それ以外は無し */
+    highContrast?: HighContrastColors | null;
     isEmpty: boolean;
+    /** 値のフィールドは入っているが、描く行が無い（絞り込みで 0 件など）。案内を出さずに何も描かない */
+    noData: boolean;
 }
 
 /**
@@ -602,28 +651,9 @@ export interface CategoryLineInfo {
     marks: Array<{ index: number; label: string }>;
 }
 
-export interface CategoryLineSettings {
-    show: boolean;
+export interface CategoryLineSettings extends ReferenceLineStyle {
     position: "before" | "center" | "after";
-    color: string;
-    transparency: number;
-    lineStyle: string;
-    dashArray: string;
-    scaleWithWidth: boolean;
-    dashCap: string;
-    width: number;
-    /** 棒の後ろ（back）か前（front）か */
-    layer: "back" | "front";
-    shadeShow: boolean;
     shadeRegion: "before" | "after";
-    shadeColor: string;
-    shadeTransparency: number;
-    labelShow: boolean;
-    labelHorizontal: "left" | "right";
-    labelVertical: "top" | "bottom";
-    labelColor: string;
-    labelFontSize: number;
-    labelAvoidOverlap: boolean;
 }
 
 /** Y 軸の定数線 1 本（カードの「値」か、「Y 軸の定数線」の欄のメジャー 1 つ）。軸の範囲の外の線は入れない */
@@ -740,7 +770,7 @@ const clampBorderWidth = (v: number): number => Math.max(1, Math.min(5, v));
 export const MAX_LOG_TICKS = 8;
 
 /** ドリルダウンした位置の区切り */
-export const DRILL_PATH_SEPARATOR = " ＞ ";
+export { DRILL_PATH_SEPARATOR };
 /** ドリルした親が空白のときに出す文字（ツールヒントの空白の表記と同じ） */
 export const BLANK_LEVEL_TEXT = "(空白)";
 
@@ -1048,8 +1078,10 @@ const EMPTY: ViewModel = {
     categoryLine: EMPTY_CATEGORY_LINE,
     compareLayers: [],
     compare: EMPTY_COMPARE,
-    basis: { extent: { min: 0, max: 0, valueMaxAbs: 0, magMin: Infinity, magMax: 0 }, keepRows: null, displayOrder: [] },
+    basis: { extent: { min: 0, max: 0, valueMaxAbs: 0, magMin: Infinity, magMax: 0 }, keepRows: null, displayOrder: [], seriesOrder: [] },
+    seriesPositions: [],
     isEmpty: true,
+    noData: false,
 };
 
 /**
@@ -1349,6 +1381,94 @@ const labelColorOf = (objects: DataViewObjects | undefined): string | null => {
     return fill?.solid?.color ? String(fill.solid.color) : null;
 };
 
+/** 系列・線ごとに保存したデータ ラベルの項目の値（[0] を先に見る）。無ければ null */
+const ownLabelValue = (objects: Array<DataViewObjects | undefined> | DataViewObjects | undefined, property: string): powerbi.DataViewPropertyValue | null => {
+    const list = Array.isArray(objects) ? objects : [objects];
+    for (const o of list) {
+        const raw = o?.dataLabels?.[property];
+        if (raw !== undefined && raw !== null) return raw;
+    }
+    return null;
+};
+
+/** 系列・線ごとに保存したデータ ラベルの項目があるか（「このシリーズに表示」とカラーは別に読むので数えない） */
+const hasOwnLabelSettings = (objects: Array<DataViewObjects | undefined> | DataViewObjects | undefined, ignore: string[] = ["show", "color"]): boolean =>
+    (Array.isArray(objects) ? objects : [objects]).some((o) => Object.keys(o?.dataLabels ?? {}).some((key) => !ignore.includes(key)));
+
+/**
+ * データ ラベルの設定。own（系列・線の objects）に保存した項目はその値を、無ければカード（「すべて」）の値を使う。
+ * own が無ければカードの値だけ（1.36.4 までと同じ）
+ */
+function dataLabelsSettingsOf(
+    dl: VisualFormattingSettingsModel["dataLabels"],
+    own?: Array<DataViewObjects | undefined> | DataViewObjects
+): DataLabelsSettings {
+    const raw = (property: string) => (own ? ownLabelValue(own, property) : null);
+    const num = (property: string, card: number | undefined) => {
+        const v = raw(property);
+        return typeof v === "number" ? v : card;
+    };
+    const flag = (property: string, card: boolean | undefined) => {
+        const v = raw(property);
+        return typeof v === "boolean" ? v : card;
+    };
+    const text = (property: string, card: string | undefined) => {
+        const v = raw(property);
+        return typeof v === "string" ? v : card;
+    };
+    const fill = (property: string, card: string | undefined) => {
+        const v = raw(property) as powerbi.Fill | null;
+        return v?.solid?.color ? String(v.solid.color) : card;
+    };
+    /** 選択肢（ItemDropdown の値は IEnumMember） */
+    const item = (property: string, card: powerbi.IEnumMember | undefined) => {
+        const v = raw(property);
+        return v !== null ? String(v) : card?.value !== undefined ? String(card.value) : undefined;
+    };
+    return {
+        show: dl.show.value ?? false,
+        position: item("position", dl.position.value) ?? "auto",
+        orientation: item("orientation", dl.orientation.value) ?? "horizontal",
+        overflow: flag("overflow", dl.overflow.value) ?? false,
+        fontSize: clampFontSize(num("fontSize", dl.fontSize.value), 9),
+        fontFamily: text("fontFamily", dl.fontFamily.value) ?? "Segoe UI",
+        bold: flag("bold", dl.bold.value) ?? false,
+        italic: flag("italic", dl.italic.value) ?? false,
+        underline: flag("underline", dl.underline.value) ?? false,
+        transparency: clampPercent(num("transparency", dl.transparency.value) ?? 0),
+        optimizeLabelDisplay: flag("optimizeLabelDisplay", dl.optimizeLabelDisplay.value) ?? false,
+        labelMaxWidth: Math.max(10, Math.min(2000, Number(num("labelMaxWidth", dl.labelMaxWidth.value)) || 200)),
+        detailShowBlankAs: text("detailShowBlankAs", dl.detailShowBlankAs.value) ?? "",
+        color: dl.color.value?.value ?? "",
+        backgroundShow: flag("backgroundShow", dl.backgroundShow.value) ?? false,
+        backgroundColor: fill("backgroundColor", dl.backgroundColor.value?.value) ?? "#FFFFFF",
+        backgroundTransparency: Math.max(0, Math.min(100, num("backgroundTransparency", dl.backgroundTransparency.value) ?? 0)),
+        precision: item("precision", dl.precision.value) ?? "auto",
+        valueShow: flag("valueShow", dl.valueShow.value) ?? true,
+        detailShow: flag("detailShow", dl.detailShow.value) ?? false,
+        detailFontFamily: text("detailFontFamily", dl.detailFont.fontFamily.value) ?? "Segoe UI",
+        detailFontSize: clampFontSize(num("detailFontSize", dl.detailFont.fontSize.value), 9),
+        detailBold: flag("detailBold", dl.detailFont.bold?.value) ?? false,
+        detailItalic: flag("detailItalic", dl.detailFont.italic?.value) ?? false,
+        detailUnderline: flag("detailUnderline", dl.detailFont.underline?.value) ?? false,
+        detailColor: fill("detailColor", dl.detailColor.value?.value) ?? "",
+        detailTransparency: clampPercent(num("detailTransparency", dl.detailTransparency.value) ?? 0),
+        titleShow: flag("titleShow", dl.titleShow.value) ?? false,
+        titleFontFamily: text("titleFontFamily", dl.titleFont.fontFamily.value) ?? "Segoe UI",
+        titleFontSize: clampFontSize(num("titleFontSize", dl.titleFont.fontSize.value), 9),
+        titleBold: flag("titleBold", dl.titleFont.bold?.value) ?? false,
+        titleItalic: flag("titleItalic", dl.titleFont.italic?.value) ?? false,
+        titleUnderline: flag("titleUnderline", dl.titleFont.underline?.value) ?? false,
+        titleColor: fill("titleColor", dl.titleColor.value?.value) ?? "",
+        titleTransparency: clampPercent(num("titleTransparency", dl.titleTransparency.value) ?? 0),
+        titleShowBlankAs: text("titleShowBlankAs", dl.titleShowBlankAs.value) ?? "",
+        valueShowBlankAs: text("valueShowBlankAs", dl.valueShowBlankAs.value) ?? "",
+        singleLine: item("labelContentLayout", dl.labelContentLayout.value) === LABEL_LAYOUTS.singleLine,
+        horizontalAlignment: alignmentOf(text("horizontalAlignment", dl.horizontalAlignment.value as string | undefined)),
+        halo: haloOf(flag("haloShow", dl.haloShow.value), fill("haloColor", dl.haloColor.value?.value), num("haloWidth", dl.haloWidth.value)),
+    };
+}
+
 /**
  * 値の大きい順に並べる。階層（levels が 2 つ以上）では、上のレベルから順に、
  * 親どうしを配下の合計で並べ、その中で子を並べる。同じ値なら元の順を保つ
@@ -1418,7 +1538,7 @@ function labelRoomOf(settings: VisualFormattingSettingsModel, stacked: boolean):
     if (dl.valueShow.value ?? true) sizes.push(dl.fontSize.value ?? 9);
     if (dl.detailShow.value) sizes.push(dl.detailFont.fontSize.value ?? 9);
     if (!sizes.length) return 0;
-    const px = sizes.map((pt) => Math.max(8, Math.min(32, pt)) * PT_TO_PX * LABEL_LINE_RATIO);
+    const px = sizes.map((pt) => clampFontSize(pt, pt) * PT_TO_PX * LABEL_LINE_RATIO);
     const singleLine = String(dl.labelContentLayout.value?.value) === LABEL_LAYOUTS.singleLine;
     const text = singleLine ? Math.max(...px) : px.reduce((sum, h) => sum + h, 0) + LABEL_ROOM_GAP * (px.length - 1);
     return text + LABEL_ROOM_PADDING * 2;
@@ -1435,6 +1555,10 @@ export interface LayerBasis {
     keepRows?: number[];
     /** カテゴリの並び（畳んだ後の行番号） */
     displayOrder?: number[];
+    /** 系列の並び（系列の番号を、集合なら左から、積み上げなら 0 の側から） */
+    seriesOrder?: number[];
+    /** 値の軸の自動のタイトルに並べる名前（メジャーごとに棒を並べるとき、すべてのメジャーの名前） */
+    valueTitleNames?: string[];
 }
 
 /** 棒の値の範囲（折れ線を入れる前）。比較レイヤーで軸をそろえるのに使う */
@@ -1487,8 +1611,96 @@ export function transform(
     runtime: CalculationRuntime = {},
     basis: LayerBasis = {}
 ): ViewModel {
+    const viewModel = buildViewModel(dataView, host, settings, runtime, basis);
+    const palette = host.colorPalette as powerbi.extensibility.ISandboxExtendedColorPalette | undefined;
+    // テーマの背景色。16 進でなければ（届かない・読めない色なら）白として扱う
+    const background = palette?.background?.value;
+    viewModel.background = background && /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(background) ? background : "#FFFFFF";
+    const hc = highContrastOf(palette);
+    return hc ? toHighContrast(viewModel, hc) : viewModel;
+}
+
+/** ハイコントラストの線の幅 (px)。棒の囲み・凡例の印 */
+const HC_BORDER_WIDTH = 1.5;
+/** ハイコントラストの折れ線の種類。色の代わりに線の種類で見分ける */
+const HC_LINE_STYLES = ["solid", "dashed", "dotted"];
+
+/**
+ * ハイコントラストのテーマで描く形に直す。文字・軸・線は前景色、背景は背景色にし、
+ * 棒は系列ごとに「背景色で塗って囲む／前景色で塗る／囲む線の模様」で見分ける（テーマの色・書式で選んだ色は使わない）。
+ * データ ラベルの文字色は自動にする（棒の塗りに合わせて前景色か背景色）
+ */
+export function toHighContrast(viewModel: ViewModel, hc: HighContrastColors): ViewModel {
+    const vm = withHighContrastColors(viewModel, hc, ["tooltip", "layerTooltips", "basis"]);
+    const fillOf = (seriesIndex: number) => (highContrastPattern(seriesIndex).solid ? hc.foreground : hc.background);
+    const seen = new Set<DataPoint>();
+    const paint = (d: DataPoint) => {
+        if (seen.has(d)) return;
+        seen.add(d);
+        const pattern = highContrastPattern(d.seriesIndex);
+        d.color = fillOf(d.seriesIndex);
+        d.transparency = 0;
+        d.borderShow = true;
+        d.borderColor = hc.foreground;
+        d.borderTransparency = 0;
+        d.borderWidth = HC_BORDER_WIDTH;
+        d.borderDash = pattern.dash;
+        d.labelColor = "";
+        if (d.labelSettings) d.labelSettings = autoLabelColors(d.labelSettings);
+    };
+    vm.dataPoints.forEach(paint);
+    for (const g of vm.categoryGroups) {
+        g.points.forEach(paint);
+        g.layerPoints?.forEach((points) => points.forEach(paint));
+    }
+    vm.dataLabels = autoLabelColors(vm.dataLabels);
+    // 罫線を外側だけにすると、背景色で塗った段の境目が消える。棒の色に合わせた罫線も背景色になるので使わない
+    vm.columns = { ...vm.columns, borderOutlineOnly: false, borderMatchColumn: false };
+    // リボンの帯を系列の色（背景色のことがある）に合わせると見えないので、前景色を透かして塗る
+    vm.ribbons = { ...vm.ribbons, matchSeriesColor: false, transparency: Math.max(vm.ribbons.transparency, 50) };
+    vm.series.forEach((s, i) => (s.color = fillOf(i)));
+    // 線が 2 本以上なら線の種類で見分ける（書式で選んだ種類より優先）。1 本なら書式のまま
+    if (vm.lines.length > 1) vm.lines.forEach((line, i) => (line.lineStyle = HC_LINE_STYLES[i % HC_LINE_STYLES.length]));
+    vm.lines.forEach((line) => {
+        line.transparency = 0;
+        // 線のラベルも、背景を透かすと前景色で塗った棒の上で読めない
+        if (line.labels) line.labels = { ...line.labels, settings: { ...line.labels.settings, backgroundTransparency: 0 } };
+    });
+    // 網掛けは前景色を透かして塗る。透かさないと、前景色で塗った棒が網掛けに溶ける
+    vm.valueLine = { ...vm.valueLine, shadeTransparency: Math.max(vm.valueLine.shadeTransparency, 50) };
+    vm.categoryLine = { ...vm.categoryLine, shadeTransparency: Math.max(vm.categoryLine.shadeTransparency, 50) };
+    for (const entry of vm.legendEntries) {
+        if (entry.kind === "bar") {
+            entry.color = fillOf(entry.index);
+            entry.barStyle = { transparency: 0, borderShow: true, borderColor: hc.foreground, borderWidth: HC_BORDER_WIDTH, borderDash: highContrastPattern(entry.index).dash };
+        }
+    }
+    vm.pareto = { ...vm.pareto, colors: { A: hc.foreground, B: hc.foreground, C: hc.foreground } };
+    vm.highContrast = hc;
+    return vm;
+}
+
+/** データ ラベルの文字色を自動にし（棒の塗りに合わせて前景色か背景色）、背景は透かさない */
+function autoLabelColors(dl: DataLabelsSettings): DataLabelsSettings {
+    return { ...dl, color: "", titleColor: "", detailColor: "", backgroundTransparency: 0 };
+}
+
+/** 数値のカテゴリの目盛りの書き方（モデルの書式。無ければそのまま） */
+function numberFormatterOf(column: DataViewCategoryColumn): (value: number) => string {
+    const format = valueFormatter.getFormatStringByColumn(column.source);
+    const formatter = format ? valueFormatter.create({ format }) : null;
+    return (value) => (formatter ? formatter.format(value) : String(value));
+}
+
+function buildViewModel(
+    dataView: DataView | undefined,
+    host: IVisualHost,
+    settings: VisualFormattingSettingsModel,
+    runtime: CalculationRuntime = {},
+    basis: LayerBasis = {}
+): ViewModel {
     // matrix で受けたなら categorical の形に詰め替える（折れ線の値は、凡例をまとめたカテゴリ全体の値になる）
-    dataView = categoricalOf(dataView);
+    dataView = withPlaceholderCategory(categoricalOf(dataView));
     // 上位 N 件＋「その他」。読む前に DataView を畳む。「その他」の選択は元のカテゴリの列から作り直す
     const originalCategories = dataView?.categorical?.categories;
     const originalDataView = dataView;
@@ -1501,6 +1713,8 @@ export function transform(
 
     const categorical: DataViewCategorical | undefined = dataView?.categorical;
     const categories = categorical?.categories?.[0];
+    // カテゴリを入れずに値だけ（仮の 1 行）。カテゴリのラベル・カテゴリごとの書式の対象を出さない
+    const noCategory = !!categories && isPlaceholderCategory(categories);
     const valueColumns: DataViewValueColumn[] = categorical?.values ?? [];
     // 凡例のフィールド。あれば values は凡例の値ごとのグループに分かれて届く
     const legendSource = categorical?.values?.source;
@@ -1513,7 +1727,11 @@ export function transform(
     if (lineOnly) slots.push(lineOnlySlotOf(categories!.values.length, groups, valueColumns));
 
     if (!categories || !slots.length || !categories.values.length) {
-        return EMPTY;
+        // 値のフィールドは入っているのに行が無い（絞り込みで 0 件など）なら、作り手向けの案内は出さずに何も描かない
+        const fieldsPlaced = (dataView?.metadata?.columns ?? []).some(
+            (column) => column.roles?.measure || column.roles?.lineMeasure || column.roles?.lineRatioNumerator
+        );
+        return fieldsPlaced ? { ...EMPTY, noData: true } : EMPTY;
     }
 
     const seriesMode = !lineOnly && (!!legendSource || slots.length > 1);
@@ -1543,18 +1761,22 @@ export function transform(
      * 上の階層のうち、どのカテゴリでも同じレベル。ドリルダウンすると親のレベルも届くが
      * （事業A → 製品A1 に入ると、どの行も「事業A / 製品A1 / …」）、全部同じ親を軸の段に繰り返しても読めない。
      * 軸の段・名前からは外し、ドリルの位置に出す。「すべて展開」で親が混ざるレベルから下は今までどおり段に出す。
-     * いちばん下のレベルは外さない（1 行だけでも名前は出す）
+     * いちばん下のレベルは外さない（1 行だけでも名前は出す）。
+     * 共通の親のうち、いちばん下の 1 段（いちばん下のレベルのすぐ上）は軸に残す。FY27 ＞ 1H ＞ 2Q にドリルして 7・8・9 月を
+     * 描くなら、2Q は軸の段に残し、FY27 ＞ 1H だけをドリルの位置に出す。絞り込み（スライサーなど）で親が 1 つになっただけのときも、
+     * 届くデータはドリルと同じで見分けられないが、こうすれば 1 段だけ絞ったときは軸に残る（標準と同じ）
      */
-    const commonDepth = (() => {
+    const sharedDepth = (() => {
         if (levelColumns.length < 2 || rowCount === 0) return 0;
         const first = levelKeysAt(0);
         let depth = 0;
         while (depth < levelColumns.length - 1 && Array.from({ length: rowCount }, (_, i) => i).every((i) => levelKeysAt(i)[depth] === first[depth])) depth++;
         return depth;
     })();
+    const commonDepth = Math.max(0, sharedDepth - 1);
     /**
      * ドリルダウンした位置。どのカテゴリでも同じ上の階層の値を「＞」でつなぐ（事業A に入り、製品A1 に入ると「事業A ＞ 製品A1」）。
-     * ドリルと、絞り込みで親が 1 つに決まった「すべて展開」は区別しない（どちらも、表示している項目がその親の下にあることは正しい）
+     * 共通の親のいちばん下の 1 段は軸に残すので、ここには出さない（事業A に入って製品を描くだけなら、ドリルの位置は出ない）
      */
     const commonLevels =
         rowCount > 0 ? levelsAt(0).slice(0, commonDepth).map((text, level) => (levelKeysAt(0)[level] === "blank" || text === "" ? BLANK_LEVEL_TEXT : text)) : [];
@@ -1604,7 +1826,57 @@ export function transform(
             .filter((v) => v !== null && v !== undefined)
             .map((v) => (typeof v === "number" ? v : Number(v)))
             .filter((v) => Number.isFinite(v));
-    const measureLineDefs: LineDef[] = [...lineColumns.entries()].map(([key, columns]) => {
+    /**
+     * 折れ線だけで凡例があるときは、凡例の値ごとに線を分ける（凡例の値ごとの値で引く。全体の値の 1 本にしない）。
+     * 線の名前は凡例の値（メジャーが複数なら「凡例の値 メジャー名」）
+     */
+    const keyOfColumn = (column: DataViewValueColumn) => column.source.queryName ?? column.source.displayName;
+    // 線が 2 本以上（「折れ線の値」が 2 つ、率もある）なら分けない。凡例の値ごとの書式の保存先が線ごとに分けられないため
+    const ratioNumeratorKeys = new Set(groups.flatMap((g) => g.values).filter((c) => c.source?.roles?.lineRatioNumerator).map(keyOfColumn));
+    const splitLinesByLegend = lineOnly && !!legendSource && lineColumns.size + ratioNumeratorKeys.size === 1;
+    const legendFormatter = legendSource ? valueFormatter.create({ format: valueFormatter.getFormatStringByColumn(legendSource) }) : null;
+    /**
+     * 分けた線の書式。凡例の値に保存したものを先に、無ければ分ける前の 1 本の線に保存したもの（メジャーの保存先）を引き継ぐ。
+     * 色だけは引き継がない（どの線も同じ色になる）
+     */
+    const splitObjectsOf = (own: DataViewObjects | undefined, shared: DataViewObjects | undefined): DataViewObjects | undefined => {
+        if (!shared) return own;
+        const merged: DataViewObjects = {};
+        for (const name of new Set([...Object.keys(shared), ...Object.keys(own ?? {})])) {
+            const { fill: _fill, ...inherited } = (shared[name] ?? {}) as Record<string, powerbi.DataViewPropertyValue>;
+            merged[name] = { ...(name === "lines" ? inherited : shared[name]), ...(own?.[name] ?? {}) };
+        }
+        return merged;
+    };
+    const numbersAt = (column: DataViewValueColumn | undefined): Array<number | null> =>
+        Array.from({ length: rowCount }, (_, i) => {
+            const v = column?.values[i];
+            if (v === null || v === undefined) return null;
+            const n = typeof v === "number" ? v : Number(v);
+            return Number.isFinite(n) ? n : null;
+        });
+    // 名前とキーは棒の系列と同じ（凡例の書式を通す。空白は「(空白)」）
+    const seriesKeyOf = (group: DataViewValueColumnGroup) => (group.name === null || group.name === undefined ? BLANK_TEXT : String(group.name));
+    const seriesNameOf = (group: DataViewValueColumnGroup) =>
+        group.name === null || group.name === undefined ? BLANK_TEXT : legendFormatter ? legendFormatter.format(group.name) : String(group.name);
+    const seriesLineDefsOf = (key: string, role: string): LineDef[] =>
+        groups.flatMap((group) => {
+            const column = group.values.find((c) => c.source?.roles?.[role] && keyOfColumn(c) === key);
+            if (!column) return [];
+            return [
+                {
+                    key: `${key}\u001f${seriesKeyOf(group)}`,
+                    name: seriesNameOf(group),
+                    format: valueFormatter.getFormatStringByColumn(column.source),
+                    objects: splitObjectsOf(group.objects, column.source.objects),
+                    values: numbersAt(column),
+                    series: { group, measureKey: key, measureName: column.source.displayName },
+                },
+            ];
+        });
+    const measureLineDefs: LineDef[] = splitLinesByLegend
+        ? [...lineColumns.keys()].flatMap((key) => seriesLineDefsOf(key, "lineMeasure"))
+        : [...lineColumns.entries()].map(([key, columns]) => {
         // 「その他」にまとめたときは、畳む前の DataView で判定する（行が減ると判定が変わり、残したカテゴリの線の値まで変わる）
         const independent =
             lineIndependenceBeforeCollapse?.get(key) ??
@@ -1652,7 +1924,19 @@ export function transform(
         return vals.length ? vals.reduce((sum, v) => sum + v, 0) : null;
     };
     const pairedNumerators = sharedDenominator ? numeratorList : numeratorList.slice(0, denominatorList.length);
-    const ratioLineDefs: LineDef[] = pairedNumerators.map(([key, numerators], k) => {
+    /** 凡例ごとに分けるときの率：凡例の値ごとに、その値の分子 ÷ 分母 */
+    const seriesRatioDefsOf = (key: string, k: number): LineDef[] => {
+        const denominatorKey = keyOfColumn(denominatorList[sharedDenominator ? 0 : k][0]);
+        return seriesLineDefsOf(key, "lineRatioNumerator").map((def) => {
+            const group = def.series!.group;
+            const denominator = group.values.find((c) => c.source?.roles?.lineRatioDenominator && keyOfColumn(c) === denominatorKey);
+            const ratio = { numerators: def.values, denominators: numbersAt(denominator) };
+            return { ...def, values: divideRatio(ratio.numerators, ratio.denominators), ratio };
+        });
+    };
+    const ratioLineDefs: LineDef[] = splitLinesByLegend
+        ? pairedNumerators.flatMap(([key], k) => seriesRatioDefsOf(key, k))
+        : pairedNumerators.map(([key, numerators], k) => {
         const denominators = denominatorList[sharedDenominator ? 0 : k];
         const ratio = {
             numerators: Array.from({ length: rowCount }, (_, i) => seriesSumOf(numerators, i)),
@@ -1669,20 +1953,17 @@ export function transform(
             ratio,
         };
     });
-    const lineDefs = [...measureLineDefs, ...ratioLineDefs].map((def) => ({ ...def, format: lineFormatOf(def, settings.lines) }));
+    const lineDefs = [...measureLineDefs, ...ratioLineDefs].map((def) => ({
+        ...def,
+        format: lineFormatOf(def, settings.lines),
+    }));
     const isBlankAt = (column: DataViewValueColumn, i: number) => column.values[i] === null || column.values[i] === undefined;
     const numberAt = (column: DataViewValueColumn, i: number) => {
         const raw = column.values[i];
         return typeof raw === "number" ? raw : Number(raw) || 0;
     };
 
-    const getDropdownValue = (sliceVal: any, fallback: string): string => {
-        if (sliceVal == null) return fallback;
-        if (typeof sliceVal === "object" && sliceVal !== null && "value" in sliceVal) {
-            return String(sliceVal.value);
-        }
-        return String(sliceVal);
-    };
+    const getDropdownValue = enumValue;
 
     const chartTypeValue = getDropdownValue(settings.chart.chartType?.value, CHART_TYPES.clustered);
     // パレート。100% 積み上げのパレートはどの棒も同じ高さで意味が無いので、そのあいだは積み上げとして描く
@@ -1725,8 +2006,36 @@ export function transform(
     if (!paretoOn && (settings.columns.reverseOrder.value ?? false)) displayOrder.reverse();
     // 「その他」は、並べ替えによらずいつも最後に置く
     if (otherRow >= 0) displayOrder = [...displayOrder.filter((i) => i !== otherRow), otherRow];
+
+    // --- X 軸の種類「連続」 ------------------------------------------------------
+    // X 軸が日付か数値の 1 列（階層なら、上のレベルがどの行でも同じ＝いちばん下まで 1 つの親にドリルしたとき）なら選べる。
+    // 縦棒だけで、パレート・「その他」・値の空白があるときは選べない（書式ペインにも出さない）。
+    // 連続では値の小さい順に並べる（並べ替え・逆順は効かない。標準と同じ）
+    const axisType = lowestLevel.source?.type;
+    const axisIsDate = !!axisType?.dateTime;
+    const axisIsInteger = !!axisType?.integer;
+    const singleAxisLevel = levelColumns.length === 1 || sharedDepth === levelColumns.length - 1;
+    const axisValues = singleAxisLevel && (axisIsDate || !!axisType?.numeric || axisIsInteger) ? lowestLevel.values.map((raw) => axisValueOf(raw, axisIsDate)) : [];
+    const continuousAvailable = axisValues.length > 0 && !horizontal && !paretoOn && otherRow < 0 && axisValues.every((v) => v !== null);
+    const continuousOn = continuousAvailable && getDropdownValue(settings.categoryAxis.axisKind.value, AXIS_KINDS.categorical) === AXIS_KINDS.continuous;
+    if (continuousOn) displayOrder = Array.from({ length: rowCount }, (_, i) => i).sort((a, b) => axisValues[a]! - axisValues[b]!);
     // 比較レイヤーの奥のレイヤーは、手前のレイヤーの並びに合わせる（値順でも、手前の値の順に並べる）
     if (basis.displayOrder && basis.displayOrder.length === rowCount) displayOrder = basis.displayOrder.slice();
+
+    // 系列の並び（集合で並べる順・積み上げで 0 から積む順）。値順は全カテゴリの合計（空白は 0）の大きい順、
+    // 逆にするのは集合だけ（積み上げは「積み上げ順を逆にする」）。比較レイヤーの奥は手前の並びに合わせる
+    let seriesOrder = slots.map((_, s) => s);
+    if (seriesMode && (settings.columns.seriesSortByValue.value ?? false)) {
+        const totalOf = (s: number) => Array.from({ length: rowCount }, (_, i) => (isSkipped(slots[s].column, i) ? 0 : numberAt(slots[s].column, i))).reduce((a, b) => a + b, 0);
+        const totals = seriesOrder.map(totalOf);
+        seriesOrder = [...seriesOrder].sort((a, b) => totals[b] - totals[a] || a - b);
+    }
+    if (seriesMode && !stacked && (settings.columns.seriesReverseOrder.value ?? false)) seriesOrder.reverse();
+    if (basis.seriesOrder && basis.seriesOrder.length === slots.length) seriesOrder = basis.seriesOrder.slice();
+    const seriesPositions = slots.map((_, s) => seriesOrder.indexOf(s));
+    /** 0 の側から積む系列の順 */
+    const stackSequence = reverseStack ? [...seriesOrder].reverse() : seriesOrder;
+    const stackReordered = stackSequence.some((s, k) => s !== k);
 
     // --- 累計 ------------------------------------------------------------
     // 表示の順に、系列ごとに値を足していく。区切り（階層のレベル）の値が変わったところで 0 に戻す。
@@ -2062,11 +2371,21 @@ export function transform(
         niceMax = logSign > 0 ? logUpper : -logLower;
         rawTicks = logAxisTicks(logLower, logUpper).map((m) => logSign * m);
     } else if (percent) {
-        // 100% 積み上げの軸は割合。負の値があれば -100%〜100%、正だけなら 0%〜100%（標準と同じ。最小値・最大値は使わない）
-        const lowerBound = minValue < 0 ? -1 : 0;
-        const upperBound = maxValue > 0 || minValue >= 0 ? 1 : 0;
+        // 100% 積み上げの軸は割合。負の値があれば -100%〜100%、正だけなら 0%〜100%（標準と同じ）。
+        // 最小値・最大値を入れたら、割合（0 なら 0%、-0.2 なら -20%）として使う。負の値がわずかで下の -100% が空くときに、
+        // 最小値 0 で 0% を下端にできる（入れた範囲の外は端で切る）
+        // -1〜1 の外の値（集合の軸のつもりで入れた 1000 など）は割合として読まず自動にする。上下が逆なら両方とも自動にする
+        const ratioOrAuto = (v: number | undefined) => (v !== undefined && v >= -1 && v <= 1 ? v : undefined);
+        const autoLower = minValue < 0 ? -1 : 0;
+        const autoUpper = maxValue > 0 || minValue >= 0 ? 1 : 0;
+        let lowerBound = ratioOrAuto(userStart) ?? autoLower;
+        let upperBound = ratioOrAuto(userEnd) ?? autoUpper;
+        if (!(upperBound > lowerBound)) {
+            lowerBound = autoLower;
+            upperBound = autoUpper > autoLower ? autoUpper : autoLower + 1;
+        }
         niceMin = lowerBound;
-        niceMax = upperBound > lowerBound ? upperBound : lowerBound + 1;
+        niceMax = upperBound;
         rawTicks = scaleLinear().domain([niceMin, niceMax]).ticks(5);
     } else {
         // 合計ラベルを出す積み上げでは、自動で決める端に範囲の 10% の余白を足す
@@ -2127,7 +2446,9 @@ export function transform(
     const tickOf = (t: number): Tick => {
         let label: string;
         if (percent) {
-            label = `${Math.round(t * 100)}%`;
+            // 狭い範囲（最小値・最大値で 99.5%〜100% など）でも目盛りの名前が重ならないよう、間隔に合わせて小数を足す
+            const stepPercent = rawTicks.length > 1 ? Math.abs(rawTicks[1] - rawTicks[0]) * 100 : 1;
+            label = `${(t * 100).toFixed(stepPercent >= 1 ? 0 : Math.min(4, Math.ceil(-Math.log10(stepPercent))))}%`;
         } else if (percentMeasure && !isLogScaleActive) {
             // 目盛りの間隔が 1% 未満なら小数 1 桁（第 2 Y 軸の率と同じ）
             const stepPercent = rawTicks.length > 1 ? Math.abs(rawTicks[1] - rawTicks[0]) * 100 : 1;
@@ -2157,21 +2478,13 @@ export function transform(
     const autoCategoryTitle = concatenateLabels ? levelNames.join(" ") : levelNames[levelNames.length - 1];
     const categoryAxisSettings: CategoryAxisSettings = {
         show: catAxis.show.value ?? true,
-        fontFamily: catAxis.font.fontFamily.value ?? "Segoe UI",
-        fontSize: Math.max(8, Math.min(32, catAxis.font.fontSize.value ?? 9)),
-        bold: catAxis.font.bold?.value ?? false,
-        italic: catAxis.font.italic?.value ?? false,
-        underline: catAxis.font.underline?.value ?? false,
+        ...fontFields(catAxis.font, "Segoe UI", 9),
         labelColor: catAxis.labelColor.value?.value || "#605E5C",
         maxHeight: Math.max(0, Math.min(100, catAxis.maxHeight.value ?? 25)),
         titleShow: catAxis.titleShow.value ?? false,
         // 自動のタイトルは標準と同じ：段に重ねるならいちばん下のレベル、1 行につなぐならレベルの名前を並べる
         titleText: catAxis.titleText.value?.trim() || autoCategoryTitle,
-        titleFontFamily: catAxis.titleFont.fontFamily.value ?? "DIN",
-        titleFontSize: Math.max(8, Math.min(32, catAxis.titleFont.fontSize.value ?? 12)),
-        titleBold: catAxis.titleFont.bold?.value ?? false,
-        titleItalic: catAxis.titleFont.italic?.value ?? false,
-        titleUnderline: catAxis.titleFont.underline?.value ?? false,
+        ...titleFontFields(catAxis.titleFont, "DIN", 12),
         titleColor: catAxis.titleColor.value?.value || "#252423",
         minCategoryWidth: Math.max(0, Math.min(500, catAxis.minCategoryWidth.value ?? 20)),
         scrollStart: getDropdownValue(catAxis.scrollStart.value, "start"),
@@ -2184,8 +2497,11 @@ export function transform(
     // ユーザー設定の単位ラベル（例: "億円", "円", "bn"）を反映したタイトル生成。
     // 値が複数のときの自動のタイトルは、標準と同じく値の名前を「および」でつなぐ
     const composedUnit = percent ? "" : composeUnitText(effectiveUnitWord, unitText, unitIncludeDisplayUnit);
-    const autoValueTitle = lineOnly
-        ? lineDefs.map((def) => def.name).join(" および ")
+    // メジャーごとに棒を並べるときは、すべてのメジャーの名前。凡例ごとに分けた線は、凡例の値ではなくメジャーの名前（標準と同じ）
+    const autoValueTitle = basis.valueTitleNames?.length
+        ? basis.valueTitleNames.join(" および ")
+        : lineOnly
+        ? [...new Set(lineDefs.map((def) => def.series?.measureName ?? def.name))].join(" および ")
         : seriesMode && !legendSource
         ? slots.map((slot) => slot.name).join(" および ")
         : (slots[0].column.source?.displayName ?? "");
@@ -2213,11 +2529,7 @@ export function transform(
         roundRange,
         tickCount: tickCountOf(valAxis.tickCount.value),
         show: valAxis.show.value ?? true,
-        fontFamily: valAxis.font.fontFamily.value ?? "Segoe UI",
-        fontSize: Math.max(8, Math.min(32, valAxis.font.fontSize.value ?? 9)),
-        bold: valAxis.font.bold?.value ?? false,
-        italic: valAxis.font.italic?.value ?? false,
-        underline: valAxis.font.underline?.value ?? false,
+        ...fontFields(valAxis.font, "Segoe UI", 9),
         labelColor: valAxis.labelColor.value?.value || "#605E5C",
         unitNotation,
         showUnitOnAxis,
@@ -2225,11 +2537,7 @@ export function transform(
         titleShow: valAxis.titleShow.value ?? true,
         titleText: formattedValueTitle,
         titleStyle: valueTitleStyle,
-        titleFontFamily: valAxis.titleFont.fontFamily.value ?? "DIN",
-        titleFontSize: Math.max(8, Math.min(32, valAxis.titleFont.fontSize.value ?? 12)),
-        titleBold: valAxis.titleFont.bold?.value ?? false,
-        titleItalic: valAxis.titleFont.italic?.value ?? false,
-        titleUnderline: valAxis.titleFont.underline?.value ?? false,
+        ...titleFontFields(valAxis.titleFont, "DIN", 12),
         titleColor: valAxis.titleColor.value?.value || "#252423",
     };
 
@@ -2257,48 +2565,7 @@ export function transform(
 
     // データラベル設定の抽出
     const dl = settings.dataLabels;
-    const dataLabelsSettings: DataLabelsSettings = {
-        show: dl.show.value ?? false,
-        position: String(dl.position.value?.value ?? "auto"),
-        orientation: String(dl.orientation.value?.value ?? "horizontal"),
-        overflow: dl.overflow.value ?? false,
-        fontSize: Math.max(8, Math.min(32, dl.fontSize.value ?? 9)),
-        fontFamily: dl.fontFamily.value ?? "Segoe UI",
-        bold: dl.bold.value ?? false,
-        italic: dl.italic.value ?? false,
-        underline: dl.underline.value ?? false,
-        transparency: clampPercent(dl.transparency.value ?? 0),
-        optimizeLabelDisplay: dl.optimizeLabelDisplay.value ?? false,
-        labelMaxWidth: Math.max(10, Math.min(2000, Number(dl.labelMaxWidth.value) || 200)),
-        detailShowBlankAs: dl.detailShowBlankAs.value ?? "",
-        color: dl.color.value?.value ?? "",
-        backgroundShow: dl.backgroundShow.value ?? false,
-        backgroundColor: dl.backgroundColor.value?.value ?? "#FFFFFF",
-        backgroundTransparency: Math.max(0, Math.min(100, dl.backgroundTransparency.value ?? 0)),
-        precision: String(dl.precision.value?.value ?? "auto"),
-        valueShow: dl.valueShow.value ?? true,
-        detailShow: dl.detailShow.value ?? false,
-        detailFontFamily: dl.detailFont.fontFamily.value ?? "Segoe UI",
-        detailFontSize: Math.max(8, Math.min(32, dl.detailFont.fontSize.value ?? 9)),
-        detailBold: dl.detailFont.bold?.value ?? false,
-        detailItalic: dl.detailFont.italic?.value ?? false,
-        detailUnderline: dl.detailFont.underline?.value ?? false,
-        detailColor: dl.detailColor.value?.value ?? "",
-        detailTransparency: clampPercent(dl.detailTransparency.value ?? 0),
-        titleShow: dl.titleShow.value ?? false,
-        titleFontFamily: dl.titleFont.fontFamily.value ?? "Segoe UI",
-        titleFontSize: Math.max(8, Math.min(32, dl.titleFont.fontSize.value ?? 9)),
-        titleBold: dl.titleFont.bold?.value ?? false,
-        titleItalic: dl.titleFont.italic?.value ?? false,
-        titleUnderline: dl.titleFont.underline?.value ?? false,
-        titleColor: dl.titleColor.value?.value ?? "",
-        titleTransparency: clampPercent(dl.titleTransparency.value ?? 0),
-        titleShowBlankAs: dl.titleShowBlankAs.value ?? "",
-        valueShowBlankAs: dl.valueShowBlankAs.value ?? "",
-        singleLine: String(dl.labelContentLayout.value?.value) === LABEL_LAYOUTS.singleLine,
-        horizontalAlignment: alignmentOf(dl.horizontalAlignment.value),
-        halo: haloOf(dl.haloShow.value, dl.haloColor.value?.value, dl.haloWidth.value),
-    };
+    const dataLabelsSettings: DataLabelsSettings = dataLabelsSettingsOf(dl);
 
     // 列（columns）設定の抽出
     const col = settings.columns;
@@ -2347,11 +2614,7 @@ export function transform(
         position: legendPlacementValue(lg.position.value?.value),
         title: (lg.titleShow.value ?? true) ? (lg.titleText.value?.trim() || (legendSource?.displayName ?? "")) : "",
         titleShow: lg.titleShow.value ?? true,
-        fontFamily: lg.font.fontFamily.value ?? "Segoe UI",
-        fontSize: Math.max(8, Math.min(32, lg.font.fontSize.value ?? 10)),
-        bold: lg.font.bold?.value ?? false,
-        italic: lg.font.italic?.value ?? false,
-        underline: lg.font.underline?.value ?? false,
+        ...fontFields(lg.font, "Segoe UI", 10),
         color: lg.labelColor.value?.value || "#605E5C",
     };
 
@@ -2392,6 +2655,8 @@ export function transform(
             borderWidth: clampBorderWidth(firstOf(slot.objects, (o) => customNumber(o, "borderWidth")) ?? columnsSettings.borderWidth),
             labelShow: seriesMode ? (firstOf(slot.objects, labelFlag) ?? true) : true,
             explicitLabelColor: seriesMode ? firstOf(slot.objects, labelColorOf) : null,
+            // 系列ごとに保存したデータ ラベルの項目（位置・タイトル・値・詳細・背景・レイアウト・文字の縁）。無ければ「すべて」の設定
+            labelSettings: seriesMode && hasOwnLabelSettings(slot.objects) ? dataLabelsSettingsOf(dl, slot.objects) : undefined,
         };
     });
 
@@ -2411,11 +2676,7 @@ export function transform(
     const totalLabelsSettings: TotalLabelsSettings = {
         show: chartType === CHART_TYPES.stacked && (tl.show.value ?? false),
         split: tl.splitPositiveNegative.value ?? false,
-        fontFamily: tl.font.fontFamily.value ?? "Segoe UI",
-        fontSize: Math.max(8, Math.min(32, tl.font.fontSize.value ?? 9)),
-        bold: tl.font.bold?.value ?? false,
-        italic: tl.font.italic?.value ?? false,
-        underline: tl.font.underline?.value ?? false,
+        ...fontFields(tl.font, "Segoe UI", 9),
         color: tl.color.value?.value || "#605E5C",
         backgroundShow: tl.backgroundShow.value ?? false,
         backgroundColor: tl.backgroundColor.value?.value || "#FFFFFF",
@@ -2438,6 +2699,7 @@ export function transform(
     };
 
     const labelPrecision = dataLabelsSettings.precision !== "auto" ? dataLabelsSettings.precision : precision;
+    const baseLabelPrecision = labelPrecision;
     // データラベルのマイナスと 0 の書き方（▲・±0 など）
     const labelSign: Partial<SignStyle> = {
         negative: getDropdownValue(dl.negativeStyle.value, NEGATIVE_STYLES.minus),
@@ -2446,15 +2708,18 @@ export function transform(
     };
     // 値の行を符号で塗る（見える符号で決める。▲0 はマイナス、±0 は塗らない）
     const toneMode = getDropdownValue(dl.toneMode.value, TONE_MODES.none);
+    // 書式ペインで決めていなければ、テーマの良い・悪いの色を字に使える濃さにして使う
+    const savedLabels = dataView?.metadata?.objects?.dataLabels;
+    const themeTones = sentimentTextColors(host.colorPalette as powerbi.extensibility.ISandboxExtendedColorPalette);
     const toneColors = {
-        good: dl.positiveColor.value?.value || DEFAULT_GOOD_COLOR,
-        bad: dl.negativeColor.value?.value || DEFAULT_BAD_COLOR,
+        good: ownToneColor(dl.positiveColor.value?.value, savedLabels?.positiveColor, DEFAULT_GOOD_COLOR) || themeTones.good,
+        bad: ownToneColor(dl.negativeColor.value?.value, savedLabels?.negativeColor, DEFAULT_BAD_COLOR) || themeTones.bad,
     };
     const toneColorOf = (sign: number): string => {
         const tone = toneOf(sign, 1, toneMode);
         return tone ? toneColors[tone] : "";
     };
-    const formatted = (val: number) =>
+    const formatted = (val: number, labelPrecision = baseLabelPrecision) =>
         // 100% 積み上げの軸は割合なので、データラベルは値ごとに単位を付ける（1,250億 など）
         percentMeasure && !isLogScaleActive
             ? {
@@ -2577,12 +2842,12 @@ export function transform(
         const absoluteSum = absoluteSums[i];
         let positiveEnd = 0;
         let negativeEnd = 0;
-        // 積み上げ順を逆にする：凡例の後ろの系列から 0 の側に積む。始まりを先に決めておく
+        // 積み上げ順を変えたとき（逆にする・系列を値順）：系列の並びの順に 0 の側から積む。始まりを先に決めておく
         const reversedStarts = new Map<number, number>();
-        if (reverseStack) {
+        if (stackReordered) {
             let up = 0;
             let down = 0;
-            for (let s = slots.length - 1; s >= 0; s--) {
+            for (const s of stackSequence) {
                 const slot = slots[s];
                 const v = numberAt(slot.column, i);
                 const amount = isSkipped(slot.column, i) ? 0 : percent ? (absoluteSums[i] > 0 ? v / absoluteSums[i] : 0) : v;
@@ -2626,7 +2891,7 @@ export function transform(
             let start = 0;
             if (rankOrder) {
                 start = ribbonStarts.get(s) ?? 0;
-            } else if (reverseStack) {
+            } else if (stacked && stackReordered) {
                 start = reversedStarts.get(s) ?? 0;
             } else if (stacked) {
                 start = amount >= 0 ? positiveEnd : negativeEnd;
@@ -2667,7 +2932,8 @@ export function transform(
                 outermost: true,
                 insetStart,
                 rank: ribbonsOn ? ribbonRanks.get(s) ?? null : null,
-                ...formatted(val),
+                ...formatted(val, style.labelSettings && style.labelSettings.precision !== "auto" ? style.labelSettings.precision : labelPrecision),
+                ...(style.labelSettings ? { labelSettings: style.labelSettings } : {}),
                 ...(() => {
                     const text = valueFieldTextOf(slot, i);
                     return text === null ? {} : { dataLabelText: text, labelToneColor: "" };
@@ -2701,8 +2967,8 @@ export function transform(
         if (stacked) {
             const pick = (want: (d: DataPoint) => boolean, better: (a: DataPoint, b: DataPoint) => boolean) =>
                 points.reduce((best, d, k) => (want(d) && (best < 0 || better(d, points[best])) ? k : best), -1);
-            // 外側の端の棒：凡例の順に積むなら最後の棒、逆に積むなら最初の棒
-            const outerOf = (flags: boolean[]) => (reverseStack ? flags.indexOf(true) : flags.lastIndexOf(true));
+            // 外側の端の棒：積む順でいちばん最後の棒
+            const outerOf = (flags: boolean[]) => [...stackSequence].reverse().find((s) => flags[s]) ?? -1;
             const lastPositive = rankOrder
                 ? pick((d) => !d.blank && d.value > 0, (a, b) => a.value >= b.value)
                 : outerOf(points.map((d) => !d.blank && d.value > 0));
@@ -2731,7 +2997,7 @@ export function transform(
         categoryGroups.push({ category, label: shownLevelsAt(i).join(" "), levels: shownLevelsAt(i), levelKeys: shownLevelKeysAt(i), rowIndex: i, points, totals });
 
         // 「その他」は書式の対象にしない（ID はまとめた最初のカテゴリの仮のもので、そこに保存するとそのカテゴリの書式になる）
-        if (!seriesMode && i !== otherRow) {
+        if (!seriesMode && i !== otherRow && !noCategory) {
             columnTargets.push({
                 name: category,
                 selector: points[0].selectionId.getSelector(),
@@ -2776,6 +3042,8 @@ export function transform(
                 selector,
                 show: style.labelShow,
                 color: style.explicitLabelColor ?? "",
+                kind: "bar",
+                values: style.labelSettings ?? dataLabelsSettings,
             });
         });
     }
@@ -2916,29 +3184,12 @@ export function transform(
                 : isLogScaleActive
                     ? formatDynamicValue(def.value, unitNotation, p1, true)
                     : formatValue(def.value, unitDef.divisor, p1);
-        const label = vlLabelText === "name" ? def.name : vlLabelText === "both" ? `${def.name} ${valueText}` : valueText;
+        const label = referenceLabelOf(vlLabelText, def.name, valueText);
         return [{ name: def.name, value: def.value, ratio: secondary ? calcRatio2(def.value) : calcRatio(def.value), secondary, label }];
     });
     const valueLine: ValueLineSettings = {
-        show: valueLineOn,
-        color: vl.color.value?.value || "#605E5C",
-        transparency: Math.max(0, Math.min(100, vl.transparency.value ?? 0)),
-        lineStyle: getDropdownValue(vl.lineStyle.value, "dashed"),
-        dashArray: vl.dashArray.value ?? "",
-        scaleWithWidth: vl.scaleWithWidth.value ?? true,
-        dashCap: getDropdownValue(vl.dashCap.value, "none"),
-        width: Math.max(1, Math.min(10, vl.width.value ?? 1)),
-        layer: getDropdownValue(vl.layer.value, "front") === "back" ? "back" : "front",
-        shadeShow: vl.shadeShow.value ?? false,
+        ...referenceLineStyleOf(vl.parts, valueLineOn),
         shadeRegion: getDropdownValue(vl.shadeRegion.value, "below") === "above" ? "above" : "below",
-        shadeColor: (vl.shadeMatchLine.value ?? false) ? vl.color.value?.value || "#605E5C" : vl.shadeColor.value?.value || "#E1DFDD",
-        shadeTransparency: Math.max(0, Math.min(100, vl.shadeTransparency.value ?? 40)),
-        labelShow: vl.labelShow.value ?? true,
-        labelHorizontal: getDropdownValue(vl.labelHorizontal.value, "left") === "right" ? "right" : "left",
-        labelVertical: getDropdownValue(vl.labelVertical.value, "top") === "bottom" ? "bottom" : "top",
-        labelColor: vl.labelColor.value?.value || "#605E5C",
-        labelFontSize: Math.max(6, Math.min(32, vl.labelFontSize.value ?? 9)),
-        labelAvoidOverlap: vl.labelAvoidOverlap.value ?? true,
     };
 
     // 折れ線の色は、棒の系列の続きのテーマの色（系列 1 本の棒はテーマの 1 番目を使う扱いにして、線は 2 番目から）
@@ -2951,6 +3202,31 @@ export function transform(
     const areasOn = areaCard.show.value ?? false;
     // 網掛け領域の下の辺は値 0 の高さ（軸の範囲の外なら端。対数なら端）
     const baselineRatio = onSecondary ? calcRatio2(0) : calcRatio(0);
+    // 折れ線のデータ ラベル。線ごとの「このシリーズに表示」をオンにした線だけ（既定はオフ。カードの表示がオフなら出さない）。
+    // 値の書き方は、率（% の書式）なら %、それ以外は線を描く軸（第 2 Y 軸か Y 軸）の表示単位と桁数。桁数は線ごと・「すべて」の順に選んだもの
+    const lineLabelShown = (def: LineDef) => dataLabelsSettings.show && ownLabelValue(def.objects, "show") === true;
+    const linePositionOf = (objects: DataViewObjects | undefined): LineLabelInfo["position"] => {
+        const saved = ownLabelValue(objects, "linePosition");
+        return saved === LINE_LABEL_POSITIONS.above ? "above" : saved === LINE_LABEL_POSITIONS.below ? "below" : "auto";
+    };
+    const lineLabelOf = (def: LineDef): LineLabelInfo => {
+        const own = dataLabelsSettingsOf(dl, def.objects);
+        const chosen = own.precision;
+        const percentLine = isPercentFormat(def.format);
+        const digits = chosen !== "auto" ? chosen : percentLine ? "auto" : onSecondary ? v2Precision : precision;
+        const divisor = onSecondary ? unitDef2.divisor : unitDef.divisor;
+        const textOf = (v: number) =>
+            percentLine ? formatPercent(v, digits, percentDigitsOf(def.format), labelSign) : formatSigned(v, divisor, digits, labelSign);
+        return {
+            position: linePositionOf(def.objects),
+            color: labelColorOf(def.objects) ?? dataLabelsSettings.color,
+            settings: own,
+            texts: categoryGroups.map((g) => {
+                const v = def.values[g.rowIndex];
+                return v === null ? null : textOf(v);
+            }),
+        };
+    };
     const lines: LineSeriesInfo[] = lineDefs.map((def) => {
         const own = def.objects?.lines;
         const ownFill = (own?.fill as powerbi.Fill | undefined)?.solid?.color;
@@ -2962,9 +3238,12 @@ export function transform(
         };
         const ownAreaShow = def.objects?.areas?.show;
         const ownLineShow = own?.show;
-        const measureBuilder = () => host.createSelectionIdBuilder();
-        // 棒の系列と同じく、テーマの色は色の指定があっても取る（後ろの線の色がずれないように）
-        const themeColor = host.colorPalette.getColor(def.key).value;
+        // 凡例ごとに分けた線は、凡例の値（系列）とメジャーで選ぶ
+        const measureKey = def.series?.measureKey ?? def.key;
+        const measureBuilder = () =>
+            def.series ? withSeriesOf(host.createSelectionIdBuilder(), categorical!, def.series.group) : host.createSelectionIdBuilder();
+        // 棒の系列と同じく、テーマの色は色の指定があっても取る（後ろの線の色がずれないように）。凡例ごとの線は凡例の値で取る
+        const themeColor = host.colorPalette.getColor(def.series ? seriesKeyOf(def.series.group) : def.key).value;
         return {
             name: def.name,
             color: ownFill ? String(ownFill) : themeColor,
@@ -2985,7 +3264,7 @@ export function transform(
             lineShow: typeof ownLineShow === "boolean" ? ownLineShow : lineCard.show.value ?? true,
             baselineRatio,
             marker: settings.markers.values(def.objects?.markers),
-            selectionId: measureBuilder().withMeasure(def.key).createSelectionId(),
+            selectionId: measureBuilder().withMeasure(measureKey).createSelectionId(),
             points: categoryGroups.map((g) => {
                 const value = def.values[g.rowIndex];
                 return {
@@ -2993,15 +3272,17 @@ export function transform(
                     ...(cumulativeLineKeys.has(def.key) && resetBefore[positionOf.get(g.rowIndex)!] ? { breakBefore: true } : {}),
                     value,
                     ratio: value === null ? null : onSecondary ? calcRatio2(value) : calcRatio(value),
-                    selectionId: withCategories(measureBuilder(), g.rowIndex).withMeasure(def.key).createSelectionId(),
+                    selectionId: withCategories(measureBuilder(), g.rowIndex).withMeasure(measureKey).createSelectionId(),
                 };
             }),
             tooltip: { displayName: cumulativeLineKeys.has(def.key) ? `${def.name}（累計）` : def.name, format: def.format, values: def.values },
+            ...(lineLabelShown(def) ? { labels: lineLabelOf(def) } : {}),
         };
     });
     const lineTargets: LineTarget[] = lines.map((line, j) => ({
         name: line.name,
-        selector: { metadata: lineDefs[j].key },
+        // 凡例ごとに分けた線の書式は、凡例の値（棒の系列と同じ保存先）に置く
+        selector: lineDefs[j].series ? withSeriesOf(host.createSelectionIdBuilder(), categorical!, lineDefs[j].series!.group).createSelectionId().getSelector() : { metadata: lineDefs[j].key },
         color: line.color,
         width: line.width,
         lineStyle: line.lineStyle,
@@ -3026,6 +3307,18 @@ export function transform(
         transparency: line.transparency,
         marker: line.marker ?? settings.markers.values(),
     }));
+    // データ ラベルの「設定の適用先」に線も並べる（棒の系列のあと。標準と同じ）。線のラベルは既定でオフ
+    lineTargets.forEach((target, j) => {
+        labelTargets.push({
+            name: target.name,
+            selector: target.selector,
+            show: lineLabelShown(lineDefs[j]),
+            color: labelColorOf(lineDefs[j].objects) ?? "",
+            kind: "line",
+            values: dataLabelsSettingsOf(dl, lineDefs[j].objects),
+            linePosition: linePositionOf(lineDefs[j].objects),
+        });
+    });
 
     if (paretoOn) {
         const ratioColor = paretoCard.ratioColor.value?.value || "#E66C37";
@@ -3074,11 +3367,7 @@ export function transform(
         valueShow: v2.valueShow.value ?? true,
         ticks: ticks2,
         ticksFor: ticks2For,
-        fontFamily: v2.font.fontFamily.value ?? "Segoe UI",
-        fontSize: Math.max(8, Math.min(32, v2.font.fontSize.value ?? 9)),
-        bold: v2.font.bold?.value ?? false,
-        italic: v2.font.italic?.value ?? false,
-        underline: v2.font.underline?.value ?? false,
+        ...fontFields(v2.font, "Segoe UI", 9),
         labelColor: v2.labelColor.value?.value || "#605E5C",
         titleShow: v2.titleShow.value ?? true,
         // 自動のタイトルは折れ線の名前（標準と同じ。複数なら「および」でつなぐ）
@@ -3087,11 +3376,7 @@ export function transform(
             v2TitleStyle,
             v2ComposedUnit
         ),
-        titleFontFamily: v2.titleFont.fontFamily.value ?? "DIN",
-        titleFontSize: Math.max(8, Math.min(32, v2.titleFont.fontSize.value ?? 12)),
-        titleBold: v2.titleFont.bold?.value ?? false,
-        titleItalic: v2.titleFont.italic?.value ?? false,
-        titleUnderline: v2.titleFont.underline?.value ?? false,
+        ...titleFontFields(v2.titleFont, "DIN", 12),
         titleColor: v2.titleColor.value?.value || "#252423",
         badgeText: onSecondary && !v2UnitInTitle
             ? resolveBadgeText({
@@ -3150,7 +3435,8 @@ export function transform(
                 barStyle: { transparency: 0, borderShow: false, borderColor: SINGLE_BAR_LEGEND_GRAY, borderWidth: 0 },
             }]
             : seriesMode
-            ? series.map((s, index) => ({
+            ? // 凡例も系列の並べ替え（値順・逆順）に合わせる（集合の左からの並びと同じ。積み上げは「積み上げ順を逆にする」の前の順）
+              seriesOrder.map((index) => ({ s: series[index], index })).map(({ s, index }) => ({
                 kind: "bar" as const,
                 index,
                 name: s.name,
@@ -3213,32 +3499,15 @@ export function transform(
             if (raw === undefined) return [];
             // データ値：返した文字（数は書式を当てた値、真偽はメジャーの名前）。名前：メジャーの名前。両方：名前と値
             const value = typeof raw === "string" ? raw : typeof raw === "boolean" ? name : valueFormatter.create({ format: valueFormatter.getFormatStringByColumn(columns[0].source) }).format(raw);
-            const label = labelText === "name" ? name : labelText === "both" ? `${name} ${value}` : value;
+            const label = referenceLabelOf(labelText, name, value);
             return [{ index, label }];
         });
         return { name, marks };
     });
     const categoryLine: CategoryLineSettings = {
-        show: cl.show.value ?? true,
+        ...referenceLineStyleOf(cl.parts, cl.show.value ?? true),
         position: (["before", "center", "after"].includes(getDropdownValue(cl.position.value, "before")) ? getDropdownValue(cl.position.value, "before") : "before") as CategoryLineSettings["position"],
-        color: cl.color.value?.value || "#605E5C",
-        transparency: Math.max(0, Math.min(100, cl.transparency.value ?? 0)),
-        lineStyle: getDropdownValue(cl.lineStyle.value, "dashed"),
-        dashArray: cl.dashArray.value ?? "",
-        scaleWithWidth: cl.scaleWithWidth.value ?? true,
-        dashCap: getDropdownValue(cl.dashCap.value, "none"),
-        width: Math.max(1, Math.min(10, cl.width.value ?? 1)),
-        layer: getDropdownValue(cl.layer.value, "front") === "back" ? "back" : "front",
-        shadeShow: cl.shadeShow.value ?? false,
         shadeRegion: getDropdownValue(cl.shadeRegion.value, "before") === "after" ? "after" : "before",
-        shadeColor: (cl.shadeMatchLine.value ?? false) ? cl.color.value?.value || "#605E5C" : cl.shadeColor.value?.value || "#E1DFDD",
-        shadeTransparency: Math.max(0, Math.min(100, cl.shadeTransparency.value ?? 40)),
-        labelShow: cl.labelShow.value ?? true,
-        labelHorizontal: getDropdownValue(cl.labelHorizontal.value, "right") === "left" ? "left" : "right",
-        labelVertical: getDropdownValue(cl.labelVertical.value, "top") === "bottom" ? "bottom" : "top",
-        labelColor: cl.labelColor.value?.value || "#605E5C",
-        labelFontSize: Math.max(6, Math.min(32, cl.labelFontSize.value ?? 9)),
-        labelAvoidOverlap: cl.labelAvoidOverlap.value ?? true,
     };
 
     const mk = settings.markers;
@@ -3280,8 +3549,22 @@ export function transform(
         legend: legendInfo,
         legendEntries,
         totalLabels: totalLabelsSettings,
+        continuousAvailable,
+        ...(continuousOn
+            ? {
+                  continuousAxis: {
+                      values: displayOrder.map((i) => axisValues[i]!),
+                      isDate: axisIsDate,
+                      integer: axisIsInteger || displayOrder.every((i) => Number.isInteger(axisValues[i])),
+                      min: Math.min(...displayOrder.map((i) => axisValues[i]!)),
+                      max: Math.max(...displayOrder.map((i) => axisValues[i]!)),
+                      formatNumber: numberFormatterOf(lowestLevel),
+                  },
+              }
+            : {}),
         lines,
         lineTargets,
+        lineBlanks: String(settings.lines.blanks.value?.value ?? LINE_BLANKS.break),
         ...(lineWarning ? { lineWarning } : {}),
         markers: mk.values(),
         areas: {
@@ -3327,7 +3610,9 @@ export function transform(
             extent: ownExtent,
             keepRows: otherRow >= 0 ? Array.from({ length: originalCategories![0].values.length }, (_, i) => i).filter((i) => !others.mergedRows.includes(i)) : null,
             displayOrder,
+            seriesOrder,
         },
+        seriesPositions,
         cumulative: {
             available: cumulativeAvailable,
             enabled: cumulativeEnabled,
@@ -3336,7 +3621,9 @@ export function transform(
             reset: resetDepth < 0 ? CUMULATIVE_RESET_NONE : cumulativeReset,
         },
         ...(lineOnly ? { lineOnly: true } : {}),
+        ...(noCategory ? { noCategory: true } : {}),
         isEmpty: dataPoints.length === 0 && !lineOnly,
+        noData: false,
     };
 }
 
@@ -3345,8 +3632,7 @@ export const TRUNCATED_TITLE = "すべてのカテゴリを読み込めていま
 export const TRUNCATED_NOTICE =
     "カテゴリが 30,000 件に達したので、並べた順の先頭の 30,000 件で描いています。「その他」と積み上げの合計、パレートの累積比は、読み込めたカテゴリで計算しています。フィルターで絞ってください。";
 /** 凡例の値が上限（2,000）に達したときの警告 */
-export const SERIES_TRUNCATED_TITLE = "すべての凡例の値を読み込めていません";
-export const SERIES_TRUNCATED_NOTICE = "凡例の値が 2,000 に達したので、先頭の 2,000 で描いています。フィルターで絞ってください。";
+export { SERIES_TRUNCATED_TITLE, SERIES_TRUNCATED_NOTICE };
 
 /** 折れ線の率の分子と分母の数が合わないときの警告 */
 export const LINE_RATIO_WARNING_TITLE = "折れ線の率の分子と分母の数が合いません";
@@ -3361,6 +3647,11 @@ interface LineDef {
     objects: DataViewObjects | undefined;
     values: Array<number | null>;
     ratio?: { numerators: Array<number | null>; denominators: Array<number | null> };
+    /**
+     * 折れ線だけで凡例があるとき、凡例の値ごとに分けた線の系列（凡例のグループ）。measureKey はメジャーの queryName、measureName はメジャーの表示名。
+     * 色・書式は凡例の値ごと（棒の系列と同じ保存先）で、テーマの色も凡例の値で取る
+     */
+    series?: { group: DataViewValueColumnGroup; measureKey: string; measureName: string };
 }
 
 /** 行ごとに分子 ÷ 分母。分子か分母が空白、分母が 0 なら空白（0% ではない） */

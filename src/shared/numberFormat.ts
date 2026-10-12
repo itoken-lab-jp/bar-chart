@@ -1,4 +1,5 @@
 import { UnitItem, formatValue } from "./units";
+import { readableKeepingHue } from "./color";
 
 /**
  * マイナスと 0 の書き方。決算説明資料などの日本の帳票は、マイナスを ▲ で書き、変化なしを ±0 や -、
@@ -122,6 +123,28 @@ export const DIFF_TONE_MODE_ITEMS: UnitItem[] = [
 export const DEFAULT_GOOD_COLOR = "#1AAB40";
 export const DEFAULT_BAD_COLOR = "#D64554";
 
+/**
+ * 良い・悪いの字が地に対して読める濃さ（4.5:1。小さい字の読みやすさの目安、WCAG AA）。テーマの良い・悪いの色が淡ければ
+ * （Fluent 2 の #9FD89F・#EEACB2）、色相と彩度を保ったまま暗くする
+ */
+export const SENTIMENT_CONTRAST = 4.5;
+
+/**
+ * 符号で塗る文字の良い・悪いの色の既定。書式ペインで決めていなければ、テーマのセンチメント カラー（palette.positive・negative）を
+ * 地に対して読める濃さにして使う。テーマの色が無い・読めなければ DEFAULT_GOOD_COLOR・DEFAULT_BAD_COLOR から作る
+ */
+export function sentimentTextColors(
+    palette: { positive?: { value?: string }; negative?: { value?: string }; background?: { value?: string }; foreground?: { value?: string } } | undefined
+): { good: string; bad: string } {
+    const valid = (info: { value?: string } | undefined, fallback: string) => (info?.value && /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/i.test(info.value) ? info.value : fallback);
+    const background = valid(palette?.background, "#FFFFFF");
+    const text = valid(palette?.foreground, "#252423");
+    return {
+        good: readableKeepingHue(valid(palette?.positive, DEFAULT_GOOD_COLOR), background, SENTIMENT_CONTRAST, text),
+        bad: readableKeepingHue(valid(palette?.negative, DEFAULT_BAD_COLOR), background, SENTIMENT_CONTRAST, text),
+    };
+}
+
 export type Tone = "good" | "bad";
 
 /**
@@ -152,4 +175,24 @@ export function percentDigitsOf(format: string | undefined): number {
 export function formatPercent(value: number, precision: string, formatDigits: number, style?: Partial<SignStyle>): string {
     const digits = precision === "auto" ? String(formatDigits) : precision;
     return `${style ? formatSigned(value * 100, 1, digits, style) : formatValue(value * 100, 1, digits)}%`;
+}
+
+/**
+ * 書式ペインの良い・悪いの色を使うか。保存してある（saved）か、既定の色から変えてあれば使い、そうでなければ空（テーマの色を使う）。
+ * 既定の色と同じ色を選んで保存したときも、保存があれば使う
+ */
+export function ownToneColor(value: string | undefined, saved: unknown, fallback: string): string {
+    return value && (saved != null || value.toUpperCase() !== fallback.toUpperCase()) ? value : "";
+}
+
+/**
+ * 書式ペインの良い・悪いの色に、実際に塗る色（テーマから作った色）を出す（保存はしない）。書式で決めていなければ置き換える
+ */
+export function showThemeToneColors(
+    slices: { positiveColor: { value: { value: string } }; negativeColor: { value: { value: string } } },
+    saved: Record<string, unknown> | undefined,
+    tones: { good: string; bad: string }
+): void {
+    if (!ownToneColor(slices.positiveColor.value?.value, saved?.positiveColor, DEFAULT_GOOD_COLOR)) slices.positiveColor.value = { value: tones.good };
+    if (!ownToneColor(slices.negativeColor.value?.value, saved?.negativeColor, DEFAULT_BAD_COLOR)) slices.negativeColor.value = { value: tones.bad };
 }

@@ -71,6 +71,8 @@ export function categoryTooltipRows(source: TooltipSource, rowIndex: number, cat
     if (levels && levels.names.length > 1) {
         return levels.names.map((name, k) => ({ displayName: name, value: levels.texts[rowIndex]?.[k] ?? "" }));
     }
+    // カテゴリを入れていない（名前の無いカテゴリ 1 つ）なら、カテゴリの行は出さない
+    if (!source.categoryName && !category) return [];
     return [{ displayName: source.categoryName, value: category }];
 }
 

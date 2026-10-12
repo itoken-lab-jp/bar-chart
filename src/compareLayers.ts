@@ -45,15 +45,21 @@ export function transformWithLayers(
     settings: VisualFormattingSettingsModel,
     runtime: CalculationRuntime = {}
 ): ViewModel {
-    const compare = compareSettingsOf(settings);
     const split = splitByCompareBy(dataView, settings);
-    const view = categoricalOf(split ? split.layers[0].view : dataView);
-    const sources = split ? [] : compareSourcesOf(view);
+    const whole = categoricalOf(split ? split.layers[0].view : dataView);
+    // 凡例があり「値」にメジャーが 2 つ以上なら、メジャーごとに 1 枚のレイヤーにして、重ねずに隣り合わせに並べる
+    const measures = split ? [] : groupedMeasuresOf(whole);
+    const grouped = measures.length > 1;
+    const compare = grouped ? GROUPED_LAYOUT : compareSettingsOf(settings);
+    const view = grouped ? measureViewOf(whole!, keyOf(measures[0])) : whole;
+    const sources = split || grouped ? [] : compareSourcesOf(view);
     const front = transform(view, host, settings, runtime);
-    const show = settings.compare.show.value ?? true;
+    const show = grouped || (settings.compare.show.value ?? true);
     const layers: LayerSource[] = split
         ? split.layers
-        : [{ name: frontNameOf(view), view: view! }, ...sources.map((source) => ({ name: source.displayName ?? "", view: layerViewOf(view!, source) }))];
+        : grouped
+            ? measures.map((source) => ({ name: source.displayName ?? "", view: measureViewOf(whole!, keyOf(source)) }))
+            : [{ name: frontNameOf(view), view: view! }, ...sources.map((source) => ({ name: source.displayName ?? "", view: layerViewOf(view!, source) }))];
     // 折れ線だけ（値が空）のときは、重ねる棒が無いので重ねない。線は手前の値で描き、そのことを知らせる
     if (front.lineOnly && layers.length > 1 && show) {
         const compareLineOnlyWarning = split
@@ -69,11 +75,12 @@ export function transformWithLayers(
     const order = {
         keepRows: front.basis.keepRows ?? undefined,
         displayOrder: front.basis.displayOrder,
+        seriesOrder: front.basis.seriesOrder,
     };
     // 1 回目でレイヤーごとの範囲を集め、2 回目ですべてのレイヤーの範囲の軸で描き直す
     const firstPass = backViews.map((v) => transform(v, host, settings, runtime, order));
     const extent = unionOf([front.basis.extent, ...firstPass.map((vm) => vm.basis.extent)]);
-    const merged = transform(view, host, settings, runtime, { extent });
+    const merged = transform(view, host, settings, runtime, { extent, ...(grouped ? { valueTitleNames: layers.map((l) => l.name) } : {}) });
     const backs = backViews.map((v) => transform(v, host, settings, runtime, { ...order, extent }));
 
     const backsByRow = backs.map((vm) => new Map(vm.categoryGroups.map((g) => [g.rowIndex, g.points])));
@@ -93,6 +100,7 @@ export function transformWithLayers(
             });
             return points;
         });
+        if (grouped) group.layerTotals = backs.map((vm) => vm.categoryGroups.find((g) => g.rowIndex === group.rowIndex)?.totals ?? null);
     }
     const compareLayers = layers.slice(0, MAX_COMPARE_LAYERS).map((layer) => ({ name: layer.name }));
     const legendEntries = legendEntriesOf(merged, compareLayers.map((l) => l.name), compare, settings.legend.reverseOrder.value ?? false);
@@ -100,6 +108,7 @@ export function transformWithLayers(
         ...merged,
         compare,
         compareLayers,
+        ...(grouped ? { measureGroups: true } : {}),
         layerTooltips: [merged.tooltip, ...backs.map((vm) => vm.tooltip)],
         legendEntries,
         legend: { ...merged.legend, show: (settings.legend.show.value ?? true) && legendEntries.length > 0 && (merged.seriesMode || merged.legend.show || legendEntries.length > 1) },
@@ -134,7 +143,7 @@ export function splitByCompareBy(
     const matrix = dataView?.matrix;
     const levels = matrix?.rows?.levels ?? [];
     const depth = levels.findIndex((level) => level.sources.some((source) => source.roles?.compareBy));
-    // カテゴリが無い（比較の列だけ）ときは分けない（カテゴリが無ければ棒グラフは描かない）
+    // カテゴリが無い（比較の列だけ）ときは分けない（比較の列をカテゴリとして描く）
     if (!dataView || !matrix?.rows?.root || depth <= 0) return null;
     const keyOf = (value: unknown) => (value instanceof Date ? `date:${value.getTime()}` : `${typeof value}:${String(value)}`);
     const nameOf = (value: unknown) => (value === null || value === undefined || value === "" ? "(空白)" : value instanceof Date ? value.toLocaleDateString() : String(value));
@@ -186,6 +195,12 @@ export function splitByCompareBy(
     return { layers: ordered.map(layerOf), name: levels[depth].sources[0]?.displayName ?? "", ...(warning ? { warning } : {}) };
 }
 
+/**
+ * メジャーごとに棒を並べるときのレイヤーの置き方。最初のメジャーを左（横棒は上）にして、重ねずに並べる。
+ * どの棒も薄くせず、凡例にはレイヤーを出さない（どのメジャーかは位置と軸のタイトル・ツールヒントで読む）
+ */
+const GROUPED_LAYOUT: CompareSettings = { rightFront: false, overlap: 0, backOpacity: 1, outline: false, showInLegend: false };
+
 function compareSettingsOf(settings: VisualFormattingSettingsModel): CompareSettings {
     const card = settings.compare;
     const percent = (value: number | undefined, fallback: number) =>
@@ -212,6 +227,53 @@ function compareSourcesOf(view: DataView | undefined): DataViewMetadataColumn[] 
     const position = (source: DataViewMetadataColumn) =>
         (source as DataViewMetadataColumn & { rolesIndex?: Record<string, number[]> }).rolesIndex?.compare?.[0] ?? 0;
     return [...found.values()].sort((a, b) => position(a) - position(b));
+}
+
+/**
+ * 凡例があるときに「値」に入れたメジャー（入れた順）。凡例の値ごとに複製されて届くので、1 つにまとめる。
+ * 凡例が無ければ空（メジャーごとの系列として、今までどおり 1 本の棒の中に並べる・積む）
+ */
+function groupedMeasuresOf(view: DataView | undefined): DataViewMetadataColumn[] {
+    if (!view?.categorical?.values?.source) return [];
+    const found = new Map<string, DataViewMetadataColumn>();
+    for (const column of view.categorical.values) {
+        const source = column.source;
+        if (source?.roles?.measure && !found.has(keyOf(source))) found.set(keyOf(source), source);
+    }
+    const position = (source: DataViewMetadataColumn) =>
+        (source as DataViewMetadataColumn & { rolesIndex?: Record<string, number[]> }).rolesIndex?.measure?.[0] ?? 0;
+    return [...found.values()].sort((a, b) => position(a) - position(b));
+}
+
+/**
+ * 1 つのメジャーだけを「値」として読む DataView。ほかのメジャーは「値」の役割を外す（ほかの役割も無ければ列ごと外す）。
+ * 凡例のグループ・折れ線・ツールヒントなどはそのまま残す
+ */
+function measureViewOf(view: DataView, key: string): DataView {
+    const categorical = view.categorical!;
+    const values = categorical.values!;
+    const columnMap = new Map<DataViewValueColumn, DataViewValueColumn | null>();
+    const swap = (column: DataViewValueColumn): DataViewValueColumn | null => {
+        if (columnMap.has(column)) return columnMap.get(column)!;
+        const roles = { ...(column.source?.roles ?? {}) };
+        if (!roles.measure || keyOf(column.source) === key) {
+            columnMap.set(column, column);
+            return column;
+        }
+        delete roles.measure;
+        const next = Object.keys(roles).length ? { ...column, source: { ...column.source, roles } } : null;
+        columnMap.set(column, next);
+        return next;
+    };
+    const keep = (column: DataViewValueColumn | null): column is DataViewValueColumn => column !== null;
+    const groups: DataViewValueColumnGroup[] = values.grouped?.() ?? [];
+    const newGroups = groups.map((group) => ({ ...group, values: group.values.map(swap).filter(keep) }));
+    const newValues = Object.assign(values.map(swap).filter(keep), {
+        grouped: () => newGroups,
+        ...(values.source ? { source: values.source } : {}),
+        ...(values.identityFields ? { identityFields: values.identityFields } : {}),
+    }) as powerbi.DataViewValueColumns;
+    return { ...view, categorical: { ...categorical, values: newValues } };
 }
 
 /** 手前のレイヤーの名前（「値」に入れたメジャーの名前） */
@@ -276,7 +338,7 @@ function unionOf(extents: ValueExtent[]): ValueExtent {
  */
 function legendEntriesOf(vm: ViewModel, names: string[], compare: CompareSettings, reverse: boolean): LegendItemInfo[] {
     if (!compare.showInLegend) return vm.legendEntries;
-    const color = vm.seriesMode ? LAYER_LEGEND_GRAY : vm.series[0]?.color ?? vm.columns.fill;
+    const color = vm.highContrast ? vm.highContrast.foreground : vm.seriesMode ? LAYER_LEGEND_GRAY : vm.series[0]?.color ?? vm.columns.fill;
     const layers = names.map((name, index): LegendItemInfo => ({
         kind: "layer",
         index,
