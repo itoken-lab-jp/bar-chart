@@ -179,6 +179,12 @@ export interface LinePoint {
     value: number | null;
     /** 軸の比率。第 2 Y 軸で描くときは第 2 Y 軸の比率 */
     ratio: number | null;
+    /**
+     * ほかのビジュアルで選ばれたときの該当分（Power BI のハイライト）。該当しなければ null。ハイライトが無ければ持たない。
+     * highlightRatio は highlight を ratio と同じ軸で表した比率
+     */
+    highlight?: number | null;
+    highlightRatio?: number | null;
     selectionId: ISelectionId;
 }
 
@@ -1820,9 +1826,9 @@ function buildViewModel(
      */
     const lineIndependenceBeforeCollapse = otherRow >= 0 ? lineIndependenceOf(originalDataView) : null;
     /** 系列ごとに複製された列の、行 i の数（空白・数でないものは除く） */
-    const numbersOf = (columns: DataViewValueColumn[], i: number) =>
+    const numbersOf = (columns: DataViewValueColumn[], i: number, highlights = false) =>
         columns
-            .map((c) => c.values[i])
+            .map((c) => (highlights ? c.highlights?.[i] : c.values[i]))
             .filter((v) => v !== null && v !== undefined)
             .map((v) => (typeof v === "number" ? v : Number(v)))
             .filter((v) => Number.isFinite(v));
@@ -1848,9 +1854,9 @@ function buildViewModel(
         }
         return merged;
     };
-    const numbersAt = (column: DataViewValueColumn | undefined): Array<number | null> =>
+    const numbersAt = (column: DataViewValueColumn | undefined, highlights = false): Array<number | null> =>
         Array.from({ length: rowCount }, (_, i) => {
-            const v = column?.values[i];
+            const v = highlights ? column?.highlights?.[i] : column?.values[i];
             if (v === null || v === undefined) return null;
             const n = typeof v === "number" ? v : Number(v);
             return Number.isFinite(n) ? n : null;
@@ -1870,6 +1876,7 @@ function buildViewModel(
                     format: valueFormatter.getFormatStringByColumn(column.source),
                     objects: splitObjectsOf(group.objects, column.source.objects),
                     values: numbersAt(column),
+                    ...(column.highlights ? { highlights: numbersAt(column, true) } : {}),
                     series: { group, measureKey: key, measureName: column.source.displayName },
                 },
             ];
@@ -1881,8 +1888,8 @@ function buildViewModel(
         const independent =
             lineIndependenceBeforeCollapse?.get(key) ??
             Array.from({ length: rowCount }, (_, i) => numbersOf(columns, i)).every((vals) => vals.every((v) => v === vals[0]));
-        const values: Array<number | null> = Array.from({ length: rowCount }, (_, i) => {
-            const vals = numbersOf(columns, i);
+        const valuesOf = (highlights: boolean): Array<number | null> => Array.from({ length: rowCount }, (_, i) => {
+            const vals = numbersOf(columns, i, highlights);
             if (!vals.length) return null;
             return independent ? vals[0] : vals.reduce((sum, v) => sum + v, 0);
         });
@@ -1892,7 +1899,8 @@ function buildViewModel(
             name: source.displayName,
             format: valueFormatter.getFormatStringByColumn(source),
             objects: source.objects,
-            values,
+            values: valuesOf(false),
+            ...(columns.some((c) => c.highlights) ? { highlights: valuesOf(true) } : {}),
         };
     });
     /**
@@ -1919,8 +1927,8 @@ function buildViewModel(
     const sharedDenominator = denominatorList.length === 1;
     const lineWarning = numeratorList.length !== denominatorList.length && !(sharedDenominator && numeratorList.length > 0) ? LINE_RATIO_WARNING : undefined;
     /** 系列をまたいだ合計。すべて空白なら空白 */
-    const seriesSumOf = (columns: DataViewValueColumn[], i: number): number | null => {
-        const vals = numbersOf(columns, i);
+    const seriesSumOf = (columns: DataViewValueColumn[], i: number, highlights = false): number | null => {
+        const vals = numbersOf(columns, i, highlights);
         return vals.length ? vals.reduce((sum, v) => sum + v, 0) : null;
     };
     const pairedNumerators = sharedDenominator ? numeratorList : numeratorList.slice(0, denominatorList.length);
@@ -1931,7 +1939,13 @@ function buildViewModel(
             const group = def.series!.group;
             const denominator = group.values.find((c) => c.source?.roles?.lineRatioDenominator && keyOfColumn(c) === denominatorKey);
             const ratio = { numerators: def.values, denominators: numbersAt(denominator) };
-            return { ...def, values: divideRatio(ratio.numerators, ratio.denominators), ratio };
+            const highlightRatio = def.highlights && denominator?.highlights ? { numerators: def.highlights, denominators: numbersAt(denominator, true) } : undefined;
+            return {
+                ...def,
+                values: divideRatio(ratio.numerators, ratio.denominators),
+                ratio,
+                ...(highlightRatio ? { highlights: divideRatio(highlightRatio.numerators, highlightRatio.denominators), highlightRatio } : { highlights: undefined }),
+            };
         });
     };
     const ratioLineDefs: LineDef[] = splitLinesByLegend
@@ -1942,6 +1956,12 @@ function buildViewModel(
             numerators: Array.from({ length: rowCount }, (_, i) => seriesSumOf(numerators, i)),
             denominators: Array.from({ length: rowCount }, (_, i) => seriesSumOf(denominators, i)),
         };
+        const highlightRatio = [...numerators, ...denominators].some((c) => c.highlights)
+            ? {
+                numerators: Array.from({ length: rowCount }, (_, i) => seriesSumOf(numerators, i, true)),
+                denominators: Array.from({ length: rowCount }, (_, i) => seriesSumOf(denominators, i, true)),
+            }
+            : undefined;
         const source = numerators[0].source;
         return {
             key,
@@ -1951,6 +1971,7 @@ function buildViewModel(
             objects: source.objects,
             values: divideRatio(ratio.numerators, ratio.denominators),
             ratio,
+            ...(highlightRatio ? { highlights: divideRatio(highlightRatio.numerators, highlightRatio.denominators), highlightRatio } : {}),
         };
     });
     const lineDefs = [...measureLineDefs, ...ratioLineDefs].map((def) => ({
@@ -2112,13 +2133,25 @@ function buildViewModel(
                     cumulate(def.ratio.denominators, true) as Array<number | null>
                 )
                 : (cumulate(def.values, true) as Array<number | null>);
+            // ハイライトは棒と同じく「ここまでの該当分」
+            if (def.highlights) {
+                def.highlights = def.highlightRatio
+                    ? divideRatio(
+                        cumulate(def.highlightRatio.numerators, false) as Array<number | null>,
+                        cumulate(def.highlightRatio.denominators, false) as Array<number | null>
+                    )
+                    : (cumulate(def.highlights, false) as Array<number | null>);
+            }
             cumulativeLineKeys.add(def.key);
         }
     }
     // 「その他」の行の折れ線は、足しようが無いので空白（「値」と同じ列を「折れ線の値」にも入れたとき・累計で空白が埋まったときも）。
     // 率の線は、まとめたカテゴリの分子の合計 ÷ 分母の合計なので出せる（累計でなければ。累計の「その他」は区切りをまたぐので空白）
     if (otherRow >= 0) lineDefs.forEach((def) => {
-        if (!def.ratio || cumulativeLineKeys.has(def.key)) def.values[otherRow] = null;
+        if (!def.ratio || cumulativeLineKeys.has(def.key)) {
+            def.values[otherRow] = null;
+            if (def.highlights) def.highlights[otherRow] = null;
+        }
     });
     /** ツールヒントの値の行。累計なら「値（累計）」と、累計の前の値の行を出す */
     const measureTooltipOf = (slot: SeriesSlot): { measure: TooltipColumn; before?: TooltipColumn } => {
@@ -3267,11 +3300,14 @@ function buildViewModel(
             selectionId: measureBuilder().withMeasure(measureKey).createSelectionId(),
             points: categoryGroups.map((g) => {
                 const value = def.values[g.rowIndex];
+                const highlight = def.highlights ? def.highlights[g.rowIndex] ?? null : undefined;
+                const ratioOf = (v: number) => (onSecondary ? calcRatio2(v) : calcRatio(v));
                 return {
                     rowIndex: g.rowIndex,
                     ...(cumulativeLineKeys.has(def.key) && resetBefore[positionOf.get(g.rowIndex)!] ? { breakBefore: true } : {}),
                     value,
-                    ratio: value === null ? null : onSecondary ? calcRatio2(value) : calcRatio(value),
+                    ratio: value === null ? null : ratioOf(value),
+                    ...(highlight !== undefined ? { highlight, highlightRatio: highlight === null ? null : ratioOf(highlight) } : {}),
                     selectionId: withCategories(measureBuilder(), g.rowIndex).withMeasure(measureKey).createSelectionId(),
                 };
             }),
@@ -3307,12 +3343,14 @@ function buildViewModel(
         transparency: line.transparency,
         marker: line.marker ?? settings.markers.values(),
     }));
-    // データ ラベルの「設定の適用先」に線も並べる（棒の系列のあと。標準と同じ）。線のラベルは既定でオフ
+    // データ ラベルの「設定の適用先」に線も並べる（棒の系列のあと。標準と同じ）。線のラベルは既定でオフ。
+    // 「このシリーズに表示」は線に保存した値をそのまま出す（カードの表示がオフでも。カードの表示を混ぜると、
+    // カードがオフのときにオンにしたトグルがすぐオフに戻る）。描くかどうかはカードの表示とあわせて決める（lineLabelShown）
     lineTargets.forEach((target, j) => {
         labelTargets.push({
             name: target.name,
             selector: target.selector,
-            show: lineLabelShown(lineDefs[j]),
+            show: ownLabelValue(lineDefs[j].objects, "show") === true,
             color: labelColorOf(lineDefs[j].objects) ?? "",
             kind: "line",
             values: dataLabelsSettingsOf(dl, lineDefs[j].objects),
@@ -3574,7 +3612,8 @@ function buildViewModel(
         },
         valueAxis2: valueAxis2Settings,
         ribbons: ribbonSettings,
-        hasHighlights: slots.some((slot) => !!slot.column.highlights),
+        // 折れ線だけのときも、線のハイライトで選ばれたと分かるように
+        hasHighlights: slots.some((slot) => !!slot.column.highlights) || lineDefs.some((def) => !!def.highlights),
         tooltip: {
             categoryName: categories.source?.displayName ?? "",
             ...(levelColumns.length > 1
@@ -3647,6 +3686,9 @@ interface LineDef {
     objects: DataViewObjects | undefined;
     values: Array<number | null>;
     ratio?: { numerators: Array<number | null>; denominators: Array<number | null> };
+    /** ほかのビジュアルで選ばれたときの該当分（ハイライト）。列にハイライトが無ければ持たない。率の線は分子と分母の該当分も持つ */
+    highlights?: Array<number | null>;
+    highlightRatio?: { numerators: Array<number | null>; denominators: Array<number | null> };
     /**
      * 折れ線だけで凡例があるとき、凡例の値ごとに分けた線の系列（凡例のグループ）。measureKey はメジャーの queryName、measureName はメジャーの表示名。
      * 色・書式は凡例の値ごと（棒の系列と同じ保存先）で、テーマの色も凡例の値で取る

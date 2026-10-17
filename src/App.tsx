@@ -13,6 +13,7 @@ import { clusterLayout, spanOf, levelRunsOf, layerLayout, layerOpacity, category
 import { layoutLegend, LegendLayout, LegendItemBox, LEGEND_MARKER_GAP, LAYER_GLYPH_THICKNESS, LAYER_GLYPH_LENGTH } from "./legend";
 import { linePath, areaPath, markerPath, XY } from "./linePath";
 import { recommendedTickCount, fitTicks as fitTicksBy } from "./shared/ticks";
+import { gridCutout, useGridMaskId } from "./shared/gridCutout";
 import { CUSTOM_LINE_STYLE, gridLineStroke, lineStrokeOf } from "./shared/gridlines";
 
 export { gridLineStroke, lineStrokeOf };
@@ -286,6 +287,43 @@ function layerPointsOf(g: CategoryGroup, layer: number): DataPoint[] {
     return layer === 0 ? g.points : g.layerPoints?.[layer - 1] ?? [];
 }
 
+/**
+ * カテゴリの start〜end（表示の順。end を含む）を選ぶときの ID。カテゴリのラベルや階層の区切りを押したときに使う。
+ * 棒は系列ごとの棒の ID（カテゴリ＋系列）、「その他」はまとめたカテゴリ全部。カテゴリだけの ID にすると、系列があるとき棒の ID と
+ * 一致せず選んだ棒が薄くなる（棒と同じ ID で選ぶ）。折れ線の点も、そのカテゴリの点の ID で一緒に選ぶ（棒だけだと線が選ばれず、
+ * 線が沈む）。折れ線だけのときは置いてある見えない棒の ID を入れない（線の点と一致せず、選ぶと線が全部薄くなる）
+ */
+export function categorySelectionIds(viewModel: ViewModel, start: number, end: number): ISelectionId[] {
+    const groups = viewModel.categoryGroups.slice(start, end + 1);
+    const lineIds = lineSelectionIdsAt(viewModel, groups);
+    if (viewModel.lineOnly) return lineIds;
+    return [...groups.flatMap((g) => g.points.flatMap((d) => d.selectionIds ?? [d.selectionId])), ...lineIds];
+}
+
+/** groups のカテゴリにある折れ線の点の ID（値の無い点は除く。「その他」はまとめたカテゴリ全部） */
+function lineSelectionIdsAt(viewModel: ViewModel, groups: CategoryGroup[]): ISelectionId[] {
+    const rows = new Set(groups.map((g) => g.rowIndex));
+    return viewModel.lines.flatMap((line) =>
+        line.points.filter((p) => rows.has(p.rowIndex) && p.value !== null).flatMap((p) => p.selectionIds ?? [p.selectionId])
+    );
+}
+
+/** 折れ線が選ばれているか（凡例で線ごと、または線の点。「その他」の点は、まとめたカテゴリの ID のどれか） */
+export function linePicked(line: LineSeriesInfo | undefined, selectedIds: ISelectionId[]): boolean {
+    if (!line) return false;
+    return lineWholePicked(line, selectedIds) || line.points.some((p) => linePointPicked(p, selectedIds));
+}
+
+/** 凡例で線ごと選ばれているか（線の ID） */
+function lineWholePicked(line: LineSeriesInfo, selectedIds: ISelectionId[]): boolean {
+    return selectedIds.some((s) => s.equals(line.selectionId));
+}
+
+/** 線の点が選ばれているか（「その他」の点は、まとめたカテゴリの ID のどれか） */
+function linePointPicked(p: LineSeriesInfo["points"][number], selectedIds: ISelectionId[]): boolean {
+    return (p.selectionIds ?? [p.selectionId]).some((id) => selectedIds.some((s) => s.equals(id)));
+}
+
 /** 閲覧者向けの累計の切り替えボタンの行の高さ (px)。出すときだけグラフの上に取る */
 const TOOLBAR_HEIGHT = 28;
 
@@ -326,6 +364,8 @@ export const App: React.FC<AppProps> = ({
     // 縦棒の描画で決まった値の軸の高さ。描いたあとに visual.ts へ知らせる（横棒・空のときは 0）
     const plotHeightRef = React.useRef(0);
     plotHeightRef.current = 0;
+    // 目盛線を棒の形で切り抜く mask の ID（gridCutout）
+    const gridMaskId = useGridMaskId("bar");
     React.useEffect(() => {
         if (plotHeightRef.current > 0) onPlotHeight?.(plotHeightRef.current);
     });
@@ -395,6 +435,13 @@ export const App: React.FC<AppProps> = ({
             ])
         );
     };
+
+    /**
+     * 奥のレイヤーを薄く描くときは、目盛線を棒の形で切り抜く（目盛線はいちばん後ろ。半透明の棒の下で透けて見えないように）。
+     * mask は描いた棒のまとまり（id が `${gridMaskId}-bars`）を写す
+     */
+    const gridMasked = (draws: Map<number, LayerDraw>) => layered && [...draws.values()].some((draw) => draw.opacity < 1);
+    const gridMaskAttr = (draws: Map<number, LayerDraw>) => (gridMasked(draws) ? `url(#${gridMaskId})` : undefined);
 
     /** l 枚目のレイヤーの積み上げの合計を持つカテゴリ（メジャーごとに並べたとき、合計ラベルをレイヤーごとに出す） */
     const withLayerTotals = (g: CategoryGroup, l: number): CategoryGroup => (l === 0 ? g : { ...g, totals: g.layerTotals?.[l - 1] ?? null });
@@ -513,25 +560,8 @@ export const App: React.FC<AppProps> = ({
         );
     };
 
-    /**
-     * 階層の区切り（start〜end のカテゴリ）の棒の ID。系列があれば系列ごとの棒の ID（カテゴリ＋系列）、「その他」はまとめたカテゴリ全部。
-     * カテゴリだけの ID にすると、系列があるとき棒の ID と一致せず選んだ棒が薄くなる（棒と同じ ID で選ぶ）
-     */
-    const levelIdsOf = (run: { start: number; end: number }) => {
-        const groups = viewModel.categoryGroups.slice(run.start, run.end + 1);
-        if (viewModel.lineOnly) return lineIdsAt(groups);
-        return groups.flatMap((g) => g.points.flatMap((d) => d.selectionIds ?? [d.selectionId]));
-    };
-    /**
-     * 折れ線だけのときは棒が無い（置いてある見えない棒の ID は線の点と一致せず、選ぶと線が全部薄くなる）。
-     * 区切りのカテゴリにある線の点の ID で選ぶ
-     */
-    const lineIdsAt = (groups: CategoryGroup[]) => {
-        const rows = new Set(groups.map((g) => g.rowIndex));
-        return viewModel.lines.flatMap((line) =>
-            line.points.filter((p) => rows.has(p.rowIndex) && p.value !== null).flatMap((p) => p.selectionIds ?? [p.selectionId])
-        );
-    };
+    const levelIdsOf = (run: { start: number; end: number }) => categorySelectionIds(viewModel, run.start, run.end);
+    const lineIdsAt = (groups: CategoryGroup[]) => lineSelectionIdsAt(viewModel, groups);
     /** 区切りの棒が全部選ばれているか（区切りを押したときも、棒を Ctrl で全部選んだときも） */
     const levelPicked = (run: { start: number; end: number }) => {
         if (selectedIds.length === 0) return false;
@@ -615,11 +645,7 @@ export const App: React.FC<AppProps> = ({
     const seenColorOf = (color: string, opacity: number) =>
         viewModel.highContrast || opacity >= 1 ? color : blend(color, viewModel.background ?? "#FFFFFF", 1 - opacity);
 
-    /** 折れ線が選ばれているか（凡例で線ごと、または線の点） */
-    const isLinePicked = (lineIndex: number): boolean => {
-        const line = viewModel.lines[lineIndex];
-        return !!line && selectedIds.some((s) => s.equals(line.selectionId) || line.points.some((p) => s.equals(p.selectionId)));
-    };
+    const isLinePicked = (lineIndex: number): boolean => linePicked(viewModel.lines[lineIndex], selectedIds);
 
     /** 凡例の項目が選ばれているか（棒の系列なら、その系列の棒のどれかが選ばれている） */
     const isEntryPicked = (entry: LegendItemInfo | undefined): boolean =>
@@ -743,24 +769,28 @@ export const App: React.FC<AppProps> = ({
             return { p, i, at };
         });
         // 値の無いカテゴリで切った、途切れのない点の並び
-        const runs: XY[][] = [];
-        let run: XY[] = [];
-        for (const pt of pts) {
-            // 累計の区切りで 0 に戻るところも切る（前の区切りの終わりから下がる線を引かない）
-            if (pt.p.breakBefore && run.length) {
-                runs.push(run);
-                run = [];
+        const runsOf = (points: Array<{ p: LineSeriesInfo["points"][number]; at: XY | null }>, joinBlanks: boolean): XY[][] => {
+            const out: XY[][] = [];
+            let run: XY[] = [];
+            for (const pt of points) {
+                // 累計の区切りで 0 に戻るところも切る（前の区切りの終わりから下がる線を引かない）
+                if (pt.p.breakBefore && run.length) {
+                    out.push(run);
+                    run = [];
+                }
+                if (pt.at === null) {
+                    // 前後をつなぐなら、空白を飛ばして同じ並びに続ける
+                    if (joinBlanks) continue;
+                    if (run.length) out.push(run);
+                    run = [];
+                    continue;
+                }
+                run.push(pt.at);
             }
-            if (pt.at === null) {
-                // 前後をつなぐなら、空白を飛ばして同じ並びに続ける
-                if (connectBlanks) continue;
-                if (run.length) runs.push(run);
-                run = [];
-                continue;
-            }
-            run.push(pt.at);
-        }
-        if (run.length) runs.push(run);
+            if (run.length) out.push(run);
+            return out;
+        };
+        const runs = runsOf(pts, connectBlanks);
         const shape = {
             interpolation: line.interpolation,
             smoothing: line.smoothing,
@@ -769,19 +799,43 @@ export const App: React.FC<AppProps> = ({
             stepConnect: line.stepConnect,
             stepLevelWidth: line.stepWidth === STEP_WIDTHS.bar ? barBand : 0,
         };
-        const runPaths = runs.map((r) => linePath(r, shape, horizontal, stepExtension, stepBounds));
-        const path = runPaths.join(" ");
-        // 前後に点の無い 1 点は、線が長さ 0 になって見えない。マーカーを出していなくても、線の色の点を置く（標準と同じ）
-        const lonePoints = runs.filter((r, k) => r.length === 1 && !/[LCQ]/.test(runPaths[k])).map((r) => r[0]);
-        const dimmed = !viewModel.hasHighlights && selectedIds.length > 0 && !isLinePicked(j);
+        const pathsOf = (rs: XY[][]) => {
+            const runPaths = rs.map((r) => linePath(r, shape, horizontal, stepExtension, stepBounds));
+            // 前後に点の無い 1 点は、線が長さ 0 になって見えない。マーカーを出していなくても、線の色の点を置く（標準と同じ）
+            const lone = rs.filter((r, k) => r.length === 1 && !/[LCQ]/.test(runPaths[k])).map((r) => r[0]);
+            return { path: runPaths.join(" "), lone };
+        };
+        const { path, lone: lonePoints } = pathsOf(runs);
+        // ほかのビジュアルで選ばれたとき（ハイライト）は、棒と同じく線全体を沈め、該当分の線を濃く重ねる。該当しないカテゴリでは線を切る
+        const highlighting = viewModel.hasHighlights && line.points.some((p) => p.highlight !== undefined);
+        const highlightAt = (p: LineSeriesInfo["points"][number], i: number): XY | null => {
+            if (p.highlightRatio === null || p.highlightRatio === undefined) return null;
+            const pos = posOf(i);
+            const val = valueOf(p.highlightRatio);
+            return horizontal ? { x: val, y: pos } : { x: pos, y: val };
+        };
+        // 凡例で線ごと選んだときは線全体を濃く。点（カテゴリのラベル・線の点）で選んだときは、ハイライトと同じく線を沈め、
+        // 選んだカテゴリの線を濃く重ねる（中で選んでも外で選ばれても同じ見え方）
+        const selecting = !viewModel.hasHighlights && selectedIds.length > 0;
+        const whole = selecting && lineWholePicked(line, selectedIds);
+        const pickedAt = (p: LineSeriesInfo["points"][number], at: XY | null) => (linePointPicked(p, selectedIds) ? at : null);
+        const highlightPaths = highlighting
+            ? pathsOf(runsOf(pts.map((pt) => ({ p: pt.p, at: highlightAt(pt.p, pt.i) })), false))
+            : selecting && !whole
+                ? pathsOf(runsOf(pts.map((pt) => ({ p: pt.p, at: pickedAt(pt.p, pt.at) })), false))
+                : null;
+        const pointPicked = (p: LineSeriesInfo["points"][number]) =>
+            highlighting ? p.highlight !== null && p.highlight !== undefined : !selecting || whole || linePointPicked(p, selectedIds);
+        const dimmed = (selecting && !whole) || highlighting;
         const opacity = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
         const stroke = lineStrokeOf(line, line.width);
         const lineOpacity = opacity * (1 - line.transparency / 100);
         const mk = line.marker ?? viewModel.markers;
         const markerFill = mk.color || line.color;
-        const markerOpacity = opacity * Math.max(0, Math.min(1, 1 - mk.transparency / 100));
+        const pointOpacity = (p: LineSeriesInfo["points"][number]) => (pointPicked(p) ? 1 : HIGHLIGHT_DIM_FACTOR);
+        const markerOpacity = Math.max(0, Math.min(1, 1 - mk.transparency / 100));
         const markerStroke = mk.borderShow ? (mk.borderMatchLine ? line.color : mk.borderColor) : "none";
-        const markerStrokeOpacity = opacity * Math.max(0, Math.min(1, 1 - mk.borderTransparency / 100));
+        const markerStrokeOpacity = Math.max(0, Math.min(1, 1 - mk.borderTransparency / 100));
         const hitR = Math.max(6, line.width * 2);
         if (part === "area") {
             // 網掛け領域は棒の上に、透かして塗る（標準と同じ）
@@ -831,20 +885,52 @@ export const App: React.FC<AppProps> = ({
                             pointerEvents="none"
                         />
                     ))}
-                {pts.map((pt) =>
-                    pt.at === null ? null : (
+                {line.lineShow && highlightPaths && (
+                    <>
+                        <path
+                            d={highlightPaths.path}
+                            className="line-path line-highlight"
+                            fill="none"
+                            stroke={line.color}
+                            strokeWidth={line.width}
+                            strokeDasharray={stroke.dashArray}
+                            strokeLinejoin={line.lineJoin === "miter" || line.lineJoin === "bevel" ? line.lineJoin : "round"}
+                            strokeLinecap={stroke.lineCap}
+                            strokeOpacity={1 - line.transparency / 100}
+                            pointerEvents="none"
+                        />
+                        {/* 濃い区間が 1 点だけ（前後が選ばれていない）なら線にならないので、マーカーの形で出す（マーカーを出していない線も） */}
+                        {!mk.show &&
+                            highlightPaths.lone.map((at, k) => (
+                                <path
+                                    key={`hl-lone-${j}-${k}`}
+                                    d={markerPath(mk.shape, at.x, at.y, Math.max(mk.size, line.width + 2), horizontal)}
+                                    transform={mk.rotation ? `rotate(${mk.rotation} ${at.x} ${at.y})` : undefined}
+                                    className="line-picked-point"
+                                    fill={line.color}
+                                    fillOpacity={1 - line.transparency / 100}
+                                    pointerEvents="none"
+                                />
+                            ))}
+                    </>
+                )}
+                {pts.map((pt) => {
+                    if (pt.at === null) return null;
+                    // ハイライトの該当分があるマーカーは、該当分の高さに置く（濃く重ねた線の上）
+                    const mkAt = (highlighting && highlightAt(pt.p, pt.i)) || pt.at;
+                    return (
                         <g key={`pt-${j}-${pt.i}`}>
                             {mk.show && (
                                 <path
-                                    d={markerPath(mk.shape, pt.at.x, pt.at.y, mk.size, horizontal)}
-                                    transform={mk.rotation ? `rotate(${mk.rotation} ${pt.at.x} ${pt.at.y})` : undefined}
+                                    d={markerPath(mk.shape, mkAt.x, mkAt.y, mk.size, horizontal)}
+                                    transform={mk.rotation ? `rotate(${mk.rotation} ${mkAt.x} ${mkAt.y})` : undefined}
                                     className="line-marker"
                                     style={{
                                         fill: markerFill,
-                                        fillOpacity: markerOpacity,
+                                        fillOpacity: pointOpacity(pt.p) * markerOpacity,
                                         stroke: markerStroke,
                                         strokeWidth: mk.borderShow ? mk.borderWidth : 0,
-                                        strokeOpacity: markerStrokeOpacity,
+                                        strokeOpacity: pointOpacity(pt.p) * markerStrokeOpacity,
                                     }}
                                     pointerEvents="none"
                                 />
@@ -871,8 +957,8 @@ export const App: React.FC<AppProps> = ({
                                 onMouseLeave={() => onTooltipHide?.()}
                             />
                         </g>
-                    )
-                )}
+                    );
+                })}
             </g>
         );
     };
@@ -1832,8 +1918,11 @@ export const App: React.FC<AppProps> = ({
         // プロット内容の描画。xOffset はプロット左端の x
         // （非スクロール時は marginLeft。スクロール時はプロット幅だけのスクロール領域に描くので 0）
         const renderPlot = (xOffset: number) => {
+            const gridMask = gridMaskAttr(layerDraws);
             return (
                 <>
+                    {gridMask && gridCutout(gridMaskId, `${gridMaskId}-bars`)}
+                    <g className="gridlines" mask={gridMask}>
                     {/* X軸グリッド線（垂直目盛線） */}
                     {gridlines.verticalShow && (
                         <g className="x-gridlines-group">
@@ -1882,6 +1971,7 @@ export const App: React.FC<AppProps> = ({
                             })}
                         </g>
                     )}
+                    </g>
 
                     {/* リボンの帯。棒の後ろに描く */}
                     {viewModel.ribbons.show && groups.length > 1 && <g className="ribbons-group">{renderRibbons(xOffset)}</g>}
@@ -1892,7 +1982,7 @@ export const App: React.FC<AppProps> = ({
                     {renderValueLines((ratio, secondary) => (secondary ? marginTop + plotHeight * (1 - ratio) : yOfRatio(ratio)), [xOffset, xOffset + plotWidth], true, [marginTop, marginTop + plotHeight], "back")}
 
                     {/* 棒とデータラベルとカテゴリラベル。カテゴリごとに、系列の棒を凡例の順に並べる */}
-                    <g className="bars-group">
+                    <g className="bars-group" id={gridMask ? `${gridMaskId}-bars` : undefined}>
                         {groups.map((g, i) => {
                             const cx = xOffset + centerOf(i);
                             return (
@@ -2801,8 +2891,11 @@ export const App: React.FC<AppProps> = ({
         };
 
         /** プロット（グリッド線・棒・ラベル・カテゴリ名）。xOffset・yOffset はプロットの左上、labelRightX はカテゴリ名の右端 */
+        const hGridMask = gridMaskAttr(layerDrawsX);
         const renderHPlot = (xOffset: number, yOffset: number, labelRightX: number) => (
             <>
+                {hGridMask && gridCutout(gridMaskId, `${gridMaskId}-bars`)}
+                <g className="gridlines" mask={hGridMask}>
                 {gridlines.horizontalShow && (
                     <g className="y-gridlines-group">
                         {valueTicks.map((tick, i) => {
@@ -2851,6 +2944,7 @@ export const App: React.FC<AppProps> = ({
                         ))}
                     </g>
                 )}
+                </g>
                 {viewModel.ribbons.show && groups.length > 1 && (
                     <g className="ribbons-group">
                         {renderRibbonBands(
@@ -2867,7 +2961,7 @@ export const App: React.FC<AppProps> = ({
                 {/* Y 軸（カテゴリの軸）の定数線の網掛け領域と、背面の線（棒の後ろ） */}
                 {renderCategoryLines((i) => yOffset + centerOf(i), step, [xOffset, xOffset + plotWidth], true, [yOffset, yOffset + plotHeight], "back")}
                 {renderValueLines((ratio, secondary) => xOffset + (secondary ? plotWidth * ratio : xOfRatio(ratio)), [yOffset, yOffset + plotHeight], false, [xOffset, xOffset + plotWidth], "back")}
-                <g className="bars-group">
+                <g className="bars-group" id={hGridMask ? `${gridMaskId}-bars` : undefined}>
                     {groups.map((g, i) => {
                         const cy = centerOf(i);
                         return (
