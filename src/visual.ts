@@ -150,6 +150,8 @@ export class Visual implements IVisual {
         this.formattingSettings.lines.includeCumulative.visible = viewModel.cumulative.available;
         // X 軸の「種類」は、連続で描けるとき（X 軸が日付か数値の 1 列で縦棒など。viewModel の continuousAvailable）だけ出す
         this.formattingSettings.categoryAxis.applyAxisKind(!!viewModel.continuousAvailable);
+        // 縦のグリッド線の「線の位置」に、X 軸のレベルの名前を並べる
+        this.formattingSettings.gridlines.applyLevels(viewModel.categoryAxis.levelNames ?? [], viewModel.gridlines.verticalPosition);
         this.formattingSettings.applyTargets(viewModel.columnTargets, {
             seriesMode: viewModel.seriesMode,
             labelTargets: viewModel.labelTargets,

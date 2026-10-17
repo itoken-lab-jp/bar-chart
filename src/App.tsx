@@ -9,7 +9,7 @@ import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, Da
 import { VisualFormattingSettingsModel, STEP_WIDTHS, LEVEL_ROW_PADDINGS, LINE_BLANKS } from "./settings";
 import { placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
 import { continuousBand, continuousTicks, positionOf } from "./continuousAxis";
-import { clusterLayout, spanOf, levelRunsOf, layerLayout, layerOpacity, categoryGridBreaks } from "./layout";
+import { clusterLayout, spanOf, levelRunsOf, layerLayout, layerOpacity, categoryGridBreaks, gridLevelOf } from "./layout";
 import { layoutLegend, LegendLayout, LegendItemBox, LEGEND_MARKER_GAP, LAYER_GLYPH_THICKNESS, LAYER_GLYPH_LENGTH } from "./legend";
 import { linePath, areaPath, markerPath, XY } from "./linePath";
 import { recommendedTickCount, fitTicks as fitTicksBy } from "./shared/ticks";
@@ -1374,10 +1374,10 @@ export const App: React.FC<AppProps> = ({
         const vStroke = gridLineStroke(gridlines.verticalStyle, gridlines.verticalWidth, gridlines.verticalScaleWithWidth, { dashArray: gridlines.verticalDashArray, dashCap: gridlines.verticalDashCap });
         const vOpacity = Math.max(0, Math.min(1, 1 - gridlines.verticalTransparency / 100));
 
-        // 縦グリッド線の位置: プロットの両端と、隣り合うカテゴリの中間（「階層の区切り」なら上のレベルの区切りだけ）
+        // 縦グリッド線の位置: プロットの両端と、隣り合うカテゴリの中間（階層を選んだら、そのレベルの区切りだけ）
         const verticalGridXs = continuous ? continuousTickXs.map((t) => t.x) : [
             0,
-            ...categoryGridBreaks(groups.map((g) => g.levels), catAxis.levelCount, gridlines.verticalPosition === "levels", groups.map((g) => g.levelKeys)).map(
+            ...categoryGridBreaks(groups.map((g) => g.levels), gridLevelOf(gridlines.verticalPosition, catAxis.levelCount), groups.map((g) => g.levelKeys)).map(
                 (i) => centerOf(i) - step / 2
             ),
             plotWidth,
@@ -2923,7 +2923,7 @@ export const App: React.FC<AppProps> = ({
                     <g className="x-gridlines-group">
                         {[
                             0,
-                            ...categoryGridBreaks(groups.map((g) => g.levels), catAxis.levelCount, gridlines.verticalPosition === "levels", groups.map((g) => g.levelKeys)).map(
+                            ...categoryGridBreaks(groups.map((g) => g.levels), gridLevelOf(gridlines.verticalPosition, catAxis.levelCount), groups.map((g) => g.levelKeys)).map(
                                 (i) => centerOf(i) - step / 2
                             ),
                             plotHeight,

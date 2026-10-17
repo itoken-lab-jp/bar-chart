@@ -449,6 +449,8 @@ export interface CategoryAxisSettings {
     concatenateLabels: boolean;
     /** 階層のレベルの数。1 なら階層なし */
     levelCount: number;
+    /** 階層のレベルの名前（上から。書式ペインの「線の位置」に並べる） */
+    levelNames?: string[];
     /** 段に重ねた上のレベルの見せ方（"lines" 区切り線 | "boxed" 帯） */
     hierarchyStyle: string;
     /** 段に重ねた上のレベルの段の高さ（LEVEL_ROW_PADDINGS のキー） */
@@ -504,7 +506,7 @@ export interface GridlinesSettings {
     verticalScaleWithWidth: boolean;
     verticalDashArray: string;
     verticalDashCap: string;
-    /** 縦の線を引く位置（"categories" カテゴリごと | "levels" 階層の区切り） */
+    /** 縦の線を引く位置（"categories" カテゴリごと | "levels" 1 つ上のレベル | "level<n>" 上から n 段目。layout の gridLevelOf） */
     verticalPosition: string;
 }
 
@@ -2523,6 +2525,7 @@ function buildViewModel(
         scrollStart: getDropdownValue(catAxis.scrollStart.value, "start"),
         concatenateLabels,
         levelCount: levelColumns.length - commonDepth,
+        levelNames,
         hierarchyStyle: getDropdownValue(catAxis.hierarchyStyle.value, "lines") === "boxed" ? "boxed" : "lines",
         levelRowHeight: getDropdownValue(catAxis.levelRowHeight.value, "normal"),
     };

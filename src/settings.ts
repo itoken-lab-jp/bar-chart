@@ -33,6 +33,7 @@ import {
     VALUE_SHADE_REGION_ITEMS,
 } from "./shared/referenceLine";
 import { fontControl, legendParts, gridlineParts, categoryAxisParts, valueAxisParts, labelValueParts, labelBackgroundParts, labelHaloParts } from "./shared/formatCards";
+import { gridLevelOf } from "./layout";
 
 export interface ColumnTarget {
     name: string;
@@ -3240,10 +3241,18 @@ export class AreasCardSettings extends FormattingSettingsCompositeCard {
     }
 }
 
-/** 縦のグリッド線（カテゴリの区切りの線）を引く位置 */
+/** 線の位置で選べる階層の数（上から）。X 軸の階層がこれより深くても、下の段は選べない */
+const MAX_GRID_LEVELS = 6;
+
+/**
+ * 縦のグリッド線（カテゴリの区切りの線）を引く位置。保存した値を読めるよう、ありうる値をすべて並べておく。
+ * 書式ペインには、データが来たら applyLevels で X 軸のレベルの名前（「年度の区切り」など）に並べ替える。
+ * "levels" は 1.36.10.0 までの「階層の区切り」（1 つ上のレベル）で、保存済みのレポートのために読む
+ */
 export const CATEGORY_GRID_POSITION_ITEMS: powerbi.IEnumMember[] = [
     { value: "categories", displayName: "カテゴリごと" },
     { value: "levels", displayName: "階層の区切り" },
+    ...Array.from({ length: MAX_GRID_LEVELS }, (_, i) => ({ value: `level${i}`, displayName: `${i + 1} 段目の区切り` })),
 ];
 
 export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
@@ -3272,11 +3281,11 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
     verticalDashCap = this.vertical.dashCap;
     verticalWidth = this.vertical.width;
 
-    /** 縦の線を引く位置。既定はカテゴリごと（今までと同じ）。階層の区切りなら、X 軸の階層の 1 つ上のレベルの区切りだけ */
+    /** 縦の線を引く位置。既定はカテゴリごと（今までと同じ）。X 軸に階層があれば、選んだレベルの区切りだけ */
     verticalPosition = new formattingSettings.ItemDropdown({
         name: "verticalPosition",
         displayName: "線の位置",
-        description: "階層の区切りにすると、X 軸に階層を入れたとき、1 つ上のレベルの区切り（年度・四半期の境目など）にだけ引く。階層が無ければカテゴリごと",
+        description: "X 軸に階層を入れたとき、選んだレベルの区切り（年度・四半期の境目など）にだけ引く。階層が無ければカテゴリごと",
         items: CATEGORY_GRID_POSITION_ITEMS,
         value: CATEGORY_GRID_POSITION_ITEMS[0],
     });
@@ -3296,6 +3305,21 @@ export class GridlinesCardSettings extends FormattingSettingsCompositeCard {
     });
 
     groups = [this.horizontalGroup, this.verticalGroup];
+
+    /**
+     * 「線の位置」に、カテゴリごとと、X 軸のいちばん下を除くレベルを名前で並べる（「年度の区切り」など）。
+     * position は viewModel が読んだ値で、"levels"（旧の値）やドリルで無くなった段は、gridLevelOf と同じく 1 つ上のレベルとして見せる
+     */
+    applyLevels(levelNames: string[], position: string): void {
+        const parents = levelNames.slice(0, MAX_GRID_LEVELS).slice(0, -1);
+        const items: powerbi.IEnumMember[] = [
+            CATEGORY_GRID_POSITION_ITEMS[0],
+            ...parents.map((name, i) => ({ value: `level${i}`, displayName: `${name || `${i + 1} 段目`}の区切り` })),
+        ];
+        const level = gridLevelOf(position, levelNames.length);
+        this.verticalPosition.items = items;
+        this.verticalPosition.value = (level === null ? undefined : items[Math.min(level, parents.length - 1) + 1]) ?? items[0];
+    }
 
     /** 線のスタイルがカスタムのときだけ、ダッシュ配列とダッシュ キャップを出す */
     syncCustomDash(): void {

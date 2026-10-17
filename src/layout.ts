@@ -102,12 +102,24 @@ export interface LevelRun {
  * keys（元の値のキー）があればそれで見分ける。表示が同じでも値が違えば別の区切り
  */
 /**
- * カテゴリの区切りの線（縦のグリッド線）を引く境目。i 番目のカテゴリの前に引くなら i（1 〜 カテゴリ数 - 1）。
- * byLevels なら、階層の 1 つ上のレベルの区切り（年度・四半期の境目など）だけ。階層が無ければカテゴリごと
+ * 縦のグリッド線を引く階層（上から何段目か）。書式の値は "categories"（カテゴリごと）、
+ * "levels"（1 つ上のレベル。1.36.10.0 までの「階層の区切り」）、"level<n>"（上から n 段目）。
+ * いちばん下の段より下は選べないので、ドリルで段が減ったら 1 つ上のレベルにする。階層が無ければ null（カテゴリごと）
  */
-export function categoryGridBreaks(levels: string[][], levelCount: number, byLevels: boolean, keys?: string[][]): number[] {
-    if (!byLevels || levelCount < 2) return levels.slice(1).map((_, k) => k + 1);
-    return levelRunsOf(levels, levelCount - 2, keys)
+export function gridLevelOf(position: string, levelCount: number): number | null {
+    if (levelCount < 2) return null;
+    if (position === "levels") return levelCount - 2;
+    const m = /^level(\d+)$/.exec(position);
+    return m ? Math.min(Number(m[1]), levelCount - 2) : null;
+}
+
+/**
+ * カテゴリの区切りの線（縦のグリッド線）を引く境目。i 番目のカテゴリの前に引くなら i（1 〜 カテゴリ数 - 1）。
+ * level（上から何段目か）があれば、そのレベルの区切り（年度・四半期の境目など）だけ。null ならカテゴリごと
+ */
+export function categoryGridBreaks(levels: string[][], level: number | null, keys?: string[][]): number[] {
+    if (level === null) return levels.slice(1).map((_, k) => k + 1);
+    return levelRunsOf(levels, level, keys)
         .slice(1)
         .map((run) => run.start);
 }
