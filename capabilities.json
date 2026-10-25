@@ -1441,6 +1441,12 @@
                         ]
                     }
                 },
+                "rows": {
+                    "displayName": "行数",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
                 "showBars": {
                     "displayName": "棒の項目",
                     "type": {
@@ -1759,6 +1765,12 @@
                     "displayName": "背景の透過性 (%)",
                     "type": {
                         "numeric": true
+                    }
+                },
+                "unitType": {
+                    "displayName": "表示単位",
+                    "type": {
+                        "enumeration": []
                     }
                 },
                 "precision": {
@@ -2194,7 +2206,7 @@
                     }
                 },
                 "scrollStart": {
-                    "displayName": "スクロールの最初の位置",
+                    "displayName": "初期スクロール位置",
                     "type": {
                         "enumeration": []
                     }

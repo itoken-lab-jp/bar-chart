@@ -4,6 +4,8 @@
  * 曲線の作り方は d3-shape の curveMonotoneX・curveCardinal・curveStep と同じ（依存は足さない）。
  */
 
+import { maxOf, minOf } from "./shared/minMax";
+
 export interface XY {
     x: number;
     y: number;
@@ -205,21 +207,31 @@ function cardinalSegments(points: XY[], tension: number, pt: Fmt): string {
  * ダッシュは棒を横切る向きに引く（縦棒では横、横棒 horizontal では縦。棒に目標の印を打つ使い方）
  */
 export function markerPath(shape: string, cx: number, cy: number, size: number, horizontal = false): string {
-    const r = Math.max(1, size * 0.75);
+    const r = markerRadiusOf(size);
     const pt = pointXY;
-    const poly = (coords: Array<[number, number]>) =>
-        `M ${coords.map(([dx, dy]) => pt(cx + dx, cy + dy)).join(" L ")} Z`;
-    const across = (coords: Array<[number, number]>) => poly(horizontal ? coords.map(([dx, dy]) => [dy, dx] as [number, number]) : coords);
+    const offsets = markerOffsets(shape, size, horizontal);
+    if (offsets) return `M ${offsets.map(([dx, dy]) => pt(cx + dx, cy + dy)).join(" L ")} Z`;
+    // 円（既定）
+    return `M ${pt(cx - r, cy)} A ${round(r)},${round(r)} 0 1 0 ${pt(cx + r, cy)} A ${round(r)},${round(r)} 0 1 0 ${pt(cx - r, cy)} Z`;
+}
+
+/** マーカーの半径（サイズの 0.75 倍、1px より小さくしない） */
+const markerRadiusOf = (size: number) => Math.max(1, size * 0.75);
+
+/** マーカーの多角形の頂点（中心からのずれ）。円は null */
+function markerOffsets(shape: string, size: number, horizontal: boolean): Array<[number, number]> | null {
+    const r = markerRadiusOf(size);
+    const across = (coords: Array<[number, number]>) => (horizontal ? coords.map(([dx, dy]) => [dy, dx] as [number, number]) : coords);
     switch (shape) {
         case "square":
-            return poly([[-r, -r], [r, -r], [r, r], [-r, r]]);
+            return [[-r, -r], [r, -r], [r, r], [-r, r]];
         case "diamond": {
             const d = r * 1.3;
-            return poly([[0, -d], [d, 0], [0, d], [-d, 0]]);
+            return [[0, -d], [d, 0], [0, d], [-d, 0]];
         }
         case "triangle": {
             const d = r * 1.3;
-            return poly([[0, -d], [d * 0.87, d * 0.5], [-d * 0.87, d * 0.5]]);
+            return [[0, -d], [d * 0.87, d * 0.5], [-d * 0.87, d * 0.5]];
         }
         case "shortDash":
             return across([[-r, -r * 0.3], [r, -r * 0.3], [r, r * 0.3], [-r, r * 0.3]]);
@@ -227,25 +239,65 @@ export function markerPath(shape: string, cx: number, cy: number, size: number, 
             return across([[-r * 2, -r * 0.3], [r * 2, -r * 0.3], [r * 2, r * 0.3], [-r * 2, r * 0.3]]);
         case "plus": {
             const t = r * 0.3;
-            return poly([
+            return [
                 [-t, -r], [t, -r], [t, -t], [r, -t], [r, t], [t, t],
                 [t, r], [-t, r], [-t, t], [-r, t], [-r, -t], [-t, -t],
-            ]);
+            ];
         }
         case "cross": {
             // ＋ を 45 度回した形
             const t = r * 0.3;
             const c = Math.SQRT1_2;
             const rotate = ([x, y]: [number, number]): [number, number] => [(x - y) * c, (x + y) * c];
-            return poly(
-                ([
-                    [-t, -r], [t, -r], [t, -t], [r, -t], [r, t], [t, t],
-                    [t, r], [-t, r], [-t, t], [-r, t], [-r, -t], [-t, -t],
-                ] as Array<[number, number]>).map(rotate)
-            );
+            return ([
+                [-t, -r], [t, -r], [t, -t], [r, -t], [r, t], [t, t],
+                [t, r], [-t, r], [-t, t], [-r, t], [-r, -t], [-t, -t],
+            ] as Array<[number, number]>).map(rotate);
         }
         default:
-            // 円（既定）
-            return `M ${pt(cx - r, cy)} A ${round(r)},${round(r)} 0 1 0 ${pt(cx + r, cy)} A ${round(r)},${round(r)} 0 1 0 ${pt(cx - r, cy)} Z`;
+            return null;
     }
+}
+
+/** SVG の継ぎ目の尖りの上限（stroke-miterlimit の既定）。越える角は平らに切る */
+const MITER_LIMIT = 4;
+
+/**
+ * マーカーの中心を 0 とした、見える形の左右の端（横の向き。left は左の端で負、right は右の端）。rotation は中心で回す角度
+ * （度、時計回り。markerPath に掛ける rotate と同じ）、strokeWidth は罫線の太さ（無ければ 0）。罫線は形の外へ太さの半分出て、
+ * 尖った角では継ぎ目（miter）の分さらに出る。左右は別々に出す（回した三角のように、点対称でない形は左右で長さが違う）
+ */
+export function markerInkSpan(shape: string, size: number, horizontal = false, rotation = 0, strokeWidth = 0): { left: number; right: number } {
+    const half = Math.max(0, strokeWidth) / 2;
+    const offsets = markerOffsets(shape, size, horizontal);
+    if (!offsets) {
+        const r = markerRadiusOf(size) + half;
+        return { left: -r, right: r };
+    }
+    const a = (rotation * Math.PI) / 180;
+    const cos = Math.cos(a);
+    const sin = Math.sin(a);
+    const points = offsets.map(([x, y]) => [x * cos - y * sin, x * sin + y * cos] as [number, number]);
+    const xs: number[] = points.map(([x]) => x);
+    if (half > 0) {
+        // 頂点の並びの向き（面積の符号）で、辺の外向きの法線を決める
+        const n = points.length;
+        const area = points.reduce((sum, [x, y], i) => sum + x * points[(i + 1) % n][1] - points[(i + 1) % n][0] * y, 0);
+        const outward = (from: [number, number], to: [number, number]): [number, number] => {
+            const dx = to[0] - from[0];
+            const dy = to[1] - from[1];
+            const len = Math.hypot(dx, dy) || 1;
+            return area > 0 ? [dy / len, -dx / len] : [-dy / len, dx / len];
+        };
+        points.forEach((v, i) => {
+            const n1 = outward(points[(i + n - 1) % n], v);
+            const n2 = outward(v, points[(i + 1) % n]);
+            const dot = n1[0] * n2[0] + n1[1] * n2[1];
+            // 継ぎ目の尖りの長さは、太さに対して 1 / cos(法線のなす角の半分)
+            const ratio = Math.sqrt(2 / (1 + dot));
+            if (ratio <= MITER_LIMIT) xs.push(v[0] + (half * (n1[0] + n2[0])) / (1 + dot));
+            else xs.push(v[0] + half * n1[0], v[0] + half * n2[0]);
+        });
+    }
+    return { left: minOf(xs), right: maxOf(xs) };
 }

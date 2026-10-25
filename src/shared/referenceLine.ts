@@ -6,7 +6,8 @@
 import powerbi from "powerbi-visuals-api";
 import { formattingSettings } from "powerbi-visuals-utils-formattingmodel";
 import { CUSTOM_LINE_STYLE, CUSTOM_LINE_STYLE_ITEM, DASH_CAP_ITEMS, LINE_STYLES, LINE_STYLE_ITEMS, lineStrokeOf } from "./gridlines";
-import { dropdownValue } from "./formatting";
+import { dropdownValue, hideColorWhenMatched } from "./formatting";
+import { clampFontSize } from "./textStyle";
 
 /** 線を、棒の後ろに描くか前に描くか（標準の「位置」。標準の表示は「遅延」「前面」で、遅延は Behind の訳し違えなので背面と書く） */
 export const REFERENCE_LINE_LAYERS = { back: "back", front: "front" } as const;
@@ -104,12 +105,13 @@ export function referenceLineParts(options: { labelHorizontal: "left" | "right";
 
 export type ReferenceLineParts = ReturnType<typeof referenceLineParts>;
 
-/** カスタムの線の項目は、線のスタイルがカスタムのときだけ。網掛けの色は、線の色に合わせないときだけ */
+/** カスタムの線の項目は、線のスタイルがカスタムのときだけ。幅で拡大縮小は模様のある線だけ（実線では効かない）。網掛けの色は、線の色に合わせないときだけ */
 export function syncReferenceLineVisibility(parts: ReferenceLineParts): void {
     const custom = String(parts.lineStyle.value?.value) === CUSTOM_LINE_STYLE;
     parts.dashArray.visible = custom;
     parts.dashCap.visible = custom;
-    parts.shadeColor.visible = !(parts.shadeMatchLine.value ?? false);
+    parts.scaleWithWidth.visible = String(parts.lineStyle.value?.value) !== LINE_STYLES.solid;
+    hideColorWhenMatched(parts.shadeMatchLine, parts.shadeColor);
 }
 
 /** 定数線の見た目（網掛けの向きは軸ごとに違うので、ビジュアルが足す） */
@@ -157,7 +159,7 @@ export function referenceLineStyleOf(parts: ReferenceLineParts, show: boolean): 
         labelHorizontal: dropdownValue(parts.labelHorizontal, parts.labelHorizontalDefault) === "left" ? "left" : "right",
         labelVertical: dropdownValue(parts.labelVertical, "top") === "bottom" ? "bottom" : "top",
         labelColor: parts.labelColor.value?.value || DEFAULT_COLOR,
-        labelFontSize: clampTo(parts.labelFontSize.value, 6, 32, 9),
+        labelFontSize: clampFontSize(parts.labelFontSize.value, 9),
         labelAvoidOverlap: parts.labelAvoidOverlap.value ?? true,
     };
 }

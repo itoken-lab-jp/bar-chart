@@ -32,10 +32,6 @@
     /* スクロール時に実寸幅を維持するため width: 100% を除外 */
 }
 
-.unit-axis-badge {
-    letter-spacing: 0.02em;
-}
-
 /*
  * グリッド線の色・幅・線種は書式ペインの値を SVG の属性で渡す。ここに stroke 系を書くと
  * CSS が SVG の属性より優先され、書式ペインの設定が効かなくなる（1.3.1.0 までの横のグリッド線がそうだった）。
@@ -59,8 +55,10 @@
 .bar-item {
     cursor: pointer;
 
+    // filter は遷移させない。遷移の間、乗せた棒だけを別の層にして動かすため、ブラウザーが描いたもの全体を層に分け直す
+    // （棒の数の 2 乗ほどかかる）。3,000 カテゴリ × 凡例 10 では、カーソルが棒に乗るたびに数分止まった（2026-10-24）
     .bar-rect {
-        transition: opacity 120ms ease, filter 120ms ease;
+        transition: opacity 120ms ease;
     }
 
     &:hover .bar-rect {

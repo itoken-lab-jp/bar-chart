@@ -10,6 +10,7 @@ import { createRoot, Root } from "react-dom/client";
 import { FormattingSettingsService } from "powerbi-visuals-utils-formattingmodel";
 import { displayWarnings } from "./shared/warnings";
 import { sentimentTextColors, showThemeToneColors } from "./shared/numberFormat";
+import { syncToneColors } from "./shared/formatCards";
 
 import "./../style/visual.less";
 import { App } from "./App";
@@ -30,8 +31,13 @@ import {
 const PENDING_TIMEOUT_MS = 5000;
 import { savedCumulativeReset, lineTooltipItems, ribbonTooltipItems, ViewModel, DataPoint, TRUNCATED_TITLE, TRUNCATED_NOTICE, SERIES_TRUNCATED_TITLE, SERIES_TRUNCATED_NOTICE, LINE_RATIO_WARNING_TITLE, VALUE_LINE_WARNING_TITLE } from "./viewModel";
 import { showTooltipAt } from "./shared/tooltip";
-import { transformWithLayers, nextVisibleLayers, barTooltipItems, COMPARE_LIMIT_TITLE, COMPARE_LINE_ONLY_TITLE } from "./compareLayers";
+import { GuardedRenderer } from "./shared/renderGuard";
+import { selectionLookup } from "./shared/selectionLookup";
+import { contextMenuIdOf } from "./shared/contextMenu";
+import { transformWithLayers, nextVisibleLayers, labelRoomChanges, barTooltipItems, COMPARE_LIMIT_TITLE, COMPARE_LINE_ONLY_TITLE } from "./compareLayers";
 import { receivedCounts, ROW_LIMIT, SERIES_LIMIT } from "./matrixDataView";
+import { pickedLayersOf } from "./layout";
+import { MAX_AXIS_REBUILDS, initialValueAxisLength, needsAxisRebuild } from "./axisLength";
 
 import VisualConstructorOptions = powerbi.extensibility.visual.VisualConstructorOptions;
 import VisualUpdateOptions = powerbi.extensibility.visual.VisualUpdateOptions;
@@ -44,6 +50,8 @@ import ISelectionId = powerbi.visuals.ISelectionId;
 
 export class Visual implements IVisual {
     private root: Root;
+    /** 描画の守り。update では描き終えてからレンダリング イベントを送り、失敗したら前の絵を消して知らせを出す */
+    private renderer: GuardedRenderer;
     private element: HTMLElement;
     private host: IVisualHost;
     private events: IVisualEventService;
@@ -57,8 +65,11 @@ export class Visual implements IVisual {
     private renderLatest: (() => void) | null = null;
     /** 最後の update（閲覧者が累計を切り替えたときに、同じ内容で作り直す） */
     private lastOptions: VisualUpdateOptions | null = null;
-    /** 前に描いた値の軸の高さ (px、縦棒)。棒の外に出すデータ ラベルの余白を値の軸に取るのに使う（App の onPlotHeight） */
-    private plotHeight = 0;
+    /**
+     * この update で、値の軸の長さで組み直した回数。長さが 2 つの値を行き来しても描き直しが止まるよう、
+     * MAX_AXIS_REBUILDS までにする（ふつうは 1 回で落ち着く）。update と、閲覧者の操作で作り直すとき（凡例のレイヤー・累計）に数え直す
+     */
+    private axisRebuilds = 0;
     /**
      * 上限に達して切られたか。行（カテゴリ）は top 30000・列（凡例）は top 2000 で受け、届いた数が上限に達したら切られたとみなす。
      * 行を window にして続きを読むと、凡例が 60 で切られ、列の小計（全体の値）も届かなくなったため。update() でだけ決める
@@ -88,6 +99,7 @@ export class Visual implements IVisual {
         this.tooltipService = options.host.tooltipService;
         this.formattingSettingsService = new FormattingSettingsService();
         this.root = createRoot(options.element);
+        this.renderer = new GuardedRenderer(this.root);
         this.allowInteractions = options.host.hostCapabilities?.allowInteractions !== false;
 
         // ブックマークの適用などで、選択が外から変わったとき
@@ -98,24 +110,26 @@ export class Visual implements IVisual {
     }
 
     public update(options: VisualUpdateOptions): void {
-        // レンダリングイベントは認定要件。必ず started / finished(failed) を対で呼ぶ。
-        this.events.renderingStarted(options);
-
-        try {
+        // レンダリングイベントは認定要件。started と、描き終えてから finished（失敗なら failed）を対で 1 回ずつ送る。
+        // 値の軸の長さが決まってからの描き直し（onValueAxisLength）も、同じ update の中で描き終えてから送る
+        const rendered = this.renderer.update(this.events, options, () => {
             this.lastOptions = options;
+            this.axisRebuilds = 0;
             const counts = receivedCounts(options.dataViews?.[0]);
             this.truncated = { rows: counts.rows >= ROW_LIMIT, series: counts.series >= SERIES_LIMIT };
             this.restoreVisualState(options.dataViews?.[0]);
             this.build(options);
-            this.events.renderingFinished(options);
-        } catch (error) {
-            console.error("update failed", error);
-            this.events.renderingFailed(options, String(error));
-        }
+        });
+        // 描けなかったら、選択が外から変わっても前の内容で描き直さない（消した前の絵が戻る）
+        if (!rendered) this.renderLatest = null;
     }
 
-    /** 書式と閲覧者の操作から viewModel を作り、描く。累計は transform の中で効くので、切り替えたら作り直す */
-    private build(options: VisualUpdateOptions): void {
+    /**
+     * 書式と閲覧者の操作から viewModel を作り、描く。累計は transform の中で効くので、切り替えたら作り直す。
+     * 値の軸の長さ axisLength は、描いて知らせた長さで組み直すときだけ渡す。update と閲覧者の操作で作り直すときは、入力（ビューの大きさと書式）から
+     * 見積もった長さで組む（initialValueAxisLength。前の update で描いた長さは使わないので、同じ入力なら、それまでの大きさの順によらず同じ絵になる）
+     */
+    private build(options: VisualUpdateOptions, axisLength?: number): void {
         this.formattingSettings = this.formattingSettingsService.populateFormattingSettingsModel(
             VisualFormattingSettingsModel,
             options.dataViews?.[0]
@@ -134,7 +148,8 @@ export class Visual implements IVisual {
         const viewModel: ViewModel = transformWithLayers(options.dataViews?.[0], this.host, this.formattingSettings, {
             cumulative: effectiveCumulative(current, baseCumulative),
             cumulativeReset: current.cumulativeReset,
-            plotHeight: this.plotHeight,
+            valueAxisLength: axisLength ?? initialValueAxisLength(options.viewport, this.formattingSettings),
+            visibleLayers: this.visibleLayers,
         });
         // 警告は描き直すたびに消えるので、そのたびに出し直す。アイコンは 1 つしか出せないので、2 つあれば本文を並べる
         displayWarnings(this.host, [
@@ -158,34 +173,40 @@ export class Visual implements IVisual {
             lineTargets: viewModel.lineTargets,
         });
         this.formattingSettings.applySingleSeriesFill(viewModel.seriesMode, viewModel.columns.fill, options.dataViews?.[0]?.metadata?.objects);
+        // 単位ラベルの文字サイズ・カラーは、保存していなければ目盛りと同じものを書式ペインにも出す（保存はしない）
+        this.formattingSettings.showUnitDefaults();
         // 符号の色は、書式で決めていなければテーマから作った色を書式ペインにも出す（保存はしない）
         showThemeToneColors(
             this.formattingSettings.dataLabels,
             options.dataViews?.[0]?.metadata?.objects?.dataLabels,
             sentimentTextColors(this.host.colorPalette as powerbi.extensibility.ISandboxExtendedColorPalette)
         );
-        this.formattingSettings.applyCardVisibility(viewModel.lines.length > 0, viewModel.lineOnly ?? false, viewModel.measureGroups ?? false);
+        // 出し分けは描画に使ったのと同じ条件で（パレートの累積比の線は「折れ線の値」に数えない、第 2 Y 軸は描くときだけ、など）
+        this.formattingSettings.applyCardVisibility(viewModel.pane ?? false, false, viewModel.measureGroups ?? false);
         this.formattingSettings.legend.applySeries(viewModel.seriesMode);
         // 「比較値」「比較の列」が無ければ「比較」のカードは出さない。「手前にする値」は「比較の列」のときだけ
         this.formattingSettings.compare.visible = hasRole(options.dataViews?.[0], "compare") || hasRole(options.dataViews?.[0], "compareBy");
         this.formattingSettings.compare.applyCompareBy(hasRole(options.dataViews?.[0], "compareBy"));
         // 「X 軸の定数線」の欄が空なら、そのカードは出さない
         this.formattingSettings.categoryLine.visible = hasRole(options.dataViews?.[0], "categoryLine");
-        // 比較レイヤーが変わったら（枚数が変わる・比較を外す）、凡例で選んだレイヤーは外す
-        if (this.visibleLayers.some((l) => l >= viewModel.compareLayers.length)) this.visibleLayers = [];
+        // 比較レイヤーが変わったら（枚数が減る・比較を外す）、凡例で選んだレイヤーは外す（組むときも、外の番号のある選択は選択なしとして組んだ）
+        this.visibleLayers = pickedLayersOf(viewModel.compareLayers.length, this.visibleLayers);
         this.selectedIds = this.selectionManager.getSelectionIds() as ISelectionId[];
 
         const render = () =>
-            this.root.render(
+            this.renderer.paint(
                 React.createElement(App, {
                     viewModel,
                     viewport: options.viewport,
                     settings: this.formattingSettings,
-                    // 値の軸の高さが変わったら、棒の外に出すデータ ラベルの余白を取り直して描き直す（高さは軸の範囲で変わらないので 1 回で落ち着く）
-                    onPlotHeight: (height) => {
-                        if (Math.abs(height - this.plotHeight) < 1 || this.lastOptions !== options) return;
-                        this.plotHeight = height;
-                        this.build(options);
+                    // 描いた値の軸の長さで、棒の外に出すラベルの余白（長さが 1px 以上変わったとき）と範囲の丸め（長さで決まる本数が変わったとき）を
+                    // 決め直して描き直す（needsAxisRebuild）。ふつうは 1 回で落ち着くが、軸の範囲で目盛りの文字数・X 軸の名前の回し方が変わると
+                    // 長さが行き来しうるので、組み直しは MAX_AXIS_REBUILDS 回まで
+                    onValueAxisLength: (length) => {
+                        if (this.lastOptions !== options || !needsAxisRebuild(viewModel, length)) return;
+                        if (this.axisRebuilds >= MAX_AXIS_REBUILDS) return;
+                        this.axisRebuilds++;
+                        this.build(options, length);
                     },
                     selectedIds: this.selectedIds,
                     // 操作できない場所（ダッシュボードのタイルなど）では、選択・右クリックのメニューを送らない
@@ -193,30 +214,36 @@ export class Visual implements IVisual {
                         if (!this.allowInteractions) return;
                         this.selectionManager.select(id, multiSelect).then((ids) => {
                             this.selectedIds = ids as ISelectionId[];
-                            render();
+                            // 選択が返るまでに次の update が来ていれば、そのときの最新の内容で描く（失敗していれば描かない）
+                            this.renderLatest?.();
                         });
                     },
                     onSelectMany: (ids, multiSelect) => {
                         if (!this.allowInteractions || ids.length === 0) return;
                         // 同じランクをもう一度押したら外す（旧パレート図と同じ）
                         const current = this.selectedIds;
-                        const same = !multiSelect && current.length === ids.length && ids.every((id) => current.some((c) => c.equals(id)));
+                        // 選んだ ID は行の数だけあることがある。1 つずつ比べず、選んだ ID を引いて比べる
+                        const inCurrent = selectionLookup(current);
+                        const same = !multiSelect && current.length === ids.length && ids.every((id) => inCurrent(id));
                         const action = same ? this.selectionManager.clear().then(() => []) : this.selectionManager.select(ids, multiSelect);
                         action.then((selected) => {
                             this.selectedIds = selected as ISelectionId[];
-                            render();
+                            // 選択が返るまでに次の update が来ていれば、そのときの最新の内容で描く（失敗していれば描かない）
+                            this.renderLatest?.();
                         });
                     },
                     onClearSelection: () => {
                         if (!this.allowInteractions || this.selectedIds.length === 0) return;
                         this.selectionManager.clear().then(() => {
                             this.selectedIds = [];
-                            render();
+                            // 選択が返るまでに次の update が来ていれば、そのときの最新の内容で描く（失敗していれば描かない）
+                            this.renderLatest?.();
                         });
                     },
-                    onContextMenu: (id, x, y) => {
+                    onContextMenu: (ids, x, y) => {
                         if (!this.allowInteractions) return;
-                        this.selectionManager.showContextMenu(id, { x, y });
+                        // 1 行の棒はその行、まとめた棒（その他）と背景はビジュアルのメニュー
+                        this.selectionManager.showContextMenu(contextMenuIdOf(ids), { x, y });
                     },
                     onTooltipShow: (d, x, y) => this.showTooltip(viewModel, d, x, y, false),
                     onTooltipMove: (d, x, y) => this.showTooltip(viewModel, d, x, y, true),
@@ -230,8 +257,12 @@ export class Visual implements IVisual {
                     visibleLayers: this.visibleLayers,
                     onSelectLayer: (layer, multiSelect) => {
                         if (!this.allowInteractions) return;
-                        this.visibleLayers = nextVisibleLayers(this.visibleLayers, layer, multiSelect);
-                        render();
+                        const next = nextVisibleLayers(this.visibleLayers, layer, multiSelect);
+                        // データ ラベルを描くレイヤーが変わって値の軸の余白が変わるなら、組み直す
+                        const rebuild = labelRoomChanges(viewModel, this.visibleLayers, next) && this.lastOptions === options;
+                        this.visibleLayers = next;
+                        if (rebuild) this.rebuildFromViewer(options);
+                        else render();
                     },
                     browserMenu: hasBrowserMenu(this.host.hostEnv),
                     onToggleCumulative: () =>
@@ -252,7 +283,13 @@ export class Visual implements IVisual {
     private changeVisualState(next: VisualState): void {
         if (!this.allowInteractions || !this.lastOptions) return;
         this.persistVisualState(next);
-        this.build(this.lastOptions);
+        this.rebuildFromViewer(this.lastOptions);
+    }
+
+    /** 閲覧者の操作で作り直す。update と同じく、見積もった値の軸の長さから組み、組み直しの回数も数え直す */
+    private rebuildFromViewer(options: VisualUpdateOptions): void {
+        this.axisRebuilds = 0;
+        this.build(options);
     }
 
     /** 閲覧者の操作をこのセッションに持ち、レポートに保存する */
@@ -300,30 +337,34 @@ export class Visual implements IVisual {
     private showTooltip(viewModel: ViewModel, d: DataPoint, clientX: number, clientY: number, move: boolean): void {
         if (!viewModel.tooltip || !this.tooltipService.enabled()) return;
         // 比較レイヤーの奥の棒は、そのレイヤーの値で出す。
-        // 「その他」は、まとめたカテゴリの ID を全部渡す（ドリルスルーやレポート ページのツールヒントの対象）
+        // 「その他」は、まとめたカテゴリの ID を全部渡す（系列があればその系列の ID。ドリルスルーやレポート ページのツールヒントの対象）
         showTooltipAt(this.tooltipService, this.element, clientX, clientY, move, barTooltipItems(viewModel, d), d.selectionIds ?? [d.selectionId]);
     }
 
-    /** 折れ線の点のツールヒント。カテゴリ と 折れ線の値。点の selectionId（カテゴリ＋メジャー）を渡す */
+    /**
+     * 折れ線の点のツールヒント。カテゴリ と 折れ線の値。点の selectionId（カテゴリ＋メジャー）を渡す。
+     * 「その他」の点は、まとめた行の線の点の ID を全部渡す（ドリルスルーやレポート ページのツールヒントの対象）
+     */
     private showLineTooltip(viewModel: ViewModel, lineIndex: number, pointIndex: number, clientX: number, clientY: number, move: boolean): void {
         const point = viewModel.lines[lineIndex]?.points[pointIndex];
         if (!point) return;
-        showTooltipAt(this.tooltipService, this.element, clientX, clientY, move, lineTooltipItems(viewModel, lineIndex, pointIndex), [point.selectionId]);
+        showTooltipAt(this.tooltipService, this.element, clientX, clientY, move, lineTooltipItems(viewModel, lineIndex, pointIndex), point.selectionIds ?? [point.selectionId]);
     }
 
-    /** リボンの帯のツールヒント。前後の値・変化・順位。帯の両端の棒の selectionId を渡す */
+    /** リボンの帯のツールヒント。前後の値・変化・順位。帯の両端の棒の ID を渡す（「その他」の棒は、まとめたカテゴリの帯の系列の ID を全部） */
     private showRibbonTooltip(viewModel: ViewModel, seriesIndex: number, fromIndex: number, clientX: number, clientY: number, move: boolean): void {
         const a = viewModel.categoryGroups[fromIndex]?.points[seriesIndex];
         const b = viewModel.categoryGroups[fromIndex + 1]?.points[seriesIndex];
         if (!a || !b) return;
-        showTooltipAt(this.tooltipService, this.element, clientX, clientY, move, ribbonTooltipItems(viewModel, seriesIndex, fromIndex), [a.selectionId, b.selectionId]);
+        const ids = [...(a.selectionIds ?? [a.selectionId]), ...(b.selectionIds ?? [b.selectionId])];
+        showTooltipAt(this.tooltipService, this.element, clientX, clientY, move, ribbonTooltipItems(viewModel, seriesIndex, fromIndex), ids);
     }
 
     /** 書式設定ペインを開くたび / 値変更のたびに呼ばれる */
     public getFormattingModel(): powerbi.visuals.FormattingModel {
-        const model = this.formattingSettingsService.buildFormattingModel(this.formattingSettings);
-        this.formattingSettings.dataLabels.sectionTargetItems(model);
-        return model;
+        // 使わない符号の色は出さない（触っても何も起きない）
+        syncToneColors(this.formattingSettings.dataLabels);
+        return this.formattingSettings.formattingModel(this.formattingSettingsService);
     }
 
     public destroy(): void {

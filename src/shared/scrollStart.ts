@@ -22,6 +22,14 @@ export const SCROLL_START_ITEMS: powerbi.IEnumMember[] = [
     { value: SCROLL_STARTS.end, displayName: "末尾" },
 ];
 
+/**
+ * グラフのカテゴリの軸の「初期スクロール位置」の選択肢。名前は標準の X 軸と同じ「開始」「終了」で、保存する値は SCROLL_START_ITEMS と同じ
+ */
+export const AXIS_SCROLL_START_ITEMS: powerbi.IEnumMember[] = [
+    { value: SCROLL_STARTS.start, displayName: "開始" },
+    { value: SCROLL_STARTS.end, displayName: "終了" },
+];
+
 export type ScrollTarget = "start" | "end";
 
 /** スクロールする量（px）。中身が窓に収まれば 0 */

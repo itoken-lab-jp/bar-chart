@@ -10,12 +10,19 @@ export interface FontValues {
     underline: boolean;
 }
 
-/** 文字の大きさを書式ペインの範囲（8〜32pt）に丸める。値が無ければ fallback */
+/**
+ * 文字サイズの欄の下限・上限（pt）。書式ペインの欄に付け（formatCards.ts の FONT_SIZE_RANGE）、描くときもこの範囲に丸める。
+ * 標準の集合縦棒・積み上げ縦棒の文字サイズの欄（軸の値とタイトル・凡例・データ ラベル・合計ラベル）と同じ 8〜60
+ */
+export const FONT_SIZE_MIN = 8;
+export const FONT_SIZE_MAX = 60;
+
+/** 文字の大きさを書式ペインの範囲（8〜60pt）に丸める。値が無ければ fallback */
 export function clampFontSize(size: number | null | undefined, fallback: number): number {
-    return Math.max(8, Math.min(32, size ?? fallback));
+    return Math.max(FONT_SIZE_MIN, Math.min(FONT_SIZE_MAX, size ?? fallback));
 }
 
-/** フォントの部品（FontControl）の値。保存が無ければ family・size。大きさは 8〜32pt に丸める */
+/** フォントの部品（FontControl）の値。保存が無ければ family・size。大きさは 8〜60pt に丸める */
 export function fontValuesOf(control: formattingSettings.FontControl, family: string, size: number): FontValues {
     return {
         family: control.fontFamily.value ?? family,

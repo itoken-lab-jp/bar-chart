@@ -5,32 +5,62 @@ import powerbi from "powerbi-visuals-api";
 import IViewport = powerbi.IViewport;
 import ISelectionId = powerbi.visuals.ISelectionId;
 
-import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings, ParetoRank, Tick } from "./viewModel";
+import { ViewModel, DataPoint, CategoryGroup, LineSeriesInfo, LegendItemInfo, DataLabelsSettings, ParetoRank, StackTotals, Tick } from "./viewModel";
 import { VisualFormattingSettingsModel, STEP_WIDTHS, LEVEL_ROW_PADDINGS, LINE_BLANKS } from "./settings";
-import { placeLabel, labelBlock, measureTextWidth, LABEL_PADDING, FontSpec, LabelLine } from "./unitUtils";
+import { placeLabel, placeBarLabel, measureTextWidth, LABEL_PADDING, FontSpec } from "./unitUtils";
+import { DataLabelLine, labelLinesOf, totalLabelRiseOf, totalLabelSpotsOf, TOTAL_LABEL_ASCENT, TOTAL_LABEL_GAP } from "./labelLines";
 import { continuousBand, continuousTicks, positionOf } from "./continuousAxis";
-import { clusterLayout, spanOf, levelRunsOf, layerLayout, layerOpacity, categoryGridBreaks, gridLevelOf } from "./layout";
-import { layoutLegend, LegendLayout, LegendItemBox, LEGEND_MARKER_GAP, LAYER_GLYPH_THICKNESS, LAYER_GLYPH_LENGTH } from "./legend";
+import { clusterLayout, spanOf, levelRunsOf, layerLayout, layerOpacity, categoryGridBreaks, gridLevelOf, pickedLayersOf, shownLayersOf, labelLayersOf } from "./layout";
+import { layoutLegend, LegendLayout, LegendItemBox, LAYER_GLYPH_THICKNESS, LAYER_GLYPH_LENGTH } from "./legend";
 import { linePath, areaPath, markerPath, XY } from "./linePath";
-import { recommendedTickCount, fitTicks as fitTicksBy } from "./shared/ticks";
+import { legendLineGlyphOf } from "./legendGlyph";
+import { createLabelBoxes, haloOutsetOf, hitBoxOf, inkBoxOf, keepUnoverlapped, LabelBox, LabelBoxes, LabelCandidate, LabelPlacement, shiftIntoSpan } from "./labelBoxes";
+import { recommendedTickCount, fitTicks as fitTicksBy, endMarginOf, rowTicks, nextColumnTry, ColumnTry } from "./shared/ticks";
+import { valueTickTarget } from "./axisLength";
 import { gridCutout, useGridMaskId } from "./shared/gridCutout";
-import { CUSTOM_LINE_STYLE, gridLineStroke, lineStrokeOf } from "./shared/gridlines";
+import { gridLineStroke, lineStrokeOf } from "./shared/gridlines";
 
 export { gridLineStroke, lineStrokeOf };
 import { DARK_TEXT, autoLabelColor, blend, sameColor } from "./shared/color";
 import { HighContrastColors } from "./shared/highContrast";
 import { selectKeyProps, selectKeyDown } from "./shared/keyboard";
 import { LegendArrowButton } from "./shared/LegendArrowButton";
+import { legendBaselineOf } from "./shared/legend";
 import { valueEndBarPath } from "./shared/barShape";
 import { placeReferenceLabels, referenceLabelSvgStyle, referenceLineSvgStyle, referenceShadeSvgStyle } from "./shared/referenceLine";
 import { haloStyle } from "./shared/halo";
 import { rotatedLabelLeadIn } from "./shared/rotatedLabels";
-import { PT_TO_PX, truncateToWidth } from "./shared/text";
+import { PT_TO_PX, graphemesOf, headWithEllipsis, truncateToWidth } from "./shared/text";
 import { useScrollStart } from "./shared/scrollStart";
 import { CopyImageButton } from "./shared/CopyImageButton";
+import { selectionLookup } from "./shared/selectionLookup";
 import { controlColorsOf, controlVars } from "./shared/controls";
-import { TEXT_ATTRIBUTE } from "./shared/copyImage";
-import { fontOf, fontStyleOf } from "./shared/textStyle";
+import { TEXT_ATTRIBUTE, chartImage } from "./shared/copyImage";
+import { grownSize, hiddenOf, wholeChartImage } from "./shared/wholeImage";
+import { FontValues, fontOf, fontStyleOf } from "./shared/textStyle";
+import { maxOf, minOf } from "./shared/minMax";
+import { DRILL_ROW_SHARE_MAX, DRILL_TEXT_ASCENT, TOP_ROW_RISE, UNIT_TEXT_ASCENT, UNIT_TEXT_DESCENT, columnBadgeRiseOf, plainTopOf, topRowNeedOf } from "./shared/plotTop";
+import { axisColumnWidths, truncateUnitText } from "./shared/unitBadge";
+import { titleInkOf, valueTitleBaselineFromEdge, valueTitleBaselineToColumn } from "./shared/valueTitleGap";
+import {
+    AXIS_TEXT_BELOW,
+    AXIS_TEXT_DROP,
+    AXIS_TITLE_ASCENT,
+    axisTextBottomOf,
+    axisTextDescentOf,
+    BAR_TEXT_BOTTOM,
+    BAR_TITLE_BOTTOM,
+    bottomTitleBelowOf,
+    COLUMN_TEXT_BOTTOM,
+    COLUMN_TITLE_BOTTOM,
+    H_LABEL_BACKGROUND_PAD,
+    SIDE_NAME_LEAD,
+    SIDE_NAME_PLOT_GAP,
+    sidePlotLeftOf,
+    SIDE_TITLE_NAME_GAP,
+    sideTitleBaselineOf,
+    sideTitleInkRightOf,
+} from "./shared/axisBands";
 
 /** 長ければ末尾を省略した文字（軸のタイトル用）。省略したときは、マウスを乗せると全体が出る */
 function fittedText(text: string, maxWidthPx: number, font: FontSpec): React.ReactNode {
@@ -45,21 +75,26 @@ function fittedText(text: string, maxWidthPx: number, font: FontSpec): React.Rea
 
 /**
  * 指定の幅に収まるよう、末尾を「…」で省略した文字。幅は Power BI の文字幅の計測で測る（標準と同じ省略記号 1 文字）。
- * 1.10 までは全角 1.05 文字分・「...」3 文字分と見積もっていて、標準より早く省略していた
+ * 1.10 までは全角 1.05 文字分・「...」3 文字分と見積もっていて、標準より早く省略していた。
+ * 字の途中（サロゲート対・結合文字・ZWJ でつないだ絵文字の中）では切らない（graphemesOf。1.36.11.58 までは UTF-16 の 1 単位で切り、
+ * 「😀\ud83d…」のように欠けた字を出した）。1 文字も入らなければ頭の 1 文字と「…」を残す。ただし元の字のほうが狭ければ元の字
+ * （1 文字の名前が「東…」と元より広くならない。headWithEllipsis）
  */
 function truncateText(text: string, maxWidthPx: number, font: FontSpec): string {
     if (!text) return "";
     if (measureTextWidth(text, font) <= maxWidthPx) return text;
     const ellipsis = "…";
+    const parts = graphemesOf(text);
+    const headOf = (n: number) => parts.slice(0, n).join("");
     // 収まるいちばん長い先頭を二分探索で探す（計測の呼び出しを少なくする）
     let lo = 0;
-    let hi = text.length - 1;
+    let hi = parts.length - 1;
     while (lo < hi) {
         const mid = Math.ceil((lo + hi) / 2);
-        if (measureTextWidth(text.slice(0, mid).trimEnd() + ellipsis, font) <= maxWidthPx) lo = mid;
+        if (measureTextWidth(headOf(mid).trimEnd() + ellipsis, font) <= maxWidthPx) lo = mid;
         else hi = mid - 1;
     }
-    return (lo > 0 ? text.slice(0, lo).trimEnd() : text.charAt(0)) + ellipsis;
+    return lo > 0 ? headOf(lo).trimEnd() + ellipsis : headWithEllipsis(text, font);
 }
 
 
@@ -84,6 +119,13 @@ export function labelAutoColor(
 
 /** 斜めのカテゴリ名を、棒の下端から離す間隔 (px) */
 const ROTATED_LABEL_GAP = 8;
+/**
+ * HTML で描く軸のタイトル（スクロールするときの縦棒の X 軸のタイトル）の、ベースラインから字の箱の下の端まで（文字の大きさに対する割合）。
+ * 行の高さを決めない箱の下がりの見積もり
+ */
+const HTML_TITLE_BOX_DESCENT = 0.25;
+/** 横棒の描く範囲の右の端と、ビューの右の端の間 (px)。標準の集合横棒と同じ */
+const H_PLOT_RIGHT = 10;
 /** 前後に点の無い折れ線の 1 点に置く点の半径の下限 (px)。線が細くても見える大きさにする */
 const LONE_POINT_MIN_RADIUS = 3;
 
@@ -98,8 +140,15 @@ const LEVEL_BOX_RADIUS = 4;
  * 斜めのカテゴリラベルをビジュアル左端から離しておく余白 (px)。
  * Power BI はビジュアルの枠で描画をクリップするため、左端ぎりぎりまで伸ばすと
  * 枠線・角丸・ビジュアルの内側パディングの下で文字が欠ける。その分を見込んで「...」で省略する。
+ * 字が大きいときは、この余白と文字の半分の大きいほうをとる（categoryLabelLeftMarginOf）
  */
 const CATEGORY_LABEL_LEFT_SAFE_MARGIN = 20;
+/**
+ * スクロールしない斜めの名前の左の端の余白 (px)。CATEGORY_LABEL_LEFT_SAFE_MARGIN と文字の半分の大きいほう。
+ * 名前の字の左の端は「中心 − 長さ × sin45 − 文字の半分」と見積もるので、文字の半分が余白より大きい（約 30pt を超える）と、
+ * 余白まで省いた名前でも字の頭がグラフの左の端の外へ出た（1.36.11.58 まで）。30pt 以下は変わらない
+ */
+const categoryLabelLeftMarginOf = (fontSizePx: number) => Math.max(CATEGORY_LABEL_LEFT_SAFE_MARGIN, fontSizePx * 0.5);
 
 /** ハイライトで該当しない部分（棒全体）の不透明度の係数 */
 const HIGHLIGHT_DIM_FACTOR = 0.35;
@@ -109,58 +158,15 @@ const TOOLBAR_ACCENT = "#605E5C";
 const HC_SELECTED_WIDTH = 3;
 
 
-interface DataLabelLine extends LabelLine {
-    kind: "title" | "value" | "detail";
-}
-
-/** データラベルの行（タイトル・値・詳細の行。標準と同じくこの順に上から）。ラベルの表示を最適化なら、最大幅を超える行を「…」で切る */
-function labelLinesOf(dl: DataLabelsSettings, d: DataPoint): DataLabelLine[] {
-    const lines = rawLabelLinesOf(dl, d);
-    if (!dl.optimizeLabelDisplay) return lines;
-    return lines.map((line) => ({ ...line, text: truncateToWidth(line.text, dl.labelMaxWidth, line.font) }));
-}
-
-function rawLabelLinesOf(dl: DataLabelsSettings, d: DataPoint): DataLabelLine[] {
-    const lines: DataLabelLine[] = [];
-    if (dl.titleShow && d.titleText) {
-        lines.push({
-            kind: "title",
-            text: d.titleText,
-            font: {
-                family: dl.titleFontFamily,
-                size: dl.titleFontSize * PT_TO_PX,
-                bold: dl.titleBold,
-                italic: dl.titleItalic,
-                underline: dl.titleUnderline,
-            },
-        });
-    }
-    if (dl.valueShow) {
-        lines.push({
-            kind: "value",
-            text: d.dataLabelText,
-            font: { family: dl.fontFamily, size: dl.fontSize * PT_TO_PX, bold: dl.bold, italic: dl.italic, underline: dl.underline },
-        });
-    }
-    if (dl.detailShow && d.detailText) {
-        lines.push({
-            kind: "detail",
-            text: d.detailText,
-            font: {
-                family: dl.detailFontFamily,
-                size: dl.detailFontSize * PT_TO_PX,
-                bold: dl.detailBold,
-                italic: dl.detailItalic,
-                underline: dl.detailUnderline,
-            },
-        });
-    }
-    return lines;
-}
-
 /** データラベルの行の class（テストとハーネスが行を見分ける） */
 function labelClassOf(line: DataLabelLine): string {
     return line.kind === "value" ? "data-label" : line.kind === "title" ? "data-label-title" : "data-label-detail";
+}
+
+/** データラベルの行の文字の色（labelTextStyle の fill） */
+function labelFillOf(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoint, autoColor: string, toneHere: boolean): string {
+    const own = line.kind === "detail" ? dl.detailColor : line.kind === "title" ? dl.titleColor : null;
+    return (own !== null ? own : (toneHere && d.labelToneColor) || d.labelColor) || autoColor;
 }
 
 /**
@@ -170,7 +176,7 @@ function labelClassOf(line: DataLabelLine): string {
  */
 function labelTextStyle(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoint, autoColor: string, toneHere: boolean): React.CSSProperties {
     const own = line.kind === "detail" ? { color: dl.detailColor, transparency: dl.detailTransparency } : line.kind === "title" ? { color: dl.titleColor, transparency: dl.titleTransparency } : null;
-    const fill = (own ? own.color : (toneHere && d.labelToneColor) || d.labelColor) || autoColor;
+    const fill = labelFillOf(dl, line, d, autoColor, toneHere);
     return {
         fill,
         ...(own && own.transparency > 0 ? { fillOpacity: 1 - own.transparency / 100 } : {}),
@@ -186,11 +192,11 @@ function labelTextStyle(dl: DataLabelsSettings, line: DataLabelLine, d: DataPoin
  * 縦の軸は高さ、横の軸は幅で決める
  */
 /**
- * 目盛りを、数字が重ならない本数まで減らす（「目盛りの本数 (目安)」を多く入れたときなど）。
- * length は描く範囲の長さ（px）、need は隣り合う目盛りの間に要る長さ（縦の軸は文字の行の高さ、横の軸はいちばん長い数字＋余白）
+ * 横棒の値の軸の目盛りを、数字が重ならない本数まで減らす（「目盛りの本数 (目安)」を多く入れたときなど）。
+ * length は描く範囲の長さ（px）、need は隣り合う目盛りの間に要る長さ（いちばん長い数字＋余白）。縦棒の値の軸は rowTicks（shared/ticks）
  */
 export function fitTicks(ticksFor: (count: number) => Tick[], target: number, length: number, need: (ticks: Tick[]) => number): Tick[] {
-    return fitTicksBy(ticksFor, target, (ticks) => Math.min(...ticks.slice(1).map((tick, i) => Math.abs(tick.ratio - ticks[i].ratio))) * length, need);
+    return fitTicksBy(ticksFor, target, (ticks) => minOf(ticks.slice(1).map((tick, i) => Math.abs(tick.ratio - ticks[i].ratio))) * length, need);
 }
 
 export { recommendedTickCount };
@@ -233,7 +239,8 @@ export interface AppProps {
     viewport: IViewport;
     settings: VisualFormattingSettingsModel;
     onSelect: (id: ISelectionId, multiSelect: boolean) => void;
-    onContextMenu: (id: ISelectionId, x: number, y: number) => void;
+    /** 右クリック。ids は押した所が選ぶ行（棒は選ぶときと同じ行をすべて。背景は空）。どの ID でメニューを出すかは shared/contextMenu.ts */
+    onContextMenu: (ids: readonly ISelectionId[], x: number, y: number) => void;
     /** このビジュアルで選ばれている棒（または系列）。空なら選択なし */
     selectedIds?: ISelectionId[];
     /** 棒以外の所をクリックした（選択の解除） */
@@ -268,8 +275,12 @@ export interface AppProps {
     visibleLayers?: number[];
     /** 凡例の比較レイヤーを押した。描くレイヤーを決めるのは visual.ts */
     onSelectLayer?: (layer: number, multiSelect: boolean) => void;
-    /** 描いた値の軸の高さ (px、縦棒)。visual.ts が次の transform に渡し、棒の外に出すデータ ラベルの余白を値の軸に取る */
-    onPlotHeight?: (height: number) => void;
+    /**
+     * 描いた値の軸の長さ (px)。縦棒は描く範囲の高さ、横棒は幅（値の軸にラベルの余白を取るときと、長さで範囲を丸めるときだけ。
+     * valueAxisLengthToReport）。visual.ts は、組み立てに使った長さ・本数と比べて組み直すかを決め（needsAxisRebuild）、組み直すときは
+     * 次の transform に渡して、棒の外に出すデータ ラベルと合計ラベルの余白を値の軸に取り、範囲をその長さで決まる目盛りの本数で丸める
+     */
+    onValueAxisLength?: (length: number) => void;
 }
 
 /** 比較レイヤーの棒 1 枚ぶんの描き方。offset は系列の棒の中心からのずれ */
@@ -282,9 +293,39 @@ interface LayerDraw {
     label: boolean;
 }
 
+/** 棒のデータ ラベルを置く順と、棒の積み上げ（その積み上げの合計ラベルとは、背景が文字に掛かるかだけを見る。labelBoxes の stack） */
+interface DataLabelSpot {
+    order: readonly number[];
+    stack: string;
+}
+
+/** 線のラベルの背景（文字の四角から左右に 2px、上下に 1px 広げる） */
+function lineLabelBackgroundOf(box: LabelBox): LabelBox {
+    return { x0: box.x0 - 2, x1: box.x1 + 2, y0: box.y0 - 1, y1: box.y1 + 1 };
+}
+
 /** 比較レイヤーの棒（0 が手前の「値」） */
 function layerPointsOf(g: CategoryGroup, layer: number): DataPoint[] {
     return layer === 0 ? g.points : g.layerPoints?.[layer - 1] ?? [];
+}
+
+/** カテゴリの合計ラベル（文字と置く棒の端）。どの合計をどちらの端に置くかは、値の軸の余白と同じ totalLabelSpotsOf で決める */
+function totalLabelsOf(t: StackTotals, split: boolean): Array<{ key: string; text: string; ratio: number; up: boolean }> {
+    return totalLabelSpotsOf(t.positive, t.negative, split).map(({ kind, up }) => ({
+        key: kind,
+        text: kind === "positive" ? t.positiveText : kind === "negative" ? t.negativeText : t.netText,
+        ratio: up ? t.positiveEndRatio : t.negativeEndRatio,
+        up,
+    }));
+}
+
+/**
+ * 描いたあとに visual.ts へ知らせる値の軸の長さ (px)。値の軸にラベルの余白を取るとき（viewModel.valueAxisRoom）と、範囲を描く範囲の
+ * 長さで決まる目盛りの本数で丸めるとき（viewModel.roundsByLength）だけ、描く範囲の値の向きの長さ（縦棒は高さ、横棒は幅）。
+ * ほかは 0 で、知らせず組み直さない（試験の組み直しも、これで知らせる長さを決める）
+ */
+export function valueAxisLengthToReport(viewModel: Pick<ViewModel, "valueAxisRoom" | "roundsByLength">, plotLength: number): number {
+    return viewModel.valueAxisRoom || viewModel.roundsByLength ? plotLength : 0;
 }
 
 /**
@@ -300,7 +341,7 @@ export function categorySelectionIds(viewModel: ViewModel, start: number, end: n
     return [...groups.flatMap((g) => g.points.flatMap((d) => d.selectionIds ?? [d.selectionId])), ...lineIds];
 }
 
-/** groups のカテゴリにある折れ線の点の ID（値の無い点は除く。「その他」はまとめたカテゴリ全部） */
+/** groups のカテゴリにある折れ線の点の ID（値の無い点は除く。「その他」は、まとめた行ごとの線の点の ID 全部） */
 function lineSelectionIdsAt(viewModel: ViewModel, groups: CategoryGroup[]): ISelectionId[] {
     const rows = new Set(groups.map((g) => g.rowIndex));
     return viewModel.lines.flatMap((line) =>
@@ -308,20 +349,27 @@ function lineSelectionIdsAt(viewModel: ViewModel, groups: CategoryGroup[]): ISel
     );
 }
 
-/** 折れ線が選ばれているか（凡例で線ごと、または線の点。「その他」の点は、まとめたカテゴリの ID のどれか） */
+/** 選んだ ID の中にあるか（selectionLookup で作る。描くたびに 1 回作り、点ごとに選んだ ID を全部比べない） */
+type Picked = (id: ISelectionId | null | undefined) => boolean;
+
+/** 折れ線が選ばれているか（凡例で線ごと、または線の点。「その他」の点は、まとめた行の線の点の ID のどれか） */
 export function linePicked(line: LineSeriesInfo | undefined, selectedIds: ISelectionId[]): boolean {
+    return linePickedBy(line, selectionLookup(selectedIds));
+}
+
+function linePickedBy(line: LineSeriesInfo | undefined, picked: Picked): boolean {
     if (!line) return false;
-    return lineWholePicked(line, selectedIds) || line.points.some((p) => linePointPicked(p, selectedIds));
+    return lineWholePicked(line, picked) || line.points.some((p) => linePointPicked(p, picked));
 }
 
 /** 凡例で線ごと選ばれているか（線の ID） */
-function lineWholePicked(line: LineSeriesInfo, selectedIds: ISelectionId[]): boolean {
-    return selectedIds.some((s) => s.equals(line.selectionId));
+function lineWholePicked(line: LineSeriesInfo, picked: Picked): boolean {
+    return picked(line.selectionId);
 }
 
-/** 線の点が選ばれているか（「その他」の点は、まとめたカテゴリの ID のどれか） */
-function linePointPicked(p: LineSeriesInfo["points"][number], selectedIds: ISelectionId[]): boolean {
-    return (p.selectionIds ?? [p.selectionId]).some((id) => selectedIds.some((s) => s.equals(id)));
+/** 線の点が選ばれているか（「その他」の点は、まとめた行の線の点の ID のどれか） */
+function linePointPicked(p: LineSeriesInfo["points"][number], picked: Picked): boolean {
+    return (p.selectionIds ?? [p.selectionId]).some((id) => picked(id));
 }
 
 /** 閲覧者向けの累計の切り替えボタンの行の高さ (px)。出すときだけグラフの上に取る */
@@ -329,45 +377,47 @@ const TOOLBAR_HEIGHT = 28;
 
 const NO_SELECTION: ISelectionId[] = [];
 const NO_LAYERS: number[] = [];
+/** 項目が多いときにスクロールする箱（縦棒は横に、横棒は縦に） */
+const SCROLLERS = ".unit-bar-scroll, .unit-bar-vscroll";
 
-export const App: React.FC<AppProps> = ({
-    viewModel,
-    viewport,
-    onSelect,
-    onContextMenu,
-    selectedIds = NO_SELECTION,
-    onClearSelection,
-    onSelectMany,
-    onTooltipShow,
-    onTooltipMove,
-    onTooltipHide,
-    onLineTooltipShow,
-    onLineTooltipMove,
-    onRibbonTooltipShow,
-    onRibbonTooltipMove,
-    onToggleCumulative,
-    onChangeCumulativeReset,
-    interactive = true,
-    editing = true,
-    browserMenu = false,
-    visibleLayers = NO_LAYERS,
-    onSelectLayer,
-    onPlotHeight,
-}) => {
-    const [hoveredKey, setHoveredKey] = React.useState<string | null>(null);
+export const App: React.FC<AppProps> = (props) => {
+    const {
+        viewModel,
+        viewport,
+        onSelect,
+        onContextMenu,
+        selectedIds = NO_SELECTION,
+        onClearSelection,
+        onSelectMany,
+        onTooltipShow,
+        onTooltipMove,
+        onTooltipHide,
+        onLineTooltipShow,
+        onLineTooltipMove,
+        onRibbonTooltipShow,
+        onRibbonTooltipMove,
+        onToggleCumulative,
+        onChangeCumulativeReset,
+        interactive = true,
+        editing = true,
+        browserMenu = false,
+        visibleLayers = NO_LAYERS,
+        onSelectLayer,
+        onValueAxisLength,
+    } = props;
     // 凡例が入りきらないときに出しているページ。凡例の項目が変わったら最初のページに戻す
     // （描いたあとで戻すと、前のページで 1 回描いてしまうので、項目の並びと一緒に持って描くときに比べる）
     const legendKey = JSON.stringify(viewModel.legendEntries.map((e) => e.name));
     const [legendPageState, setLegendPageState] = React.useState({ key: legendKey, page: 0 });
     const legendPage = legendPageState.key === legendKey ? legendPageState.page : 0;
     const setLegendPage = (page: number) => setLegendPageState({ key: legendKey, page });
-    // 縦棒の描画で決まった値の軸の高さ。描いたあとに visual.ts へ知らせる（横棒・空のときは 0）
-    const plotHeightRef = React.useRef(0);
-    plotHeightRef.current = 0;
+    // 描画で決まった値の軸の長さ（縦棒は高さ、横棒は幅。valueAxisLengthToReport）。描いたあとに visual.ts へ知らせる（余白も長さでの丸めも無いとき・空のときは 0）
+    const valueAxisLengthRef = React.useRef(0);
+    valueAxisLengthRef.current = 0;
     // 目盛線を棒の形で切り抜く mask の ID（gridCutout）
     const gridMaskId = useGridMaskId("bar");
     React.useEffect(() => {
-        if (plotHeightRef.current > 0) onPlotHeight?.(plotHeightRef.current);
+        if (valueAxisLengthRef.current > 0) onValueAxisLength?.(valueAxisLengthRef.current);
     });
 
     // はみ出したときの最初の位置。縦棒は横に、横棒は縦にスクロールする。末尾なら、カテゴリの数・両端が変わったら当て直す
@@ -395,7 +445,7 @@ export const App: React.FC<AppProps> = ({
                     onClick={() => onClearSelection?.()}
                     onContextMenu={(e) => {
                         e.preventDefault();
-                        onContextMenu(null as unknown as ISelectionId, e.clientX, e.clientY);
+                        onContextMenu([], e.clientX, e.clientY);
                     }}
                 />
             );
@@ -412,9 +462,21 @@ export const App: React.FC<AppProps> = ({
     // 比較レイヤー。凡例で選んだレイヤーがあれば、それだけを手前から並べ直して描く（薄くせずに描く）
     const layerCount = viewModel.compareLayers.length;
     const layered = layerCount > 1;
-    const pickedLayers = visibleLayers.filter((l) => l < layerCount);
+    const pickedLayers = pickedLayersOf(layerCount, visibleLayers);
     const layerFilterOn = layered && pickedLayers.length > 0;
-    const shownLayers = layered ? (layerFilterOn ? pickedLayers : viewModel.compareLayers.map((_, l) => l)) : [0];
+    const shownLayers = shownLayersOf(layerCount, visibleLayers);
+    // データ ラベルを描くレイヤー（値の軸の余白は、このレイヤーのラベルで取る。compareLayers の transformWithLayers）
+    const labelLayers = labelLayersOf(layerCount, visibleLayers, !!viewModel.measureGroups);
+    /** 積み上げの印（カテゴリとレイヤー）。積み上げの棒のデータ ラベルは、同じ積み上げの合計ラベルとは、背景が文字に掛かるかだけを見る */
+    const stackOf = (i: number, layer: number): string => `${i}-${layer}`;
+    /**
+     * 棒のデータ ラベルを置く順（重なるものは後のものを省く）。凡例の先の系列から置き、同じ系列の中は左（横棒は上）のカテゴリから
+     * （標準と同じ。値の大きさやカテゴリの順ではない）。メジャーを並べるときは、同じカテゴリの中で先のメジャーから
+     */
+    const dataLabelSpotOf = (s: number, i: number, layer: number): DataLabelSpot => ({
+        order: [viewModel.seriesPositions[s] ?? s, i, layer],
+        stack: stackOf(i, layer),
+    });
     /** 系列の棒 1 本ぶんの幅に、描くレイヤーを並べる。キーはレイヤーの番号 */
     const layerDrawsFor = (slotWidth: number): Map<number, LayerDraw> => {
         // メジャーごとに並べるときは、集合の系列と同じく「系列間のスペース」を空けて並べる（最初のメジャーが左。横棒は上）
@@ -430,7 +492,7 @@ export const App: React.FC<AppProps> = ({
                     opacity: layerFilterOn || viewModel.measureGroups ? 1 : layerOpacity(l, layerCount, viewModel.compare.backOpacity),
                     outline: layered && viewModel.compare.outline,
                     // メジャーごとに並べたときは、どの棒にもデータ ラベルを出す（比較では手前の棒だけ）
-                    label: k === 0 || !!viewModel.measureGroups,
+                    label: labelLayers.includes(l),
                 },
             ])
         );
@@ -451,11 +513,24 @@ export const App: React.FC<AppProps> = ({
     const toolbarHeight = toolbarOn ? TOOLBAR_HEIGHT : 0;
     const bodyHeight = Math.max(10, viewport.height - toolbarHeight);
 
+    /** 凡例の折れ線の印の形の入力（組み方と描く所で同じものを使う） */
+    const legendGlyphSpecOf = (entry: LegendItemInfo) => ({
+        line: viewModel.lines[entry.index] as LineSeriesInfo | undefined,
+        markers: viewModel.markers,
+        style: viewModel.legend.markerStyle,
+        horizontal: viewModel.orientation === "horizontal",
+        fontPx: legendFontPx,
+    });
     // 凡例（複数系列のときだけ）。グラフの外側に置き、その分だけグラフの領域を縮める
     const legend: LegendLayout | null = lg.show
         ? layoutLegend({
             // 比較レイヤーは系列・折れ線と別のまとまりにして、見出し「比較」を付ける
-            entries: viewModel.legendEntries.map((e) => ({ name: e.name, color: e.color, kind: e.kind, group: e.kind === "layer" ? 1 : 0 })),
+            // 折れ線の印は、描いた印（線の模様と端の形・マーカー）の見える左右の端の幅を渡す（前の名前と次の名前を、見える端から離す）。
+            // どこも見えない印は決まった幅のまま
+            entries: viewModel.legendEntries.map((e) => {
+                const ink = e.kind === "line" ? legendLineGlyphOf(legendGlyphSpecOf(e)).ink : null;
+                return { name: e.name, color: e.color, kind: e.kind, group: e.kind === "layer" ? 1 : 0, inkWidth: ink ? ink.right - ink.left : undefined };
+            }),
             title: lg.title,
             // 凡例のタイトルをオフにしたら、「比較」の見出しも出さない（見出しの代わりに間を広げる）
             groupTitles: lg.titleShow ? { 1: "比較" } : undefined,
@@ -465,6 +540,7 @@ export const App: React.FC<AppProps> = ({
             height: bodyHeight,
             horizontal: viewModel.orientation === "horizontal",
             page: legendPage,
+            rows: lg.rows,
         })
         : null;
 
@@ -472,20 +548,17 @@ export const App: React.FC<AppProps> = ({
      * 自分で選んだ棒か。凡例のクリックで系列ごと選んだときは、その系列の棒をすべて含む
      * （自分で選んだ場合、Power BI は選んだビジュアル自身にはハイライトを送らない）
      */
+    const picked = selectionLookup(selectedIds);
     const isPicked = (d: DataPoint): boolean => {
         const seriesId = viewModel.series[d.seriesIndex]?.selectionId;
         const categoryId = d.categorySelectionId;
-        // 「その他」は、まとめたカテゴリが全部選ばれているか、凡例でその系列が選ばれているかで見る
-        // （仮の ID は、まとめた先頭のカテゴリのものなので比べない）
+        // 「その他」は、まとめたカテゴリが全部選ばれているか（この棒の ID か、カテゴリだけの ID で。カテゴリだけの ID は、パレートの点・帯で
+        // 選んだときと前の版で保存した選択）、凡例でその系列が選ばれているかで見る（仮の ID は、まとめた先頭のカテゴリのものなので比べない）
         if (d.selectionIds?.length) {
-            return (
-                d.selectionIds.every((id) => selectedIds.some((s) => s.equals(id))) ||
-                (seriesId ? selectedIds.some((s) => s.equals(seriesId)) : false)
-            );
+            const allPicked = (ids: ISelectionId[]) => ids.every((id) => picked(id));
+            return allPicked(d.selectionIds) || (d.categorySelectionIds ? allPicked(d.categorySelectionIds) : false) || picked(seriesId);
         }
-        return selectedIds.some(
-            (s) => s.equals(d.selectionId) || (seriesId ? s.equals(seriesId) : false) || (categoryId ? s.equals(categoryId) : false)
-        );
+        return picked(d.selectionId) || picked(seriesId) || picked(categoryId);
     };
 
     /** この線を第 2 軸で描くか。パレートでは累積比の線（選べない線）だけが第 2 軸で、ほかは左の軸を共有する */
@@ -524,13 +597,13 @@ export const App: React.FC<AppProps> = ({
         const text = measureTextWidth(full, font) <= available ? full : pareto.labels[rank];
         const showText = measureTextWidth(text, font) <= available && box.height >= font.size;
         const ids = pareto.selections[rank];
-        const picked = ids.length > 0 && ids.every((id) => selectedIds.some((s) => s.equals(id)));
+        const runPicked = ids.length > 0 && ids.every((id) => picked(id));
         const select = (multi: boolean) => onSelectMany?.(ids, multi);
         return (
             <g
                 key={`rank-${run.start}`}
                 className="pareto-rank"
-                {...keysOf({ label: full, onSelect: select, onClear: onClearSelection, pressed: picked })}
+                {...keysOf({ label: full, onSelect: select, onClear: onClearSelection, pressed: runPicked })}
                 style={{ cursor: "pointer" }}
                 onClick={(e) => {
                     e.stopPropagation();
@@ -543,7 +616,7 @@ export const App: React.FC<AppProps> = ({
                     width={Math.max(0, box.width)}
                     height={Math.max(0, box.height)}
                     rx={4}
-                    style={{ fill: pareto.colors[rank], fillOpacity: picked ? 0.45 : 0.22 }}
+                    style={{ fill: pareto.colors[rank], fillOpacity: runPicked ? 0.45 : 0.22 }}
                 />
                 {showText && (
                     <text
@@ -568,7 +641,7 @@ export const App: React.FC<AppProps> = ({
         const groups = viewModel.categoryGroups.slice(run.start, run.end + 1);
         if (viewModel.lineOnly) {
             const ids = lineIdsAt(groups);
-            return ids.length > 0 && ids.every((id) => selectedIds.some((s) => s.equals(id)));
+            return ids.length > 0 && ids.every((id) => picked(id));
         }
         const points = groups.flatMap((g) => g.points);
         return points.length > 0 && points.every(isPicked);
@@ -645,7 +718,7 @@ export const App: React.FC<AppProps> = ({
     const seenColorOf = (color: string, opacity: number) =>
         viewModel.highContrast || opacity >= 1 ? color : blend(color, viewModel.background ?? "#FFFFFF", 1 - opacity);
 
-    const isLinePicked = (lineIndex: number): boolean => linePicked(viewModel.lines[lineIndex], selectedIds);
+    const isLinePicked = (lineIndex: number): boolean => linePickedBy(viewModel.lines[lineIndex], picked);
 
     /** 凡例の項目が選ばれているか（棒の系列なら、その系列の棒のどれかが選ばれている） */
     const isEntryPicked = (entry: LegendItemInfo | undefined): boolean =>
@@ -655,6 +728,32 @@ export const App: React.FC<AppProps> = ({
             : entry.kind === "line"
             ? isLinePicked(entry.index)
             : viewModel.dataPoints.some((d) => d.seriesIndex === entry.index && isPicked(d)));
+
+    /**
+     * 値の軸の座標が描画域（軸の範囲）の中か。valueOf は比 → 座標で、比 0 と 1 が描画域の両端。
+     * 折れ線の比は丸めていないので、範囲の外の点はこれで見分けて、マーカー・データ ラベル・当たりを出さない
+     */
+    const valueInPlot = (valueOf: (ratio: number) => number) => {
+        const [lo, hi] = [Math.min(valueOf(0), valueOf(1)), Math.max(valueOf(0), valueOf(1))];
+        return (v: number) => v >= lo - 0.5 && v <= hi + 0.5;
+    };
+
+    /**
+     * 折れ線の線と網掛け領域を描画域で切る clipPath。値の軸の向きは描画域の端で切る
+     * （線は太さの半分だけ外へ許す。端の値の線が半分に削れないように）。カテゴリの軸の向きは stepBounds の外を少し許す
+     */
+    const lineClip = (id: string, valueOf: (ratio: number) => number, horizontal: boolean, stepBounds: [number, number], pad: number) => {
+        const [lo, hi] = [Math.min(valueOf(0), valueOf(1)) - pad, Math.max(valueOf(0), valueOf(1)) + pad];
+        const [c0, c1] = [stepBounds[0] - pad - 1, stepBounds[1] + pad + 1];
+        const rect = horizontal ? { x: lo, y: c0, width: hi - lo, height: c1 - c0 } : { x: c0, y: lo, width: c1 - c0, height: hi - lo };
+        return (
+            <defs>
+                <clipPath id={id}>
+                    <rect {...rect} />
+                </clipPath>
+            </defs>
+        );
+    };
 
     /**
      * 折れ線のデータ ラベル。点の上か下（横棒では右か左）に値を置く。自動は上（右）で、プロットに入らないか先に描いたラベルと重なれば反対の側。
@@ -668,7 +767,7 @@ export const App: React.FC<AppProps> = ({
         valueOf: (ratio: number) => number,
         horizontal: boolean,
         bounds: [number, number],
-        boxes: Array<{ x0: number; x1: number; y0: number; y1: number }>
+        boxes: LabelBoxes
     ) => {
         const labels = line.labels;
         if (!labels) return null;
@@ -680,11 +779,14 @@ export const App: React.FC<AppProps> = ({
         // 点（マーカー）から離す間。マーカーが大きければその半径の外へ
         const markerRadius = line.marker?.show ? (line.marker.size ?? 5) / 2 : line.width / 2;
         const gap = Math.max(4, markerRadius + 3);
+        const inPlot = valueInPlot(valueOf);
         const texts = line.points.map((p, i) => {
             const text = labels.texts[i];
             if (text === null || text === undefined || p.ratio === null) return null;
             const pos = posOf(i);
             const val = valueOf(p.ratio);
+            // 軸の範囲の外の点（線は描画域で切れている）には出さない
+            if (!inPlot(val)) return null;
             const width = measureTextWidth(text, font);
             // 置き方の候補。上（横棒は右）なら first=true。自動は入る側を先に、重なったら反対の側を試す
             const placementOf = (first: boolean) => {
@@ -697,26 +799,27 @@ export const App: React.FC<AppProps> = ({
                 const box = { x0: pos - width / 2, x1: pos + width / 2, y0: first ? val - gap - fontPx : val + gap, y1: first ? val - gap : val + gap + fontPx };
                 return { x: pos, y: first ? val - gap - fontPx * 0.2 : val + gap + fontPx * 0.8, anchor: "middle" as "start" | "end" | "middle", box, inside: first ? box.y0 >= bounds[0] : box.y1 <= bounds[1] };
             };
-            const overlaps = (box: { x0: number; x1: number; y0: number; y1: number }) =>
-                boxes.some((b) => b.x0 < box.x1 - 1 && box.x0 < b.x1 - 1 && b.y0 < box.y1 - 1 && box.y0 < b.y1 - 1);
             const candidates =
                 labels.position === "above" ? [placementOf(true)] : labels.position === "below" ? [placementOf(false)] : [placementOf(true), placementOf(false)];
             if (labels.position === "auto" && !candidates[0].inside) candidates.reverse();
             // 自動ではプロットからはみ出す側には置かない（切れて読めなくなる）。どちらの側も入らないか重なれば描かない
-            const chosen = candidates.find((c) => !overlaps(c.box) && (labels.position !== "auto" || c.inside));
+            // 重なりは、棒のラベルと同じく、背景を描くなら背景、描かないなら文字に 1px 足した枠で見る（文字の縁の分も入れる）
+            const hitOf = (box: LabelBox) => hitBoxOf(box, dl.backgroundShow ? lineLabelBackgroundOf(box) : null, haloOutsetOf(dl.halo, [fill]));
+            const chosen = candidates.find((c) => !boxes.overlaps(hitOf(c.box)) && (labels.position !== "auto" || c.inside));
             if (!chosen) return null;
             const { x, y, anchor, box } = chosen;
-            boxes.push(box);
+            boxes.add(hitOf(box));
+            const background = lineLabelBackgroundOf(box);
             // 背景は棒のラベルと同じく「背景」がオンのとき。棒の上で読みにくければ、線ごとに「文字の縁」を付ける
             return [
                 dl.backgroundShow && (
                     <rect
                         key={`line-label-bg-${j}-${i}`}
                         className="line-data-label-bg"
-                        x={box.x0 - 2}
-                        y={box.y0 - 1}
-                        width={box.x1 - box.x0 + 4}
-                        height={box.y1 - box.y0 + 2}
+                        x={background.x0}
+                        y={background.y0}
+                        width={background.x1 - background.x0}
+                        height={background.y1 - background.y0}
                         rx={2}
                         pointerEvents="none"
                         style={{ fill: dl.backgroundColor, fillOpacity: 1 - dl.backgroundTransparency / 100 }}
@@ -747,7 +850,9 @@ export const App: React.FC<AppProps> = ({
      * 折れ線 1 本。点はカテゴリの中心に置き、値の無いカテゴリでは線を切る。
      * 点の上にマウスの当たり判定の円を置き、ツールヒントと選択を受ける。
      * posOf(i) はカテゴリの軸の座標、valueOf(ratio) は値の軸の座標。横棒（horizontal）では点が上から下へ並ぶ。
-     * barBand はカテゴリ 1 つの棒のまとまりの幅（集合なら系列の棒の端から端まで）。「段の幅」が「棒の幅」のときの線の長さ
+     * barBand はカテゴリ 1 つの棒のまとまりの幅（集合なら系列の棒の端から端まで）。「段の幅」が「棒の幅」のときの線の長さ。
+     * 点の比は丸めていない。軸の範囲の外へ出た線は描画域で切り（標準と同じく端に貼り付けない）、範囲の外の点のマーカー・当たりは出さない。
+     * clipId はこの線の clipPath の ID の頭（線と網掛け領域で別に作る）
      */
     const renderLineSeries = (
         line: LineSeriesInfo,
@@ -758,8 +863,11 @@ export const App: React.FC<AppProps> = ({
         horizontal: boolean,
         stepExtension: number,
         stepBounds: [number, number],
-        barBand: number
+        barBand: number,
+        clipId: string
     ) => {
+        const insideValue = valueInPlot(valueOf);
+        const inPlot = (at: XY) => insideValue(horizontal ? at.x : at.y);
         // 空白の前後をつなぐか（「線」カードの「空白の値」）。ビジュアルが計算した線（パレートの累積比）は対象外
         const connectBlanks = viewModel.lineBlanks === LINE_BLANKS.connect && line.selectable !== false;
         const pts = line.points.map((p, i) => {
@@ -802,7 +910,7 @@ export const App: React.FC<AppProps> = ({
         const pathsOf = (rs: XY[][]) => {
             const runPaths = rs.map((r) => linePath(r, shape, horizontal, stepExtension, stepBounds));
             // 前後に点の無い 1 点は、線が長さ 0 になって見えない。マーカーを出していなくても、線の色の点を置く（標準と同じ）
-            const lone = rs.filter((r, k) => r.length === 1 && !/[LCQ]/.test(runPaths[k])).map((r) => r[0]);
+            const lone = rs.filter((r, k) => r.length === 1 && !/[LCQ]/.test(runPaths[k])).map((r) => r[0]).filter(inPlot);
             return { path: runPaths.join(" "), lone };
         };
         const { path, lone: lonePoints } = pathsOf(runs);
@@ -817,15 +925,15 @@ export const App: React.FC<AppProps> = ({
         // 凡例で線ごと選んだときは線全体を濃く。点（カテゴリのラベル・線の点）で選んだときは、ハイライトと同じく線を沈め、
         // 選んだカテゴリの線を濃く重ねる（中で選んでも外で選ばれても同じ見え方）
         const selecting = !viewModel.hasHighlights && selectedIds.length > 0;
-        const whole = selecting && lineWholePicked(line, selectedIds);
-        const pickedAt = (p: LineSeriesInfo["points"][number], at: XY | null) => (linePointPicked(p, selectedIds) ? at : null);
+        const whole = selecting && lineWholePicked(line, picked);
+        const pickedAt = (p: LineSeriesInfo["points"][number], at: XY | null) => (linePointPicked(p, picked) ? at : null);
         const highlightPaths = highlighting
             ? pathsOf(runsOf(pts.map((pt) => ({ p: pt.p, at: highlightAt(pt.p, pt.i) })), false))
             : selecting && !whole
                 ? pathsOf(runsOf(pts.map((pt) => ({ p: pt.p, at: pickedAt(pt.p, pt.at) })), false))
                 : null;
         const pointPicked = (p: LineSeriesInfo["points"][number]) =>
-            highlighting ? p.highlight !== null && p.highlight !== undefined : !selecting || whole || linePointPicked(p, selectedIds);
+            highlighting ? p.highlight !== null && p.highlight !== undefined : !selecting || whole || linePointPicked(p, picked);
         const dimmed = (selecting && !whole) || highlighting;
         const opacity = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
         const stroke = lineStrokeOf(line, line.width);
@@ -842,25 +950,35 @@ export const App: React.FC<AppProps> = ({
             if (!line.areaShow) return null;
             const area = viewModel.areas;
             const baseline = valueOf(line.baselineRatio);
-            return runs.map((r, k) => (
-                <path
-                    key={`area-${j}-${k}`}
-                    d={areaPath(r, baseline, shape, horizontal, stepExtension, stepBounds)}
-                    className="line-area"
-                    fill={area.matchLineColor ? line.color : area.fill}
-                    fillOpacity={opacity * Math.max(0, Math.min(1, 1 - area.transparency / 100))}
-                    stroke="none"
-                    pointerEvents="none"
-                />
-            ));
+            const areaClipId = `${clipId}-area`;
+            return (
+                <g key={`area-${j}`} className="line-areas" clipPath={`url(#${areaClipId})`}>
+                    {lineClip(areaClipId, valueOf, horizontal, stepBounds, 0)}
+                    {runs.map((r, k) => (
+                        <path
+                            key={`area-${j}-${k}`}
+                            d={areaPath(r, baseline, shape, horizontal, stepExtension, stepBounds)}
+                            className="line-area"
+                            fill={area.matchLineColor ? line.color : area.fill}
+                            fillOpacity={opacity * Math.max(0, Math.min(1, 1 - area.transparency / 100))}
+                            stroke="none"
+                            pointerEvents="none"
+                        />
+                    ))}
+                </g>
+            );
         }
+        const pathClipId = `${clipId}-path`;
+        const pathClip = `url(#${pathClipId})`;
         return (
             <g key={`line-${j}`} className="line-series">
+                {lineClip(pathClipId, valueOf, horizontal, stepBounds, line.width / 2)}
                 {/* 線は「すべての系列に表示」「このシリーズに表示」がオンのときだけ（マーカーは別に出す） */}
                 {line.lineShow && (
                     <path
                         d={path}
                         className="line-path"
+                        clipPath={pathClip}
                         fill="none"
                         stroke={line.color}
                         strokeWidth={line.width}
@@ -890,6 +1008,7 @@ export const App: React.FC<AppProps> = ({
                         <path
                             d={highlightPaths.path}
                             className="line-path line-highlight"
+                            clipPath={pathClip}
                             fill="none"
                             stroke={line.color}
                             strokeWidth={line.width}
@@ -915,12 +1034,13 @@ export const App: React.FC<AppProps> = ({
                     </>
                 )}
                 {pts.map((pt) => {
-                    if (pt.at === null) return null;
+                    // 軸の範囲の外の点は、マーカーも当たりも出さない（線は描画域で切れている）
+                    if (pt.at === null || !inPlot(pt.at)) return null;
                     // ハイライトの該当分があるマーカーは、該当分の高さに置く（濃く重ねた線の上）
                     const mkAt = (highlighting && highlightAt(pt.p, pt.i)) || pt.at;
                     return (
                         <g key={`pt-${j}-${pt.i}`}>
-                            {mk.show && (
+                            {mk.show && inPlot(mkAt) && (
                                 <path
                                     d={markerPath(mk.shape, mkAt.x, mkAt.y, mk.size, horizontal)}
                                     transform={mk.rotation ? `rotate(${mk.rotation} ${mkAt.x} ${mkAt.y})` : undefined}
@@ -949,8 +1069,8 @@ export const App: React.FC<AppProps> = ({
                                 onContextMenu={(e) => {
                                     e.preventDefault();
                                     e.stopPropagation();
-                                    // 「その他」は特定のカテゴリにしない（仮の ID を渡すと、まとめた先頭のカテゴリのメニューになる）
-                                    onContextMenu(pt.p.selectionIds ? (null as unknown as ISelectionId) : pt.p.selectionId, e.clientX, e.clientY);
+                                    // 「その他」はまとめた行の線の点の ID をすべて渡す（先頭のカテゴリのメニューにしない）
+                                    onContextMenu(pt.p.selectionIds ?? [pt.p.selectionId], e.clientX, e.clientY);
                                 }}
                                 onMouseEnter={(e) => onLineTooltipShow?.(j, pt.i, e.clientX, e.clientY)}
                                 onMouseMove={(e) => onLineTooltipMove?.(j, pt.i, e.clientX, e.clientY)}
@@ -1074,91 +1194,229 @@ export const App: React.FC<AppProps> = ({
             </text>
         );
     };
-    /** 単位のラベルの幅（ドリルの位置を並べるときに空ける）。文字はカテゴリの軸の書体で見積もる */
-    const badgeWidthOf = (text: string, fontPt: number) =>
-        text ? measureTextWidth(text, { ...drillPathFont(), size: fontPt * PT_TO_PX, bold: false, italic: false, underline: false }) : 0;
+    /**
+     * 単位のラベルの文字（大きさは pt）。単位は、その軸の目盛りの書体・太字・斜体・下線で描く（大きさと色は単位の設定。保存していなければ目盛りと同じ）。
+     * 1.36.11.47 までは大きさと色だけを指定し、コンテナの書体で描いていた
+     */
+    const unitFontOf = (axis: object, sizePt: number): FontValues => ({ ...fontOf(axis), size: sizePt });
+    const yUnitFont = unitFontOf(viewModel.valueAxis, viewModel.unitInfo.fontSize);
+    const y2UnitFont = unitFontOf(viewModel.valueAxis2, viewModel.valueAxis2.unitFontSize);
+    /**
+     * 単位のラベル・目盛りの数字の幅。描く文字で測る（目盛りの列の幅、ドリルの位置を並べるときに空ける幅、右の端にそろえる単位の幅）。
+     * 1.36.11.47 までは描くときに字の間（.unit-axis-badge の letter-spacing 0.02em）を足し、目盛りの列には 1 文字 0.7 文字分・最小 20px の見積もりも取った。
+     * 1.36.11.48 から字の間を外し、列も目盛りの数字と同じく測った幅で取る
+     */
+    const badgeWidthOf = (text: string, font: FontValues) => (text ? measureTextWidth(text, { ...font, size: font.size * PT_TO_PX }) : 0);
+    /**
+     * 描く範囲の右の端にそろえて置く単位（「プロット エリアの右上」、横棒の値の軸の単位）の字。長ければ左の端 left で止めるが、
+     * 止めても右の端 right に入らなければ、末尾を「…」で切る（括弧の中を切る。「(千…)」も入らなければ出さない）。
+     * left・right は、ふだんはグラフの領域の左右の端から 2px（同じ行に第 2 Y 軸の単位があれば、その単位から 6px 空けた所）
+     */
+    const edgeBadgeTextOf = (text: string, font: FontValues, left: number, right: number) =>
+        truncateUnitText(text, right - left + 1e-6, (s) => badgeWidthOf(s, font));
+    /** edgeBadgeTextOf の単位を、右の端を rightX にそろえて置くときの x（text-anchor は end）。左の端 left で止める */
+    const edgeBadgeXOf = (text: string, font: FontValues, rightX: number, left = 2) => Math.max(rightX, left + badgeWidthOf(text, font));
 
-    /** グラフ本体（軸・棒・ラベル）。width・height は凡例を除いた領域 */
-    const renderChart = (width: number, height: number) => {
+    /**
+     * 長さ 0 の棒にラベルを出すか。値が 0 の棒（空白を 0 として描く棒は除く）で、0 の線が値の軸の範囲にあるときだけ
+     * （対数の軸、0 を範囲の外にした軸では出さない）
+     */
+    const zeroLabelShown = (d: DataPoint) => d.value === 0 && !d.blankAsZero && viewModel.niceMin <= 0 && viewModel.niceMax >= 0;
+
+    /**
+     * グラフ本体（軸・棒・ラベル）。width・height は凡例を除いた領域。columnTry は目盛りの列の幅の組み直しの途中の状態
+     * （はじめは無し。下の nextColumnTry）
+     */
+    const renderChart = (width: number, height: number, columnTry?: ColumnTry): React.ReactElement => {
         const badgeText = viewModel.unitInfo.badgeText;
         const catAxis = viewModel.categoryAxis;
         const valAxis = viewModel.valueAxis;
         const gridlines = viewModel.gridlines;
         const columnsSettings = viewModel.columns;
-
-        // Y軸目盛ラベルの文字数
-        let maxTickChars = 2;
-        if (valAxis.show) {
-            // 目盛りの本数は描く範囲の高さで決まる（下の valueTicks）。いちばん細かい 8 本の数字の幅も見積もりに入れる
-            for (const t of [...viewModel.ticks, ...viewModel.ticksFor(Math.max(8, valAxis.tickCount))]) {
-                if (t.label.length > maxTickChars) {
-                    maxTickChars = t.label.length;
-                }
-            }
-        }
         const isTopBadge = badgeText && viewModel.unitInfo.unitPosition === "valueAxisTop";
-        const badgeChars = isTopBadge ? badgeText.length : 0;
 
         // Y軸タイトル・目盛の精密レイアウト (Power BI 標準準拠)
         const isRightAxis = valAxis.switchPosition;
         const valTitleFontSizePx = valAxis.titleFontSize * PT_TO_PX;
         const valTickFontSizePx = valAxis.fontSize * PT_TO_PX;
-        const tickWidthPx = valAxis.show ? Math.max(14, maxTickChars * (valTickFontSizePx * 0.55)) : 0;
-        const badgeWidthPx = isTopBadge ? Math.max(20, badgeChars * (viewModel.unitInfo.fontSize * PT_TO_PX * 0.7)) : 0;
         const tickToAxisGap = 6;
-        const gapTitleToTicks = isRightAxis ? 6 : 4;
+        // タイトルの無い値の軸の側の余白（左は 4px、右は 12px を目盛りの列の外に足し、左 16px・右 24px を下限にする）
         const leftPadding = 4;
         const rightPadding = 12;
 
         // 標準と同じく「値」(目盛りラベル) とタイトルは独立。値を OFF にしてもタイトルは残す
         const hasYTitle = valAxis.titleShow && Boolean(valAxis.titleText);
-        const axisContentWidth = Math.max(tickWidthPx, badgeWidthPx) + tickToAxisGap;
+        // Y 軸のタイトル（-90° に回す）のベースラインから目盛りの列の外の端まで。目盛りの列（目盛りの数字と上の単位の広いほう）の字から
+        // タイトルの字までを、標準の集合縦棒と同じすき間にする（shared/valueTitleGap）。
+        // 1.36.11.47 までは、左は 4px（タイトルが 16pt からは字の下側の分だけ広げた）、右は 6px で字の真ん中に置き、列は 1 文字 0.55 文字分の見積もりだった
+        // タイトルの字の画素の上下の出は、字・太字・下線（文字の大きさと画面の倍率で）から見積もる（shared/valueTitleGap の titleInkOf。
+        // 既定の組の字だけなら標準の測りの全角の字と同じ）
+        const yTitleInk = titleInkOf(valAxis.titleText, valAxis.titleUnderline, { fontPx: valTitleFontSizePx, bold: valAxis.titleBold });
+        const yTitleToColumn = valueTitleBaselineToColumn(valTitleFontSizePx, valTickFontSizePx, isRightAxis, yTitleInk);
+        // ビューの端からタイトルのベースラインまで。字の外側の端を標準と同じだけビューの端から離す（shared/valueTitleGap の valueTitleBaselineFromEdge）。
+        // 既定の外の字（下に伸びる字・高い字・付け記号のある英字など）か下線のあるタイトルは、ビューの端で切れないよう、その分だけ内側に置く。
+        // 列の側は標準の位置を保ち、字の画素が目盛りの数字に 2px より寄るときだけ離す（valueTitleBaselineToColumn）。
+        // 1.36.11.49 までは、左はビューの左の端から 4px ＋文字の大きさ、右はビューの右の端から 12px（字の下側 0.25 文字がそれより出る大きさはその分）。
+        // タイトルの側に凡例があれば、凡例の字・印の内側の端から標準と同じだけ離す（右は凡例の分を除いた所の外へ出る。下の titleOverhang）。
+        // 1.36.11.59 までは、凡例があっても凡例の分を除いた所の端から凡例が無いときと同じだけ離し、タイトルの大きさで外側の空きを変えなかった
+        const legendSide = legend?.side;
+        const yTitleFromEdge = hasYTitle ? valueTitleBaselineFromEdge(valTitleFontSizePx, isRightAxis, yTitleInk, legendSide === (isRightAxis ? "right" : "left")) : 0;
 
-        // 第 2 Y 軸（折れ線を右の軸で描くとき）。左の軸（Y 軸）の反対側に置く
+        // 第 2 Y 軸（折れ線を右の軸で描くとき）。左の軸（Y 軸）の反対側に置き、目盛りの列・タイトル・外側の空きは Y 軸と同じ作りにする。
+        // 1.36.11.49 までは、目盛りの列を 1 文字 0.55 文字分の見積もり（最小 14px）で取り、タイトルの字の真ん中を目盛りの数字の列（単位を入れない）から
+        // 左 4px・右 6px と文字の半分に置き、外側に 4px と左右の余白（4px・12px）を取った
         const axis2 = viewModel.valueAxis2;
         const axis2On = axis2.show && viewModel.lines.length > 0;
+        const axis2Right = !isRightAxis;
         const axis2TickFontPx = axis2.fontSize * PT_TO_PX;
-        const axis2TickWidth = axis2On && axis2.valueShow
-            ? Math.max(14, Math.max(2, ...[...axis2.ticks, ...axis2.ticksFor(Math.max(8, valAxis.tickCount))].map((t) => t.label.length)) * axis2TickFontPx * 0.55)
-            : 0;
+        /**
+         * 描く範囲の高さ length のときに描く目盛り（Y 軸・第 2 Y 軸）。本数の目安は、標準と同じく描く範囲の高さで決める（150px 未満は 3、
+         * 300px 未満は 5、それ以上は 8 まで。「目盛りの本数 (目安)」があればその本数。第 2 Y 軸も同じ目安）。値の軸の範囲（viewModel）も、
+         * 知らせた高さで同じ本数の目安で丸める。目盛りは範囲を丸めた本数で引く（valueTickTarget。ふつうは描いた高さの本数と同じ）。
+         * その目安を、目盛りを引く範囲の長さに数字の行（目盛りの文字の大きさ）が入る数までに下げて取る（shared/ticks の rowTicks。
+         * 取った目盛りは、隣との間隔が文字の 1.4 倍より狭くてもそれ以上減らさない。標準の集合縦棒と同じ）。Y 軸の目盛りを引く範囲は、
+         * ラベルの余白を足す前の範囲（frameTopRatio〜frameBottomRatio）。第 2 Y 軸は描く範囲の高さいっぱい。
+         * 1.36.11.55 までは、隣の間隔が文字の 1.4 倍以上になるまで本数を減らし、36pt の目盛りで標準より少なかった
+         */
+        const verticalTicksAt = (length: number) => {
+            const target = valueTickTarget(viewModel, valAxis.tickCount, length);
+            return {
+                valueTicks: rowTicks(viewModel.ticksFor, target, length * (viewModel.frameTopRatio - viewModel.frameBottomRatio), valTickFontSizePx),
+                axis2Ticks: rowTicks(axis2.ticksFor, target, length, axis2TickFontPx),
+            };
+        };
+        /** 描く目盛りの数字の幅（Y 軸・第 2 Y 軸の順。数字を描かない軸は 0）。目盛りの書体で測る */
+        const drawnColumnsOf = (ticks: { valueTicks: Tick[]; axis2Ticks: Tick[] }): number[] => [
+            valAxis.show ? Math.max(0, maxOf(ticks.valueTicks.map((t) => badgeWidthOf(t.label, fontOf(valAxis))))) : 0,
+            axis2On && axis2.valueShow ? Math.max(0, maxOf(ticks.axis2Ticks.map((t) => badgeWidthOf(t.label, fontOf(axis2))))) : 0,
+        ];
+        // 目盛りの数字の列の幅（Y 軸 tickWidthPx・第 2 Y 軸 axis2TickWidth）。描く目盛りの数字の一番広い幅にする（標準と同じ）。
+        // 描く目盛りは描く範囲の高さで決まり、描く範囲の高さは列の幅で変わる（描く範囲の幅で名前の回し方・下の帯が変わる）ので、はじめは
+        // 範囲を組んだ長さ（viewModel.builtAxisLength。無ければビューの高さから 80px 引いた長さ）で描く目盛りの数字の幅で組み、
+        // 描く範囲の高さで描く目盛りの数字の幅が違えば、その幅で組み直す（下の nextColumnTry。回数に上限があり、落ち着かないときの決め方も
+        // shared/ticks）。1.36.11.47 までは 1 文字 0.55 文字分の見積もりで、最小 14px。1.36.11.55 までは、描かない「いちばん細かい 8 本」の
+        // 目盛りの数字（0.5 おきの 1.5 など）の幅も入れ、描く数字のほうが狭い形で列が広がり、Y 軸のタイトルとのすき間が標準より広かった
+        const estimatedLength = (viewModel.builtAxisLength ?? 0) > 0 ? viewModel.builtAxisLength! : Math.max(1, height - 80);
+        const [tickWidthPx, axis2TickWidth] = columnTry?.widths ?? drawnColumnsOf(verticalTicksAt(estimatedLength));
         const axis2TitleFontPx = axis2.titleFontSize * PT_TO_PX;
         const hasAxis2Title = axis2On && axis2.titleShow && Boolean(axis2.titleText);
-        // 第 2 Y 軸の上の単位ラベル（Y 軸の単位ラベルと同じ置き方）
-        const axis2BadgeText = axis2On ? axis2.badgeText : "";
-        const axis2BadgeWidth = axis2BadgeText
-            ? Math.max(20, axis2BadgeText.length * (axis2.unitFontSize * PT_TO_PX * 0.7))
-            : 0;
-        const axis2Width = axis2On
-            ? Math.max(axis2TickWidth, axis2BadgeWidth) + tickToAxisGap + (hasAxis2Title ? axis2TitleFontPx + gapTitleToTicks : 0) + 4
-            : 0;
-
-        const marginLeft = !isRightAxis
-            ? (hasYTitle
-                ? leftPadding + valTitleFontSizePx + gapTitleToTicks + axisContentWidth
-                : Math.max(16, leftPadding + axisContentWidth))
-            : Math.max(24, axis2Width + leftPadding);
-
-        const marginRight = isRightAxis
-            ? (hasYTitle
-                ? axisContentWidth + gapTitleToTicks + valTitleFontSizePx + rightPadding
-                : Math.max(24, axisContentWidth + rightPadding))
-            : Math.max(24, axis2Width + rightPadding);
-        const marginTopBase = badgeText || axis2BadgeText ? 36 : 22;
-        // ドリルの位置（左上）。単位のラベルと同じ行に出す（行を積まず、描く範囲を狭めない）。
-        // 単位のラベルが無くても同じ高さの行をとり、文字が大きければ行を広げる。
+        const y2TitleInk = titleInkOf(axis2.titleText, axis2.titleUnderline, { fontPx: axis2TitleFontPx, bold: axis2.titleBold });
+        const y2TitleToColumn = valueTitleBaselineToColumn(axis2TitleFontPx, axis2TickFontPx, axis2Right, y2TitleInk);
+        const y2TitleFromEdge = hasAxis2Title ? valueTitleBaselineFromEdge(axis2TitleFontPx, axis2Right, y2TitleInk, legendSide === (axis2Right ? "right" : "left")) : 0;
+        /**
+         * 値の軸の側の余白。column は目盛りの列の幅、right は右の側か。タイトルがあれば、ビューの端からタイトルのベースライン、
+         * ベースラインから目盛りの列、列、列と描く範囲の間（tickToAxisGap）。無ければ左右の余白と下限
+         */
+        const axisSideOf = (column: number, right: boolean, title: boolean, fromEdge: number, toColumn: number) =>
+            title
+                ? fromEdge + toColumn + column + tickToAxisGap
+                : right
+                    ? Math.max(24, column + tickToAxisGap + rightPadding)
+                    : Math.max(16, leftPadding + column + tickToAxisGap);
+        /** 目盛りの列の幅（Y 軸 yColumn・第 2 Y 軸 y2Column）のときの、左右の余白。第 2 Y 軸が無い側は 24px */
+        const marginsOf = (yColumn: number, y2Column: number) => {
+            const ySide = axisSideOf(yColumn, isRightAxis, hasYTitle, yTitleFromEdge, yTitleToColumn);
+            const y2Side = axis2On ? axisSideOf(y2Column, axis2Right, hasAxis2Title, y2TitleFromEdge, y2TitleToColumn) : 24;
+            return isRightAxis ? { left: y2Side, right: ySide } : { left: ySide, right: y2Side };
+        };
+        // 目盛りの列（Y 軸・第 2 Y 軸）は、上の単位が目盛りの数字より広ければ単位の幅まで広げる（単位を Y 軸のタイトルや描く範囲に掛けないため）。
+        // 広げるのは、描く範囲の幅がビジュアルの幅の 4 分の 1 を下回らない所まで（shared/unitBadge。目盛りの数字の幅には上限を付けない）。
+        // 止めた列に入らない単位は、末尾を「…」で切る（括弧の中を切る。「(千…)」も入らなければ出さない）
+        const tickMargins = marginsOf(tickWidthPx, axis2TickWidth);
+        // 余白に下限（16・24px）があり、列を広げてもその内に収まる分は、描く範囲を狭めない（上限に数えない）。列をうんと広げたときの余白から、
+        // 列の幅に沿って増える余白を出し、目盛りの数字の幅のときの余白との差をとる
+        const FAR = 1e4;
+        const farMargins = marginsOf(tickWidthPx + FAR, axis2TickWidth + FAR);
+        const freeLeft = tickMargins.left - (farMargins.left - FAR);
+        const freeRight = tickMargins.right - (farMargins.right - FAR);
+        const [yColumnMax, y2ColumnMax] = axisColumnWidths(
+            [
+                { tick: tickWidthPx, unit: isTopBadge ? badgeWidthOf(badgeText, yUnitFont) : 0, free: isRightAxis ? freeRight : freeLeft },
+                { tick: axis2TickWidth, unit: axis2On && axis2.badgeText ? badgeWidthOf(axis2.badgeText, y2UnitFont) : 0, free: isRightAxis ? freeLeft : freeRight },
+            ],
+            width - tickMargins.left - tickMargins.right,
+            viewport.width
+        );
+        // Y 軸の上の単位（「プロット エリアの右上」は下の cornerBadgeText）と、第 2 Y 軸の上の単位ラベル（Y 軸の単位ラベルと同じ置き方）の字
+        const columnBadgeText = isTopBadge ? truncateUnitText(badgeText, yColumnMax + 1e-6, (s) => badgeWidthOf(s, yUnitFont)) : "";
+        const axis2BadgeText = axis2On ? truncateUnitText(axis2.badgeText, y2ColumnMax + 1e-6, (s) => badgeWidthOf(s, y2UnitFont)) : "";
+        const yColumnWidth = Math.max(tickWidthPx, columnBadgeText ? badgeWidthOf(columnBadgeText, yUnitFont) : 0);
+        const y2ColumnWidth = Math.max(axis2TickWidth, axis2BadgeText ? badgeWidthOf(axis2BadgeText, y2UnitFont) : 0);
+        const { left: marginLeft, right: marginRight } = marginsOf(yColumnWidth, y2ColumnWidth);
+        // 見えている描く範囲の幅（横にスクロールするときは、スクロールする中身の幅 plotWidth より狭い）
+        const viewWidth = Math.max(10, width - marginLeft - marginRight);
+        // 描く範囲の上の端は、標準の集合縦棒と同じくビューの上の端から PLOT_TOP（2026-10-20 の Desktop で、ラベルの無い標準は、上の余白を
+        // 22px とっていた棒グラフより 12px 上から描いた）。一番上の目盛りの数字が大きく、字の四角の上が TOP_TEXT_GAP より上に出るなら下げる
+        const topTickPx = Math.max(valAxis.show ? valTickFontSizePx : 0, axis2On && axis2.valueShow ? axis2TickFontPx : 0);
+        const plainTop = plainTopOf(topTickPx);
+        // 単位のラベル（(千) など）は、ベースラインを線の TOP_ROW_RISE 上に置き、字の四角（上 0.8 文字）の上を TOP_TEXT_GAP 空ける。
+        // 「プロット エリアの右上」は描く範囲の上の端の上に置く（棒の外のラベルと重ねない）。第 2 Y 軸の上の単位も描く範囲の上の端の上
+        // （第 2 Y 軸の目盛りは、Y 軸のラベルの余白に関わらず上の端まで引く）。Y 軸の上の単位は目盛りの列にあるので、目盛りを引く範囲の
+        // 上の端の上に置き、上の端にラベルの余白をとるならその高さを使う。足りない分だけ上の端を下げる（下の marginTop）。
+        // 目盛りの列の上の単位（Y 軸・第 2 Y 軸）は、一番上の目盛りの数字が大きければ、重ならないように TOP_ROW_RISE より高く置く。
+        // 上の行（右上の単位・第 2 Y 軸の上の単位。ドリルの位置を出すなら、ドリルの位置と Y 軸の上の単位も）の字は、行の単位の要る高さの
+        // 高いほうで 1 つのベースラインにそろえる（rowRise・drillRowRise）
+        const columnBadgeRise = columnBadgeRiseOf(valAxis.show ? valTickFontSizePx : 0, yUnitFont.size * PT_TO_PX);
+        const axis2BadgeRise = columnBadgeRiseOf(axis2On && axis2.valueShow ? axis2TickFontPx : 0, axis2.unitFontSize * PT_TO_PX);
+        const badgeNeedOf = (text: string, fontPt: number, rise = TOP_ROW_RISE) => (text ? topRowNeedOf(fontPt * PT_TO_PX, UNIT_TEXT_ASCENT, rise) : 0);
+        const cornerBadge = viewModel.unitInfo.unitPosition === "plotTopRight";
+        // 「プロット エリアの右上」の単位は、同じ行の第 2 Y 軸の上の単位から 6px 空ける（第 2 Y 軸が右なら、その単位の左の端の 6px 手前を
+        // 右の端に、左なら、その単位の右の端から 6px 先を左の端にする。描く範囲の右の端にそろえたときの間と同じ）。入らなければ「…」で切る。
+        // 前は第 2 Y 軸の単位を見ずに置き、長い単位を左の端で止めると、右へ寄って第 2 Y 軸の単位に重なった
+        const cornerBadgeSpan = !axis2BadgeText
+            ? { left: 2, right: width - 2 }
+            : !isRightAxis
+                ? { left: 2, right: marginLeft + viewWidth + tickToAxisGap - 6 }
+                : { left: marginLeft - tickToAxisGap + 6, right: width - 2 };
+        const cornerBadgeText = cornerBadge ? edgeBadgeTextOf(badgeText, yUnitFont, cornerBadgeSpan.left, cornerBadgeSpan.right) : "";
+        // 「プロット エリアの右上」の単位が長く、左右の目盛りの列（目盛りの数字は描く範囲から tickToAxisGap 外）の上に掛かるなら、
+        // その列の一番上の目盛りの数字と重ならないように、行を目盛りの列の上の単位と同じ高さ（columnBadgeRiseOf）まで上げる。
+        // 前は TOP_ROW_RISE のままで、目盛りの数字が大きいと単位の下が一番上の目盛りの数字に重なった
+        const cornerRise = (() => {
+            if (!cornerBadgeText) return 0;
+            const right = edgeBadgeXOf(cornerBadgeText, yUnitFont, marginLeft + viewWidth, cornerBadgeSpan.left);
+            const left = right - badgeWidthOf(cornerBadgeText, yUnitFont);
+            const yTickPx = valAxis.show ? valTickFontSizePx : 0;
+            const y2TickPx = axis2On && axis2.valueShow ? axis2TickFontPx : 0;
+            const [leftTickPx, rightTickPx] = isRightAxis ? [y2TickPx, yTickPx] : [yTickPx, y2TickPx];
+            const unitPx = yUnitFont.size * PT_TO_PX;
+            return Math.max(
+                leftTickPx > 0 && left < marginLeft - tickToAxisGap ? columnBadgeRiseOf(leftTickPx, unitPx) : 0,
+                rightTickPx > 0 && right > marginLeft + viewWidth + tickToAxisGap ? columnBadgeRiseOf(rightTickPx, unitPx) : 0
+            );
+        })();
+        const rowRise = Math.max(TOP_ROW_RISE, axis2BadgeText ? axis2BadgeRise : 0, cornerRise);
+        const rowBadgeNeedOf = (rise: number) =>
+            Math.max(badgeNeedOf(cornerBadgeText, yUnitFont.size, rise), badgeNeedOf(axis2BadgeText, y2UnitFont.size, rise));
+        const columnBadgeNeed = badgeNeedOf(columnBadgeText, yUnitFont.size, columnBadgeRise);
+        const marginTopBase = Math.max(plainTop, rowBadgeNeedOf(rowRise));
+        // ドリルの位置（左上）。単位のラベルと同じ行に出す（行を積まない）。単位のラベルが無くても同じ高さの行をとり、文字が大きければ
+        // 行を広げる。置き方は単位のラベルと同じで、字の四角（上 0.85 文字）の上を TOP_TEXT_GAP 空ける。Y 軸の上の単位も、
+        // ラベルの余白の高さを使わずにこの行に置く（単位を上げるなら、行の字をそろって上げる）。
         // 描く範囲の上にはみ出したデータラベル・合計ラベルとは、描いたラベルの枠で重なりを見て、その手前で省く（renderVerticalDrillPath）
         const drillFontPx = catAxis.fontSize * PT_TO_PX;
-        const marginTopWithDrill = Math.max(36, Math.ceil(drillFontPx) + 16);
-        const drillY = marginTopWithDrill - 12;
+        const drillRowRise = Math.max(rowRise, columnBadgeNeed > 0 ? columnBadgeRise : 0);
+        const marginTopWithDrill = Math.ceil(
+            Math.max(
+                plainTop,
+                rowBadgeNeedOf(drillRowRise),
+                badgeNeedOf(columnBadgeText, yUnitFont.size, drillRowRise),
+                topRowNeedOf(drillFontPx, DRILL_TEXT_ASCENT, drillRowRise)
+            )
+        );
+        const drillY = marginTopWithDrill - drillRowRise;
         // 左の列に単位（Y 軸の単位、Y 軸を右にしたときは第 2 Y 軸の単位）があれば、その右端（描く範囲の 6px 手前）から 10px 空ける
         // （6px だと「(千円) FY26」が 1 つの文字に見えた）。「プロット エリアの右上」の単位があれば、その手前 8px まで
-        const leftColumnBadge = (isTopBadge && !isRightAxis) || (Boolean(axis2BadgeText) && isRightAxis);
+        const leftColumnBadge = (Boolean(columnBadgeText) && !isRightAxis) || (Boolean(axis2BadgeText) && isRightAxis);
         const drillX = leftColumnBadge ? marginLeft + 4 : marginLeft;
-        const topRightBadgeRoom = badgeText && viewModel.unitInfo.unitPosition === "plotTopRight" ? badgeWidthOf(badgeText, viewModel.unitInfo.fontSize) + 8 : 0;
+        const topRightBadgeRoom = cornerBadgeText ? badgeWidthOf(cornerBadgeText, yUnitFont) + 8 : 0;
         const drillMaxWidth = width - marginRight - topRightBadgeRoom - drillX;
         // 低い図で行をとると描く範囲が潰れ、軸がビジュアルの外へ押し出される。足す高さが図の 12% を超えるなら出さない
-        const drillPathOn = Boolean(fittedDrillPath(drillMaxWidth)) && marginTopWithDrill - marginTopBase <= height * 0.12;
-        const marginTop = drillPathOn ? marginTopWithDrill : marginTopBase;
+        // （Y 軸の上の単位があれば、その行に並べるので、単位の分は足す高さに数えない）
+        const drillPathOn = Boolean(fittedDrillPath(drillMaxWidth)) && marginTopWithDrill - Math.max(marginTopBase, columnBadgeNeed) <= height * DRILL_ROW_SHARE_MAX;
+        // Y 軸の上の単位の分を足す前の上の端と、上の行の字のベースラインの高さ
+        const marginTopRow = drillPathOn ? marginTopWithDrill : marginTopBase;
+        const topRowRise = drillPathOn ? drillRowRise : rowRise;
 
         // X軸カテゴリラベルの幅（実測）と回転の判定
         const catFontSizePx = catAxis.fontSize * PT_TO_PX;
@@ -1168,7 +1426,6 @@ export const App: React.FC<AppProps> = ({
         const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.label);
 
         // カテゴリ最小幅と横スクロール判定
-        const viewWidth = Math.max(10, width - marginLeft - marginRight);
         const groups = viewModel.categoryGroups;
         const count = groups.length;
         const minCatWidth = Math.max(0, catAxis.minCategoryWidth || 0);
@@ -1179,24 +1436,34 @@ export const App: React.FC<AppProps> = ({
         const scrolls = !continuous && minCatWidth > 0 && neededWidth > viewWidth + 1;
         const SCROLLBAR_HEIGHT = scrolls ? 12 : 0;
 
-        // X軸タイトル高さ (タイトル領域は高さ最大値の判定外で独立確保し、重なりを防止)
+        // X軸タイトル高さ (タイトル領域は高さ最大値の判定外で独立確保し、重なりを防止)。
+        // タイトルのベースラインはこの行の下の端（ビジュアルの下の端から bottomPad、スクロール バーがあればその上）に置くので、行には
+        // ベースラインより上の字の高さだけをとる（名前の欄の下の余白で名前と離れる）。前は文字の大きさ＋10px をとり、字の上に
+        // 12px が空いて、名前の字の下端からタイトルの字の下端までが標準より 12px 長かった（2026-10-20 の Desktop で、既定の大きさで標準は 19px）。
+        // 行の高さとビューの下の端までは標準の集合縦棒と同じ（shared/axisBands。1.36.11.54 までは行の高さを切り上げ、下の端まで 6px で、
+        // 項目名とタイトルが標準より 3px 上にあった）。タイトルが無い形の下の余白は、下の bottomBand で決める
         const hasCatTitle = catAxis.titleShow && Boolean(catAxis.titleText);
         const catTitleFontSizePx = catAxis.titleFontSize * PT_TO_PX;
-        const catTitleHeight = hasCatTitle ? catTitleFontSizePx + 10 : 0;
+        const catTitleHeight = hasCatTitle ? catTitleFontSizePx * AXIS_TITLE_ASCENT : 0;
+        // タイトルのベースラインの下は、下へ下りる字・下線の下の端がビューに入るだけとる（shared/axisBands の bottomTitleBelowOf。既定の組の字は
+        // COLUMN_TITLE_BOTTOM のまま）。1.36.11.55 の最初の作りでは字によらず COLUMN_TITLE_BOTTOM で、g・p・y や下線の下の端が切れた
+        const bottomPad = hasCatTitle ? bottomTitleBelowOf(COLUMN_TITLE_BOTTOM, catTitleFontSizePx, titleInkOf(catAxis.titleText, catAxis.titleUnderline, { fontPx: catTitleFontSizePx, bold: catAxis.titleBold })) : 6;
         // パレートのランクの帯。カテゴリのラベル（と階層の段）の下に 1 段取る
         const pareto = viewModel.pareto;
         const rankBandOn = pareto.enabled && pareto.showRankBand && catAxis.show;
         const rankBandHeight = rankBandOn ? catFontSizePx + 12 : 0;
         // 名前の欄（名前と階層の段）に使える高さ。上限を大きくしても（標準は 50% まで、自作は 100% まで入る）、描く範囲を
         // 押しつぶして名前がビジュアルの下へはみ出さないよう、描く範囲に高さの 4 分の 1 は残す（2026-09-24。1.29 までは 100% で棒がつぶれ、名前の頭が切れた）
-        const labelRoom = Math.max(0, height * 0.75 - marginTop - catTitleHeight - rankBandHeight - SCROLLBAR_HEIGHT - 6);
+        // 上の端は、Y 軸の上の単位がラベルの余白の高さを使えないときの位置で見る（あとで単位の分だけ下げても、描く範囲に 4 分の 1 が残る）
+        const labelRoom = Math.max(0, height * 0.75 - Math.max(marginTopRow, columnBadgeNeed) - catTitleHeight - rankBandHeight - SCROLLBAR_HEIGHT - bottomPad);
         // 名前の縦の広がりの上限 (高さの最大値 % はここだけに効く)
         // maxHeight は 0〜100% (既定 25%)。標準と同じく、凡例を含むビジュアル全体の高さに対する割合。
         // 斜めのラベルでは、割合はラベルの縦の広がりに効き、棒との間隔と文字の太さの半分は別に足す
         // （Desktop で、タイトルありの標準は 8 文字、タイトルなしは 9 文字まで出した。1.13 までは 1 文字早かった）
         const labelExtentMax = Math.max(16, viewport.height * (catAxis.maxHeight / 100));
 
-        const plotWidth = scrolls ? neededWidth : viewWidth;
+        // 項目を並べる幅（スクロールするときは中身の幅）。スクロールするときは、下の leadIn の分だけ中身を前へ延ばす
+        const baseWidth = scrolls ? neededWidth : viewWidth;
         const padRatio = Math.max(0, Math.min(0.5, columnsSettings.categorySpacing / 100));
         // 外側のパディング: 最初の棒の前と最後の棒の後ろの余白。カテゴリ 1 つ分の幅
         // (step = 棒 + カテゴリ間のスペース) に対する比。「自動」はカテゴリ間のスペースの半分で、
@@ -1206,26 +1473,33 @@ export const App: React.FC<AppProps> = ({
             : Math.max(0, Math.min(1, columnsSettings.outerPadding / 100));
         const slots = (count || 1) - padRatio + 2 * outerRatio;
         // 斜めの名前は棒の中心から左下へ伸びるので、左の端で「…」に省かれないよう、はみ出す分だけ棒の並びの前を空ける
-        // （スクロールするとき・縦に立てるときは空けない）
+        // （縦に立てるときは空けない）
         const leadIn = (() => {
-            if (!catAxis.show || stackedLevels || scrolls || !count || continuous) return 0;
-            const step0 = plotWidth / slots;
+            if (!catAxis.show || stackedLevels || !count || continuous) return 0;
+            const step0 = baseWidth / slots;
             const widths = groups.map((g) => measureTextWidth(labelOf(g), catFont));
-            if (!(Math.max(...widths) > step0 * 0.92) || step0 < catFontSizePx * 1.45) return 0;
+            if (!(maxOf(widths) > step0 * 0.92) || step0 < catFontSizePx * 1.45) return 0;
             // 名前の長さの上限（下の maxAllowedLabelLen と同じ見積もり。名前の欄に使える高さでも頭を打つ）
             const maxLen = Math.min(labelExtentMax, Math.max(0, labelRoom - ROTATED_LABEL_GAP - catFontSizePx * 0.5)) / Math.SQRT1_2;
+            if (scrolls) {
+                // スクロールするときは、帯の幅を変えずに中身を前へ延ばし、名前の左の端（字の上側の角を見込んで文字の半分を足す）が
+                // 中身の左の端（スクロールの窓の左の端）から出ないだけ空ける。上限はかけない。
+                // 1.36.11.47 より前は空けず、1 本目の名前が「…」に省いても窓の左の端で切れた
+                return Math.max(0, maxOf(widths.map((w, i) => Math.min(w, maxLen) * Math.SQRT1_2 + catFontSizePx * 0.5 - step0 * (outerRatio + (1 - padRatio) / 2 + i))));
+            }
             // renderCategoryLabel の左端の判定（(cx − 左の余白) / sin45 までの長さなら省かない）を満たす余白（1px の余裕）
             const need = rotatedLabelLeadIn(
                 widths.map((w, i) => ({ extent: Math.min(w, maxLen) * Math.SQRT1_2, ratio: (outerRatio + (1 - padRatio) / 2 + i) / slots })),
                 marginLeft,
-                plotWidth,
-                CATEGORY_LABEL_LEFT_SAFE_MARGIN + 1
+                baseWidth,
+                categoryLabelLeftMarginOf(catFontSizePx) + 1
             );
             // 余白を足しても、帯がカテゴリの最小幅と「斜めのまま」の幅（文字の 1.45 倍）を下回らない所で止める
             // （下回ると最小幅を割る・縦に立つのに余白だけ残る）。極端に長い名前は、ビジュアルの幅の 30% までで省く
             const keepStep = Math.max(minCatWidth, catFontSizePx * 1.45);
-            return Math.max(0, Math.min(need, plotWidth * 0.3, plotWidth - keepStep * slots));
+            return Math.max(0, Math.min(need, baseWidth * 0.3, baseWidth - keepStep * slots));
         })();
+        const plotWidth = scrolls ? baseWidth + leadIn : baseWidth;
         // 連続：いちばん狭い値の間隔を棒 1 本ぶんの帯にし、両端は帯の半分ずつ空ける
         const continuousLayout = continuous ? continuousBand(continuous, plotWidth) : null;
         const step = continuousLayout ? continuousLayout.band : (plotWidth - leadIn) / slots;
@@ -1257,7 +1531,7 @@ export const App: React.FC<AppProps> = ({
                 if (fits(items, 16)) return items;
             }
             const ticks = ticksOf(2);
-            for (let room = Math.max(...ticks.map((t) => measureTextWidth(t.label, catFont))); room > 0; room -= 2) {
+            for (let room = maxOf(ticks.map((t) => measureTextWidth(t.label, catFont))); room > 0; room -= 2) {
                 const items = laid(ticks, (label) => truncateToWidth(label, room, catFont));
                 if (fits(items, 4)) return items;
             }
@@ -1280,10 +1554,13 @@ export const App: React.FC<AppProps> = ({
         const layerDraws = layerDrawsFor(barWidth);
         const frontTotals = !layered || shownLayers[0] === 0;
         const frontShift = layered ? layerDraws.get(shownLayers[0])!.offset : 0;
-        // 積み上げのデータラベルは棒の中に置く。外側の指定（自動・外側の上）は中央に読み替える。系列ごとに変えた位置があればそれ
+        // データラベルの位置。系列ごとに変えた位置があればそれ。積み上げは棒の中に置き、外側の指定（自動・外側の上）は中央に読み替える。
+        // 集合の「自動」は外側の上（標準と同じく、入る棒でも棒の外に置く。横棒の hLabelPositionOf と同じ）。
+        // 外に置くとほかのラベルと重なるときに試す棒の中の候補は、ラベルを組む所（fallback）
         const labelPositionOf = (d: DataPoint) => {
             const position = (d.labelSettings ?? viewModel.dataLabels).position;
-            return stacked && (position === "auto" || position === "outsideEnd") ? "insideCenter" : position;
+            if (position !== "auto" && position !== "outsideEnd") return position;
+            return stacked ? "insideCenter" : "outsideEnd";
         };
 
         const categoryLabelStyle: React.CSSProperties = {
@@ -1305,7 +1582,7 @@ export const App: React.FC<AppProps> = ({
             fill: catAxis.labelColor,
             fillOpacity: LEVEL_BAND_OPACITY,
         };
-        const widestCat = !catAxis.show ? 0 : continuous ? 0 : Math.max(0, ...groups.map((g) => measureTextWidth(labelOf(g), catFont)));
+        const widestCat = !catAxis.show ? 0 : continuous ? 0 : Math.max(0, maxOf(groups.map((g) => measureTextWidth(labelOf(g), catFont))));
 
         // バンド幅に収まらなければ斜め -45 度に回転
         const shouldRotateCat = catAxis.show && widestCat > step * 0.92;
@@ -1323,19 +1600,23 @@ export const App: React.FC<AppProps> = ({
         // 間引くときは、出す名前だけで欄の高さを決める（出さない長い名前のために棒を縮めない）
         const widestShownCat =
             categoryLabelEvery > 1
-                ? Math.max(0, ...groups.filter((_, i) => i % categoryLabelEvery === 0).map((g) => measureTextWidth(labelOf(g), catFont)))
+                ? Math.max(0, maxOf(groups.filter((_, i) => i % categoryLabelEvery === 0).map((g) => measureTextWidth(labelOf(g), catFont))))
                 : widestCat;
         // 必要とされるラベル高さ（斜めは、棒との間隔＋ラベルの縦の広がり＋文字の太さの半分。縦はラベルの長さそのまま）
         const desiredLabelHeight = uprightCat
             ? ROTATED_LABEL_GAP + widestShownCat + catFontSizePx * 0.5
             : shouldRotateCat
                 ? ROTATED_LABEL_GAP + widestShownCat * Math.SQRT1_2 + catFontSizePx * 0.5
-                : catFontSizePx + 10;
+                : catFontSizePx + AXIS_TEXT_DROP + AXIS_TEXT_BELOW;
 
         // 最低の高さ（14）も、名前の欄に使える高さに収まるときだけとる（低いビジュアルで描く範囲の 4 分の 1 を割らない）
+        // 項目名を出さずに X 軸のタイトルだけ出すときは、描く範囲の下の端からタイトルの行の上の端まで AXIS_TEXT_BELOW（横棒と
+        // 同じ。前は下の帯の最低の高さ 20px で決まり、3.4px（タイトル 12pt）だった）
         const labelAreaHeight = catAxis.show
             ? Math.max(Math.min(14, labelRoom), Math.min(desiredLabelHeight, maxLabelAreaHeight, labelRoom))
-            : 0;
+            : hasCatTitle
+              ? AXIS_TEXT_BELOW
+              : 0;
 
         // ラベルの長さの上限 (px)。超えたら末尾を「…」に省略。斜めは、ラベル領域の高さから棒との間隔を除いた分
         // 領域がいちばん長いラベルちょうどのときに、計算の誤差で省略しないよう 0.5px の余裕を持たせる。
@@ -1356,15 +1637,39 @@ export const App: React.FC<AppProps> = ({
         const levelAreaHeight = levelRows * levelRowHeight;
 
         // 全体の下部マージン = ラベル領域 + 上のレベルの段 + ランクの帯 + タイトル領域 + スクロールバー高さ + 余白
-        const marginBottom = Math.max(20, labelAreaHeight + levelAreaHeight + rankBandHeight + catTitleHeight + SCROLLBAR_HEIGHT + 6);
+        // 項目名を出さずに X 軸のタイトルだけ出すときは、最低の高さ（20px）をとらない（描く範囲の下の端からタイトルの行の上の端まで
+        // AXIS_TEXT_BELOW のまま。とると、9.7pt より小さいタイトルで最低の高さの分だけ広がる）
+        // タイトルが無く、一番下が水平に並べた項目名（か連続の目盛り）の行なら、そのベースラインから下の端までを標準の集合縦棒と同じ
+        // COLUMN_TEXT_BOTTOM にする。下へ下りる字・コンマ・下線の下の端がその下へ出るなら、字の下の端がビューに入るまでとる（shared/axisBands の
+        // axisTextBottomOf。出す名前・目盛りの字で見積もる。既定の組の字はとても大きくなければ COLUMN_TEXT_BOTTOM のまま）。
+        // 名前の欄が上限（高さの最大値 %・labelRoom）に当たっても、この行は欄で切らない（ベースラインの位置は字の大きさで決まるので、切ると
+        // 名前がビューの外へ押し出される）。足りない分は描く範囲から取る。
+        // 1.36.11.55 までは名前の欄の下に 6px（ベースラインから 12px）で、下の帯が標準より 3px ほど高かった。1.36.11.56 の最初の作りでは
+        // 字によらず COLUMN_TEXT_BOTTOM で、名前の欄も上限で切ったので、大きい字の g・p・y・コンマが下の端で切れ、低い図で名前が外へ出た。
+        // 斜め・縦の名前、上のレベルの段・ランクの帯・スクロール バーが一番下の形は、標準を測っていないので前のまま（名前の欄の下に 6px）
+        const flatNamesAtBottom = !hasCatTitle && catAxis.show && !shouldRotateCat && levelRows === 0 && !rankBandOn && !scrolls;
+        const bottomRowTexts = !flatNamesAtBottom ? [] : continuous ? continuousTickXs.map((t) => t.label) : groups.map((g) => labelOf(g));
+        const bottomRowInk = Math.max(0, maxOf(bottomRowTexts.map((t) => axisTextDescentOf(t, catAxis.underline, { fontPx: catFontSizePx, bold: catAxis.bold })))) * catFontSizePx;
+        const bottomBand = flatNamesAtBottom
+            ? catFontSizePx + AXIS_TEXT_DROP + axisTextBottomOf(COLUMN_TEXT_BOTTOM, bottomRowInk)
+            : labelAreaHeight + levelAreaHeight + rankBandHeight + catTitleHeight + SCROLLBAR_HEIGHT + bottomPad;
+        const marginBottom = !catAxis.show && hasCatTitle ? bottomBand : Math.max(20, bottomBand);
+        // Y 軸の上の単位は、ドリルの位置を出すならその行（ドリルの位置と同じベースライン）、出さなければ目盛りを引く範囲の上の端（上にラベルの余白をとれば、
+        // 描く範囲の上の端より下。一番上の目盛りの線はここか、それより下）の columnBadgeRise 上に置く。その高さは上の端で動くので、
+        // 「高さ = 上の端 ＋ (使える高さ − 上の端) × (1 − 比) ≥ 要る高さ」から上の端を解く
+        const frameTop = viewModel.frameTopRatio;
+        const usableHeight = height - marginBottom;
+        const sharedBadgeTop = drillPathOn || !(columnBadgeNeed > 0)
+            ? 0
+            : frameTop > 0 ? (columnBadgeNeed - usableHeight * (1 - frameTop)) / frameTop : columnBadgeNeed;
+        const marginTop = Math.max(marginTopRow, sharedBadgeTop);
         const plotHeight = Math.max(10, height - marginTop - marginBottom);
-        plotHeightRef.current = plotHeight;
-        // 目盛りの本数は、標準と同じく描く範囲の高さで決める（150px 未満は 3、300px 未満は 5、それ以上は 8 まで）
-        // 「目盛りの本数 (目安)」があればその本数、空なら描く範囲の高さで決める（第 2 Y 軸も同じ上限）。
-        // どちらも、数字の行が重ならない本数までにとどめる
-        const tickTarget = valAxis.tickCount || recommendedTickCount(plotHeight, "vertical");
-        const valueTicks = fitTicks(viewModel.ticksFor, tickTarget, plotHeight, () => valTickFontSizePx * 1.4);
-        const axis2Ticks = fitTicks(axis2.ticksFor, tickTarget, plotHeight, () => axis2TickFontPx * 1.4);
+        const columnBadgeY = drillPathOn ? marginTop - drillRowRise : marginTop + plotHeight * (1 - frameTop) - columnBadgeRise;
+        valueAxisLengthRef.current = valueAxisLengthToReport(viewModel, plotHeight);
+        const { valueTicks, axis2Ticks } = verticalTicksAt(plotHeight);
+        // 描く目盛りの数字の幅が、この回の列の幅と違えば、その幅で組み直す（落ち着けばこの回のまま描く）
+        const nextColumns = nextColumnTry(columnTry, [tickWidthPx, axis2TickWidth], drawnColumnsOf({ valueTicks, axis2Ticks }));
+        if (nextColumns) return renderChart(width, height, nextColumns);
 
         // 横グリッド線 (Y軸目盛線) の線種と透過性
         const hStroke = gridLineStroke(gridlines.horizontalStyle, gridlines.horizontalWidth, gridlines.horizontalScaleWithWidth, { dashArray: gridlines.horizontalDashArray, dashCap: gridlines.horizontalDashCap });
@@ -1384,11 +1689,14 @@ export const App: React.FC<AppProps> = ({
         ];
 
         /** 軸の比率 (0〜1) の位置の Y 座標（範囲の反転を含む） */
-        const yOfRatio = (ratio: number): number => {
-            const clamped = Math.max(0, Math.min(1, ratio));
-            const effective = valAxis.invertRange ? 1 - clamped : clamped;
+        const yOfRatio = (ratio: number): number => yOfLineRatio(Math.max(0, Math.min(1, ratio)));
+        /** 折れ線の比率の Y 座標。丸めないので、軸の範囲の外は描画域の外になる（描画域で切る） */
+        const yOfLineRatio = (ratio: number): number => {
+            const effective = valAxis.invertRange ? 1 - ratio : ratio;
             return marginTop + plotHeight * (1 - effective);
         };
+        /** 折れ線 1 本の値の座標。第 2 軸には範囲の反転が無いので、そのまま下から上へ */
+        const lineYOf = (line: LineSeriesInfo) => (ratio: number) => (onAxis2(line) ? marginTop + plotHeight * (1 - ratio) : yOfLineRatio(ratio));
 
         /**
          * 比率で表した 2 点のあいだの縦の範囲。棒は始まり（集合は 0、積み上げは下に積んだ棒の端）から終わりまで。
@@ -1422,8 +1730,8 @@ export const App: React.FC<AppProps> = ({
                 const segs = g.points.filter((d) => !d.blank && (positive ? d.value > 0 : d.value < 0));
                 if (!segs.length) return null;
                 const extents = segs.map((d) => segmentExtent(d, d.valRatio));
-                const top = Math.min(...extents.map((e) => e.top));
-                const bottom = Math.max(...extents.map((e) => e.top + e.height));
+                const top = minOf(extents.map((e) => e.top));
+                const bottom = maxOf(extents.map((e) => e.top + e.height));
                 const outer = segs.find((d) => d.outermost) ?? segs[segs.length - 1];
                 const r = Math.max(0, Math.min(columnsSettings.cornerRadius, barWidth / 2, bottom - top));
                 const roundAtTop = valAxis.invertRange ? !positive : positive;
@@ -1442,20 +1750,22 @@ export const App: React.FC<AppProps> = ({
             });
         };
 
-        /** 棒 1 本（系列 1 本ぶん）。cx は棒の中心の x */
-        /** 描いたデータラベル・合計ラベルの枠（プロットの座標）。ドリルの位置を重ねないために集める */
-        const labelBoxes: Array<{ x0: number; x1: number; y0: number; y1: number }> = [];
-        // データラベルは、すべての棒を描いたあとに重ねる（棒ごとに描くと、外に出したラベルが隣の棒に隠れる。標準も棒の上）
-        const labelLayer: React.ReactNode[] = [];
-        const renderBar = (d: DataPoint, cx: number, key: string, layer?: LayerDraw) => {
+        /** 描いたデータラベル・合計ラベル・線のラベルの枠（プロットの座標）。重なるラベルを省き、ドリルの位置を重ねないために集める */
+        const labelBoxes = createLabelBoxes();
+        // データラベルは、すべての棒を描いたあとに重ねる（棒ごとに描くと、外に出したラベルが隣の棒に隠れる。標準も棒の上）。
+        // 重なるラベルを省くのも、全部の候補がそろってから（keepUnoverlapped）
+        const dataLabelCandidates: Array<LabelCandidate<React.ReactNode>> = [];
+        /**
+         * 棒 1 本（系列 1 本ぶん）。cx は棒の中心の x、xOffset はプロットの左の端の x（描く範囲は xOffset〜xOffset + plotWidth）、
+         * labelSpot はデータラベルを置く順と積み上げ（dataLabelSpotOf）
+         */
+        const renderBar = (d: DataPoint, cx: number, xOffset: number, key: string, labelSpot: DataLabelSpot, layer?: LayerDraw) => {
             if (d.blank) return null;
             // 比較レイヤーの棒は、レイヤーの幅で描く
             const bw = layer?.width ?? barWidth;
             const barLeft = cx - bw / 2;
 
             const { top: barTop, height: barH } = segmentExtent(d, d.valRatio);
-
-            const isHovered = hoveredKey === key;
 
             const isPositive = d.value >= 0;
             // 積み上げでは、角丸は外側の端の棒だけ
@@ -1500,10 +1810,111 @@ export const App: React.FC<AppProps> = ({
             // ハイコントラストでは、選んだ棒を選択の色で太く囲む（薄くするだけでは見分けにくい）
             const hcPicked = !!viewModel.highContrast && selectedIds.length > 0 && isPicked(d);
 
+            // データラベル。描くのは棒の後ろ（keepUnoverlapped）
+            const label = ((): LabelCandidate<React.ReactNode> | null => {
+                // 系列ごとに変えた設定があればそれ（保存の無い項目は「すべて」の値）
+                const dl = d.labelSettings ?? viewModel.dataLabels;
+                if (!dl.show || !d.labelShow || layer?.label === false) return null;
+                // 値が 0 の棒（高さ 0）にも、外に置くラベルは 0 の線の上に出す（標準と同じ。内側の位置は棒に入らないので出ない）。
+                // 軸の範囲の外へ出て高さ 0 になった棒（最小値・最大値で切った棒）と、0 として描く空白の棒には出さない
+                if (barH <= 0 && !zeroLabelShown(d)) return null;
+
+                const allLines = labelLinesOf(dl, d);
+                if (!allLines.length) return null;
+                const isVertical = dl.orientation === "vertical";
+
+                const barBottom = barTop + barH;
+                /**
+                 * position に置いたラベル。insideCandidate は集合の「自動」で外に置くと重なるときの棒の中の候補（内側上と同じ置き方）
+                 */
+                const labelAt = (position: string, insideCandidate: boolean): LabelPlacement<React.ReactNode> | null => {
+                    // 内側の位置は、値の向きに入らなければ出さない。棒の幅の向きは、オーバーフロー テキストがオンならはみ出して描き、
+                    // オフなら「…」で省く（積み上げも同じ。標準と同じ）
+                    const placed = placeLabel({
+                        position,
+                        top: barTop,
+                        bottom: barBottom,
+                        barWidth: bw,
+                        value: allLines[0].text,
+                        font: allLines[0].font,
+                        lines: allLines,
+                        layout: { singleLine: dl.singleLine, align: dl.horizontalAlignment },
+                        endAtBottom: !roundAtTop,
+                        vertical: isVertical,
+                        overflow: dl.overflow,
+                        background: dl.backgroundShow,
+                    });
+                    if (!placed.show) return null;
+                    // 棒の中の候補は、値の向きに入り、オーバーフロー テキストがオフなら棒の幅にも入るときだけ（「…」で省かない。標準と同じ）
+                    if (insideCandidate && !(placed.fitsVertically && (dl.overflow || placed.fitsAlongBar))) return null;
+                    const lines = placed.lines;
+
+                    const autoColor = labelAutoColor(!placed.outside, seenColorOf(d.color, baseFillOpacity), dl, viewModel.highContrast, viewModel.background);
+                    const toneHere = placed.outside || dl.backgroundShow;
+                    const bgOpacity = (100 - dl.backgroundTransparency) / 100;
+
+                    // 重なりを見る枠（背景を描くなら背景、描かないなら文字に 1px 足したもの。文字の縁の分も入れる）。縦向きのラベルは rotate(-90)：(x, y) → (y, −x)
+                    const bg = placed.box;
+                    const text = { x0: bg.x + LABEL_PADDING, x1: bg.x + bg.width - LABEL_PADDING, y0: bg.y + LABEL_PADDING, y1: bg.y + bg.height - LABEL_PADDING };
+                    const bgBox = dl.backgroundShow ? { x0: bg.x, x1: bg.x + bg.width, y0: bg.y, y1: bg.y + bg.height } : null;
+                    const halo = haloOutsetOf(dl.halo, lines.map((line) => labelFillOf(dl, line, d, autoColor, toneHere)));
+                    const hit = hitBoxOf(text, bgBox, halo);
+                    // 棒の外に置いたラベルが描く範囲の左右からはみ出すなら、収まるだけ内側へ寄せる（棒の中のラベルは、自分の棒から離れるので寄せない）
+                    const toPlotAt = (x: number, b: LabelBox): LabelBox =>
+                        isVertical ? { x0: x + b.y0, x1: x + b.y1, y0: placed.y - b.x1, y1: placed.y - b.x0 } : { x0: x + b.x0, x1: x + b.x1, y0: placed.y + b.y0, y1: placed.y + b.y1 };
+                    const ink = toPlotAt(cx, inkBoxOf(text, bgBox, halo));
+                    const labelX = cx + (placed.outside ? shiftIntoSpan(ink.x0, ink.x1, xOffset, xOffset + plotWidth) : 0);
+                    const toPlot = (b: LabelBox): LabelBox => toPlotAt(labelX, b);
+
+                    return {
+                        box: toPlot(hit),
+                        stacked: stacked ? { stack: labelSpot.stack, text: toPlot(text) } : undefined,
+                        draw: () => (
+                            <g
+                                key={`dl-${key}`}
+                                transform={`translate(${labelX}, ${placed.y})${isVertical ? " rotate(-90)" : ""}`}
+                                className="data-label-group"
+                                pointerEvents="none"
+                            >
+                                {dl.backgroundShow && (
+                                    <rect
+                                        x={placed.box.x}
+                                        y={placed.box.y}
+                                        width={placed.box.width}
+                                        height={placed.box.height}
+                                        rx={2}
+                                        fill={dl.backgroundColor}
+                                        fillOpacity={bgOpacity}
+                                    />
+                                )}
+                                {lines.map((line, k) => (
+                                    <text
+                                        key={line.kind}
+                                        x={placed.xs[k]}
+                                        y={placed.baselines[k]}
+                                        className={labelClassOf(line)}
+                                        textAnchor={placed.anchor}
+                                        style={labelTextStyle(dl, line, d, autoColor, toneHere)}
+                                    >
+                                        {line.text}
+                                    </text>
+                                ))}
+                            </g>
+                        ),
+                    };
+                };
+                const outer = labelAt(labelPositionOf(d), false);
+                if (!outer) return null;
+                // 集合の「自動」は外に置き、ほかのラベルと重なれば、入るなら棒の中（内側上と同じ所）に置く（標準と同じ）。それも重なれば出さない
+                const fallback = !stacked && dl.position === "auto" ? () => labelAt("insideTop", true) : null;
+                return { ...outer, order: labelSpot.order, ...(fallback ? { fallback } : {}) };
+            })();
+            if (label) dataLabelCandidates.push(label);
+
             return (
                 <g
                     key={key}
-                    className={`bar-item ${isHovered ? "hovered" : ""}`}
+                    className="bar-item"
                     onClick={(e) => {
                         e.stopPropagation();
                         if (d.selectionIds) onSelectMany?.(d.selectionIds, e.ctrlKey || e.metaKey);
@@ -1512,10 +1923,8 @@ export const App: React.FC<AppProps> = ({
                     onContextMenu={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        onContextMenu(d.selectionIds ? (null as unknown as ISelectionId) : d.selectionId, e.clientX, e.clientY);
+                        onContextMenu(d.selectionIds ?? [d.selectionId], e.clientX, e.clientY);
                     }}
-                    onMouseEnter={() => setHoveredKey(key)}
-                    onMouseLeave={() => setHoveredKey(null)}
                     {...keysOf({
                         label: seriesName ? `${d.category} ${seriesName}: ${d.formattedValue}` : `${d.category}: ${d.formattedValue}`,
                         onSelect: (multi) => (d.selectionIds ? onSelectMany?.(d.selectionIds, multi) : onSelect(d.selectionId, multi)),
@@ -1552,117 +1961,45 @@ export const App: React.FC<AppProps> = ({
                             }}
                         />
                     )}
-
-                    {/* データラベル。描くのは棒の後ろ（labelLayer） */}
-                    {void labelLayer.push((() => {
-                        // 系列ごとに変えた設定があればそれ（保存の無い項目は「すべて」の値）
-                        const dl = d.labelSettings ?? viewModel.dataLabels;
-                        if (!dl.show || !d.labelShow || barH <= 0 || layer?.label === false) return null;
-
-                        const lines = labelLinesOf(dl, d);
-                        if (!lines.length) return null;
-                        const isVertical = dl.orientation === "vertical";
-
-                        const barBottom = barTop + barH;
-                        const placed = placeLabel({
-                            position: labelPositionOf(d),
-                            top: barTop,
-                            bottom: barBottom,
-                            barWidth: bw,
-                            value: lines[0].text,
-                            font: lines[0].font,
-                            lines,
-                            layout: { singleLine: dl.singleLine, align: dl.horizontalAlignment },
-                            endAtBottom: !roundAtTop,
-                            vertical: isVertical,
-                            // 積み上げでは外側が上の棒なので、入りきらないラベルを外へ逃がさず出さない
-                            overflow: stacked ? false : dl.overflow,
-                        });
-
-                        if (!placed.fitsVertically && !placed.outside) return null;
-                        if (!placed.fitsAlongBar && !dl.overflow) return null;
-
-                        // 縦向きのラベルは rotate(-90)：(x, y) → (y, −x)
-                        const bx = placed.box;
-                        const ownBox = isVertical
-                            ? { x0: cx + bx.y, x1: cx + bx.y + bx.height, y0: placed.y - bx.x - bx.width, y1: placed.y - bx.x }
-                            : { x0: cx + bx.x, x1: cx + bx.x + bx.width, y0: placed.y + bx.y, y1: placed.y + bx.y + bx.height };
-                        // 先に描いたラベルと重なるラベルは出さない（標準と同じ。棒の幅より長いラベルを外に出すと隣と重なる）
-                        if (labelBoxes.some((b) => b.x0 < ownBox.x1 - 1 && ownBox.x0 < b.x1 - 1 && b.y0 < ownBox.y1 - 1 && ownBox.y0 < b.y1 - 1)) return null;
-                        labelBoxes.push(ownBox);
-                        const autoColor = labelAutoColor(!placed.outside, seenColorOf(d.color, baseFillOpacity), dl, viewModel.highContrast, viewModel.background);
-                        const toneHere = placed.outside || dl.backgroundShow;
-                        const bgOpacity = (100 - dl.backgroundTransparency) / 100;
-
-                        return (
-                            <g
-                                key={`dl-${key}`}
-                                transform={`translate(${cx}, ${placed.y})${isVertical ? " rotate(-90)" : ""}`}
-                                className="data-label-group"
-                                pointerEvents="none"
-                            >
-                                {dl.backgroundShow && (
-                                    <rect
-                                        x={placed.box.x}
-                                        y={placed.box.y}
-                                        width={placed.box.width}
-                                        height={placed.box.height}
-                                        rx={2}
-                                        fill={dl.backgroundColor}
-                                        fillOpacity={bgOpacity}
-                                    />
-                                )}
-                                {lines.map((line, k) => (
-                                    <text
-                                        key={line.kind}
-                                        x={placed.xs[k]}
-                                        y={placed.baselines[k]}
-                                        className={labelClassOf(line)}
-                                        textAnchor={placed.anchor}
-                                        style={labelTextStyle(dl, line, d, autoColor, toneHere)}
-                                    >
-                                        {line.text}
-                                    </text>
-                                ))}
-                            </g>
-                        );
-                    })())}
                 </g>
             );
         };
 
         /**
-         * 合計ラベル（積み上げ）。正の棒の上の端・負の棒の下の端の外側に置く。cx はカテゴリの中心。
-         * 「正と負の分割」がオフなら、正と負を足した合計を 1 つ（正なら上、負なら下）
+         * 合計ラベル（積み上げ）。正の棒の上の端・負の棒の下の端の外側に置く。center はカテゴリの中心の x。
+         * 「正と負の分割」がオフなら、正と負を足した合計を 1 つ（正なら上、負なら下）。
+         * 描く範囲（xOffset〜xOffset + plotWidth）の左右からはみ出すラベルは、収まるだけ内側へ寄せる（shiftIntoSpan）。
+         * 置いた合計ラベルと重なるものは省く（標準と同じ。重なりは寄せたあとの位置で見る）。カテゴリの順に描くので、左のカテゴリのものが残る。データラベルはこのあとに置く
          */
-        const renderTotalLabels = (g: CategoryGroup, cx: number) => {
+        const renderTotalLabels = (g: CategoryGroup, center: number, xOffset: number, stack: string) => {
             const tl = viewModel.totalLabels;
             const t = g.totals;
             if (!tl.show || !t) return null;
-            const labels: Array<{ key: string; text: string; ratio: number; up: boolean }> = [];
-            if (tl.split) {
-                if (t.hasPositive) labels.push({ key: "pos", text: t.positiveText, ratio: t.positiveEndRatio, up: true });
-                if (t.hasNegative) labels.push({ key: "neg", text: t.negativeText, ratio: t.negativeEndRatio, up: false });
-            } else if (t.hasPositive || t.hasNegative) {
-                const up = t.net >= 0 ? t.hasPositive : !t.hasNegative;
-                labels.push({ key: "net", text: t.netText, ratio: up ? t.positiveEndRatio : t.negativeEndRatio, up });
-            }
+            const labels = totalLabelsOf(t, tl.split);
             const fontPx = tl.fontSize * PT_TO_PX;
             const font = { family: tl.fontFamily, size: fontPx, bold: tl.bold, italic: tl.italic, underline: tl.underline };
             return labels.map((label) => {
                 // 範囲の反転では、値の大きい方が下になる
                 const outwardUp = label.up !== valAxis.invertRange;
                 const edgeY = yOfRatio(label.ratio);
-                const baseline = outwardUp ? edgeY - 4 : edgeY + fontPx * 0.85 + 4;
+                // 上へ置くなら、背景も文字も棒の端より上（totalLabelRiseOf）。下へ置くなら、文字の上の端を棒の端からすき間の分離す
+                const baseline = outwardUp ? edgeY - totalLabelRiseOf(fontPx) : edgeY + fontPx * TOTAL_LABEL_ASCENT + TOTAL_LABEL_GAP;
                 const width = measureTextWidth(label.text, font);
-                const boxTop = baseline - fontPx * 0.85 - LABEL_PADDING / 2;
-                labelBoxes.push({ x0: cx - width / 2 - LABEL_PADDING, x1: cx + width / 2 + LABEL_PADDING, y0: boxTop, y1: boxTop + fontPx + LABEL_PADDING });
+                const half = width / 2 + (tl.backgroundShow ? LABEL_PADDING : 0);
+                const cx = center + shiftIntoSpan(center - half, center + half, xOffset, xOffset + plotWidth);
+                const emTop = baseline - fontPx * TOTAL_LABEL_ASCENT;
+                const boxTop = emTop - LABEL_PADDING / 2;
+                const hit = hitBoxOf(
+                    { x0: cx - width / 2, x1: cx + width / 2, y0: emTop, y1: emTop + fontPx },
+                    tl.backgroundShow ? { x0: cx - width / 2 - LABEL_PADDING, x1: cx + width / 2 + LABEL_PADDING, y0: boxTop, y1: boxTop + fontPx + LABEL_PADDING } : null
+                );
+                if (!labelBoxes.place({ ...hit, stack, background: tl.backgroundShow })) return null;
                 return (
                     <g key={`total-${label.key}`} className="total-label-group" pointerEvents="none">
                         {tl.backgroundShow && (
                             <rect
                                 x={cx - width / 2 - LABEL_PADDING}
-                                y={baseline - fontPx * 0.85 - LABEL_PADDING / 2}
+                                y={boxTop}
                                 width={width + LABEL_PADDING * 2}
                                 height={fontPx + LABEL_PADDING}
                                 rx={2}
@@ -1817,7 +2154,7 @@ export const App: React.FC<AppProps> = ({
         const renderCategoryLabel = (category: string, cx: number) => {
             // 斜めラベルは左下へ伸びるので、左端までの距離も許容長に含める
             // （スクロール時の左端はスクロール領域の端 = x 0 でクリップされる）
-            const labelLeftBound = scrolls ? 0 : CATEGORY_LABEL_LEFT_SAFE_MARGIN;
+            const labelLeftBound = scrolls ? 0 : categoryLabelLeftMarginOf(catFontSizePx);
             const maxLenLeft = shouldRotateCat && !uprightCat
                 ? Math.max(12, (cx - labelLeftBound) / Math.sin(Math.PI / 4))
                 : maxAllowedLabelLen;
@@ -1826,6 +2163,9 @@ export const App: React.FC<AppProps> = ({
             // 斜め・縦の名前は、省いても 1 文字と「…」は残る（truncateText）。省いた名前が欄に入らなければ、その名前だけ出さない
             // （欄の外へはみ出さない。名前ごとに決めるので、欄に入る短い名前は出す）
             if (shouldRotateCat && measureTextWidth(displayCat, catFont) > maxAllowedLabelLen + 0.5) return null;
+            // スクロールしない斜めの名前は、字の左の端（中心 − 長さ × sin45 − 文字の半分）がグラフの左の端より外へ出るなら出さない
+            // （切れた字を出さない。12px の下限や、頭の 1 文字と「…」が左の端の分の長さより長い形。1.36.11.58 までは出して、字の頭が切れた）
+            if (shouldRotateCat && !uprightCat && !scrolls && cx - measureTextWidth(displayCat, catFont) * Math.SQRT1_2 - catFontSizePx * 0.5 < 0) return null;
             const labelStyle = categoryLabelStyle;
 
             if (uprightCat) {
@@ -1871,7 +2211,7 @@ export const App: React.FC<AppProps> = ({
             return (
                 <text
                     x={cx}
-                    y={marginTop + plotHeight + catFontSizePx + 4}
+                    y={marginTop + plotHeight + catFontSizePx + AXIS_TEXT_DROP}
                     className="x-category-label"
                     textAnchor="middle"
                     style={labelStyle}
@@ -1890,12 +2230,13 @@ export const App: React.FC<AppProps> = ({
                 part,
                 (i) => xOffset + centerOf(i),
                 // 第 2 軸で描く線（パレートでは累積比の線だけ。「折れ線の値」の線は左の軸で、範囲の反転に従う）
-                (ratio) => (onAxis2(line) ? marginTop + plotHeight * (1 - Math.max(0, Math.min(1, ratio))) : yOfRatio(ratio)),
+                lineYOf(line),
                 false,
                 // ステップの線は、段が変わる位置と同じく、隣のカテゴリとのすき間の真ん中まで延ばす（プロットの外へは出さない）
                 step / 2,
                 [xOffset, xOffset + plotWidth],
-                clusterSpan
+                clusterSpan,
+                `${gridMaskId}-line-${j}`
             );
 
         /**
@@ -1992,20 +2333,21 @@ export const App: React.FC<AppProps> = ({
                                           [...shownLayers].reverse().flatMap((l) => {
                                               const draw = layerDraws.get(l)!;
                                               return drawOrder(layerPointsOf(g, l)).map(([d, s]) =>
-                                                  renderBar(d, cx + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0) + draw.offset, `${i}-${s}-${l}`, draw)
+                                                  renderBar(d, cx + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0) + draw.offset, xOffset, `${i}-${s}-${l}`, dataLabelSpotOf(s, i, l), draw)
                                               );
                                           })
-                                        : drawOrder(g.points).map(([d, s]) => renderBar(d, cx + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0), `${i}-${s}`))}
+                                        : drawOrder(g.points).map(([d, s]) => renderBar(d, cx + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0), xOffset, `${i}-${s}`, dataLabelSpotOf(s, i, 0)))}
                                     {outlineOnly && !layered && renderStackOutline(g, cx)}
                                     {viewModel.measureGroups
-                                        ? shownLayers.map((l) => <g key={`totals-${l}`}>{renderTotalLabels(withLayerTotals(g, l), cx + layerDraws.get(l)!.offset)}</g>)
-                                        : frontTotals && renderTotalLabels(g, cx + frontShift)}
+                                        ? shownLayers.map((l) => <g key={`totals-${l}`}>{renderTotalLabels(withLayerTotals(g, l), cx + layerDraws.get(l)!.offset, xOffset, stackOf(i, l))}</g>)
+                                        : frontTotals && renderTotalLabels(g, cx + frontShift, xOffset, stackOf(i, 0))}
                                     {catAxis.show && !continuous && i % categoryLabelEvery === 0 && withCategoryLabelHit(i, g.category, renderCategoryLabel(labelOf(g), cx))}
                                 </g>
                             );
                         })}
                     </g>
-                    <g className="data-labels-group">{labelLayer}</g>
+                    {/* 棒をすべて描いてから、重なるデータラベルを省いて描く（置いた合計ラベルと重なるものも省く） */}
+                    <g className="data-labels-group">{keepUnoverlapped(dataLabelCandidates, labelBoxes)}</g>
                     {/* 連続の X 軸の目盛り。棒ごとの名前の代わりに、切りのいい日付・数値に出す */}
                     {catAxis.show && continuous && (
                         <g className="x-continuous-ticks">
@@ -2013,7 +2355,7 @@ export const App: React.FC<AppProps> = ({
                                 <text
                                     key={`x-tick-${k}`}
                                     x={xOffset + t.cx}
-                                    y={marginTop + plotHeight + catFontSizePx + 4}
+                                    y={marginTop + plotHeight + catFontSizePx + AXIS_TEXT_DROP}
                                     className="x-category-label"
                                     textAnchor="middle"
                                     style={categoryLabelStyle}
@@ -2040,7 +2382,7 @@ export const App: React.FC<AppProps> = ({
                                     line,
                                     j,
                                     (i) => xOffset + centerOf(i),
-                                    (ratio) => (onAxis2(line) ? marginTop + plotHeight * (1 - Math.max(0, Math.min(1, ratio))) : yOfRatio(ratio)),
+                                    lineYOf(line),
                                     false,
                                     [marginTop, marginTop + plotHeight],
                                     labelBoxes
@@ -2065,25 +2407,30 @@ export const App: React.FC<AppProps> = ({
         const tickLabelX = isRightAxis ? axisLineX + tickToAxisGap : axisLineX - tickToAxisGap;
         const tickTextAnchor = isRightAxis ? "start" : "end";
 
+        // タイトルは目盛りの列（目盛りの数字と上の単位の広いほう）の外に置く。単位は、ラベルの余白の分だけ軸を延ばすと
+        // 描く範囲の高さの中に下がるので、目盛りの数字の横に置くと単位がタイトルに掛かる
         const yTitleX = !isRightAxis
-            ? (axisLineX - tickToAxisGap) - tickWidthPx - gapTitleToTicks
-            : (axisLineX + tickToAxisGap) + tickWidthPx + gapTitleToTicks + valTitleFontSizePx * 0.5;
+            ? (axisLineX - tickToAxisGap) - yColumnWidth - yTitleToColumn
+            : (axisLineX + tickToAxisGap) + yColumnWidth + yTitleToColumn;
         const yTitleRotate = -90;
+        // タイトルの側（右）に凡例があると、タイトルの字は凡例の分を除いた所（グラフの svg の幅）の外の、凡例の印の手前に出る
+        // （shared/valueTitleGap の valueTitleBaselineFromEdge）。タイトルを描く svg は外を切らずに描く
+        const titleOverhang = legendSide === "right" && ((hasYTitle && isRightAxis) || (hasAxis2Title && axis2Right));
 
-        // 「プロット エリアの右上」の単位バッジ。スクロールしても流れないよう固定側に描く
+        // 「プロット エリアの右上」の単位バッジ。スクロールしても流れないよう固定側に描く。長ければ左の端で止める（edgeBadgeXOf）
         const renderPlotTopRightBadge = () =>
-            badgeText && viewModel.unitInfo.unitPosition === "plotTopRight" ? (
+            cornerBadgeText ? (
                 <text
-                    x={plotRightX}
-                    y={marginTop - 12}
+                    x={edgeBadgeXOf(cornerBadgeText, yUnitFont, plotRightX, cornerBadgeSpan.left)}
+                    y={marginTop - topRowRise}
                     className="unit-axis-badge"
                     textAnchor="end"
                     style={{
-                        fontSize: `${viewModel.unitInfo.fontSize}pt`,
+                        ...fontStyleOf(yUnitFont),
                         fill: viewModel.unitInfo.color,
                     }}
                 >
-                    {badgeText}
+                    {cornerBadgeText}
                 </text>
             ) : null;
 
@@ -2094,12 +2441,12 @@ export const App: React.FC<AppProps> = ({
          */
         const renderVerticalDrillPath = () => {
             if (!drillPathOn) return null;
-            const top = drillY - drillFontPx * 0.85;
+            const top = drillY - drillFontPx * DRILL_TEXT_ASCENT;
             const bottom = drillY + drillFontPx * 0.25;
             const shift = scrolls ? marginLeft : 0;
             const maxScroll = scrolls ? Math.max(0, plotWidth - viewWidth) : 0;
             let right = drillX + drillMaxWidth;
-            for (const b of labelBoxes) {
+            for (const b of labelBoxes.boxes) {
                 if (b.y1 <= top || b.y0 >= bottom || b.x1 + shift <= drillX) continue;
                 right = Math.min(right, b.x0 + shift - maxScroll - 6);
             }
@@ -2110,18 +2457,18 @@ export const App: React.FC<AppProps> = ({
             return (
                 <g className="y-axis-container">
                     {/* 軸上バッジ (valueAxisTop 配置の場合) */}
-                    {badgeText && viewModel.unitInfo.unitPosition !== "plotTopRight" && (
+                    {columnBadgeText && (
                         <text
                             x={tickLabelX}
-                            y={marginTop - 12}
+                            y={columnBadgeY}
                             className="unit-axis-badge"
                             textAnchor={tickTextAnchor}
                             style={{
-                                fontSize: `${viewModel.unitInfo.fontSize}pt`,
+                                ...fontStyleOf(yUnitFont),
                                 fill: viewModel.unitInfo.color,
                             }}
                         >
-                            {badgeText}
+                            {columnBadgeText}
                         </text>
                     )}
 
@@ -2130,7 +2477,6 @@ export const App: React.FC<AppProps> = ({
                         <text
                             transform={`translate(${yTitleX}, ${marginTop + plotHeight / 2}) rotate(${yTitleRotate})`}
                             textAnchor="middle"
-                            dominantBaseline={isRightAxis ? "central" : undefined}
                             className="y-axis-title"
                             style={{
                                 ...fontStyleOf(fontOf(valAxis, "title")),
@@ -2181,16 +2527,14 @@ export const App: React.FC<AppProps> = ({
             const onRight = !isRightAxis;
             const lineX = onRight ? plotRightX : marginLeft;
             const labelX = onRight ? lineX + tickToAxisGap : lineX - tickToAxisGap;
-            const titleX = onRight
-                ? labelX + axis2TickWidth + gapTitleToTicks + axis2TitleFontPx * 0.5
-                : labelX - axis2TickWidth - gapTitleToTicks - axis2TitleFontPx * 0.5;
+            // タイトルのベースラインは、目盛りの列（目盛りの数字と上の単位の広いほう）の外の端から y2TitleToColumn（Y 軸と同じ）
+            const titleX = onRight ? labelX + y2ColumnWidth + y2TitleToColumn : labelX - y2ColumnWidth - y2TitleToColumn;
             return (
                 <g className="y2-axis-container">
                     {hasAxis2Title && (
                         <text
                             transform={`translate(${titleX}, ${marginTop + plotHeight / 2}) rotate(-90)`}
                             textAnchor="middle"
-                            dominantBaseline="central"
                             className="y2-axis-title"
                             style={{
                                 ...fontStyleOf(fontOf(axis2, "title")),
@@ -2209,11 +2553,11 @@ export const App: React.FC<AppProps> = ({
                     {axis2BadgeText && (
                         <text
                             x={labelX}
-                            y={marginTop - 12}
+                            y={marginTop - topRowRise}
                             className="unit-axis-badge unit-axis2-badge"
                             textAnchor={onRight ? "start" : "end"}
                             style={{
-                                fontSize: `${axis2.unitFontSize}pt`,
+                                ...fontStyleOf(y2UnitFont),
                                 fill: axis2.unitColor,
                             }}
                         >
@@ -2293,6 +2637,7 @@ export const App: React.FC<AppProps> = ({
                         width: `${width}px`,
                         height: `${height - SCROLLBAR_HEIGHT}px`,
                         pointerEvents: "none",
+                        ...(titleOverhang ? { overflow: "visible" } : {}),
                     }}
                     role="img"
                     aria-label="単位つき棒グラフ（Y軸）"
@@ -2310,7 +2655,9 @@ export const App: React.FC<AppProps> = ({
                         style={{
                             position: "absolute",
                             left: marginLeft,
-                            bottom: SCROLLBAR_HEIGHT + 2,
+                            // 箱の下の端は、ベースライン（スクロール バーの上の端から bottomPad。SVG で描くときと同じ所）から字の箱の下がり
+                            // （HTML_TITLE_BOX_DESCENT 文字）下。1.36.11.55 の最初の作りまでは下がりを 4px と決めていた（12pt のタイトルで同じ）
+                            bottom: SCROLLBAR_HEIGHT + bottomPad - catTitleFontSizePx * HTML_TITLE_BOX_DESCENT,
                             width: viewWidth,
                             display: "flex",
                             justifyContent: "center",
@@ -2347,6 +2694,7 @@ export const App: React.FC<AppProps> = ({
                 className="unit-bar-svg"
                 role="group"
                 aria-label="単位つき棒グラフ"
+                {...(titleOverhang ? { style: { overflow: "visible" } } : {})}
             >
                 {/* 軸上バッジ (plotTopRight 配置の場合) */}
                 {renderPlotTopRightBadge()}
@@ -2364,7 +2712,7 @@ export const App: React.FC<AppProps> = ({
                 {catAxis.titleShow && catAxis.titleText && (
                     <text
                         x={marginLeft + leadIn + (plotWidth - leadIn) / 2}
-                        y={height - 6}
+                        y={height - bottomPad}
                         className="x-axis-title"
                         textAnchor="middle"
                         style={{
@@ -2391,7 +2739,8 @@ export const App: React.FC<AppProps> = ({
      * グリッド線は、値の線に「横」、カテゴリの区切りに「縦」の設定を使う（縦棒と同じく値かカテゴリかで対応させる）
      */
     const renderHorizontalChart = (width: number, height: number) => {
-        const badgeText = viewModel.unitInfo.badgeText;
+        // 単位は描く範囲の右の端にそろえて置く（値の軸の側の行か、「プロット エリアの右上」）。長ければ左の端で止め、入らなければ「…」で切る
+        const badgeText = edgeBadgeTextOf(viewModel.unitInfo.badgeText, yUnitFont, 2, width - 2);
         const unitPosition = viewModel.unitInfo.unitPosition;
         const catAxis = viewModel.categoryAxis;
         const valAxis = viewModel.valueAxis;
@@ -2408,10 +2757,33 @@ export const App: React.FC<AppProps> = ({
         const hasValTitle = valAxis.titleShow && Boolean(valAxis.titleText);
         const tickRowHeight = valAxis.show ? valTickFontPx + 8 : 0;
         const valTitleHeight = hasValTitle ? valTitleFontPx + 8 : 0;
-        const badgeFontPx = viewModel.unitInfo.fontSize * PT_TO_PX;
+        const badgeFontPx = yUnitFont.size * PT_TO_PX;
         const badgeInAxis = Boolean(badgeText) && unitPosition !== "plotTopRight";
         const badgeAtTopRight = Boolean(badgeText) && unitPosition === "plotTopRight";
-        const axisBlockHeight = tickRowHeight + valTitleHeight + (badgeInAxis ? badgeFontPx + 4 : 0);
+        const badgeRowHeight = badgeInAxis ? badgeFontPx + 4 : 0;
+        const axisBlockHeight = tickRowHeight + valTitleHeight + badgeRowHeight;
+        // 下に置くときの行は標準の集合横棒と同じ（shared/axisBands）：目盛りの数字のベースラインを描く範囲の下の端から字の大きさ ＋ AXIS_TEXT_DROP、
+        // タイトルのベースラインをその AXIS_TEXT_BELOW ＋ 文字の大きさ × AXIS_TITLE_ASCENT 下に置き、タイトルのベースラインから
+        // ビューの下の端（単位の行があれば、その行の上の端）までを BAR_TITLE_BOTTOM にする。タイトルが無い形・単位の行の下は前のまま。
+        // 1.36.11.54 までは上に置くときと同じ行（目盛り・タイトルとも文字の大きさ ＋ 8px、ベースラインは行の上の端から文字の大きさ ＋ 2px、下に 6px）で、
+        // 目盛りの数字が標準より 13px、タイトルが 8px 上にあった（目盛り 9pt・タイトル 12pt）
+        // 目盛りの数字を出さずにタイトルだけ出すときは、描く範囲の下の端からタイトルの行の上の端まで AXIS_TEXT_BELOW（縦棒と同じ。
+        // 1.36.11.55 の最初の作りでは 0 で、タイトルの字の頭が描く範囲の下の端に付いた）
+        // タイトルも単位の行も無ければ、目盛りの数字のベースラインからビューの下の端までを標準の集合横棒と同じ BAR_TEXT_BOTTOM にする
+        // （1.36.11.55 までは AXIS_TEXT_BELOW と下の 6px で 12px あり、下の帯が標準より 2.6px ほど高かった）。コンマ・下へ下りる字・下線の
+        // 下の端がその下へ出るなら、字の下の端がビューに入るまでとる（shared/axisBands の axisTextBottomOf。目盛りの数字は描く範囲の長さで
+        // 決まるので、Y 軸の幅の見積もりと同じく、範囲の目盛りといちばん細かい 8 本の目盛りの字で見積もる。1.36.11.56 の最初の作りでは
+        // 字によらず BAR_TEXT_BOTTOM で、大きい目盛りのコンマが下の端で切れた）
+        const tickTextsBelow = (ticks: Tick[], underline: boolean, fontPx: number, bold: boolean) =>
+            Math.max(0, maxOf(ticks.map((t) => axisTextDescentOf(t.label, underline, { fontPx, bold })))) * fontPx;
+        const ticksAtBottom = !valueAtTop && valAxis.show && !hasValTitle && !badgeInAxis;
+        const tickRowBottom = ticksAtBottom
+            ? axisTextBottomOf(BAR_TEXT_BOTTOM, tickTextsBelow([...viewModel.ticks, ...viewModel.ticksFor(Math.max(8, valAxis.tickCount))], valAxis.underline, valTickFontPx, valAxis.bold))
+            : AXIS_TEXT_BELOW;
+        const tickRowBelow = valAxis.show ? valTickFontPx + AXIS_TEXT_DROP + tickRowBottom : hasValTitle ? AXIS_TEXT_BELOW : 0;
+        // タイトルのベースラインの下は、下へ下りる字・下線の下の端が入るだけとる（bottomTitleBelowOf。既定の組の字は BAR_TITLE_BOTTOM のまま）
+        const titleRowBelow = hasValTitle ? valTitleFontPx * AXIS_TITLE_ASCENT + bottomTitleBelowOf(BAR_TITLE_BOTTOM, valTitleFontPx, titleInkOf(valAxis.titleText, valAxis.titleUnderline, { fontPx: valTitleFontPx, bold: valAxis.titleBold })) : 0;
+        const axisBlockBelow = tickRowBelow + titleRowBelow + badgeRowHeight;
 
         // 第 2 X 軸（折れ線の値を値の軸と別の尺度で描くとき）。値の軸の反対側に置く（値の軸が下なら上）
         const axis2 = viewModel.valueAxis2;
@@ -2422,9 +2794,19 @@ export const App: React.FC<AppProps> = ({
         const axis2TitleFontPx = axis2.titleFontSize * PT_TO_PX;
         const hasAxis2Title = axis2On && axis2.titleShow && Boolean(axis2.titleText);
         const axis2TitleHeight = hasAxis2Title ? axis2TitleFontPx + 8 : 0;
-        const axis2BadgeText = axis2On ? axis2.badgeText : "";
-        const axis2BadgeFontPx = axis2.unitFontSize * PT_TO_PX;
+        const axis2BadgeText = axis2On ? edgeBadgeTextOf(axis2.badgeText, y2UnitFont, 2, width - 2) : "";
+        const axis2BadgeFontPx = y2UnitFont.size * PT_TO_PX;
         const axis2BlockHeight = axis2On ? axis2TickRow + axis2TitleHeight + (axis2BadgeText ? axis2BadgeFontPx + 4 : 0) : 0;
+        // 値の軸を上に移して第 2 X 軸が下に来るとき、第 2 X 軸の目盛りの数字の行が一番下（タイトル・単位の行が無い）なら、行を値の軸の目盛りの
+        // 行と同じにする（ベースラインを描く範囲の下の端から字の大きさ ＋ AXIS_TEXT_DROP、そこからビューの下の端まで BAR_TEXT_BOTTOM か、
+        // 字の下の端が入るだけ）。1.36.11.56 の最初の作りまでは上に置くときと同じ行（ベースラインは字の大きさ ＋ 2px、下に 8px と 6px）で、
+        // 一番下が同じ目盛りの数字の行でも、ベースラインから下の端まで値の軸 9.2px・第 2 X 軸 12px と違った
+        const axis2TicksAtBottom = valueAtTop && axis2On && axis2.valueShow && !hasAxis2Title && !axis2BadgeText;
+        const axis2BottomRow = axis2TicksAtBottom
+            ? axis2TickFontPx +
+              AXIS_TEXT_DROP +
+              axisTextBottomOf(BAR_TEXT_BOTTOM, tickTextsBelow([...axis2.ticks, ...axis2.ticksFor(Math.max(8, valAxis.tickCount))], axis2.underline, axis2TickFontPx, axis2.bold))
+            : 0;
 
         // カテゴリの軸（左）。ラベルは「最大幅 (%)」まで、長ければ末尾を省略
         const catFontPx = catAxis.fontSize * PT_TO_PX;
@@ -2434,23 +2816,41 @@ export const App: React.FC<AppProps> = ({
         // 階層を段に重ねるときは、棒のすぐ左にいちばん下のレベルだけを出し、上のレベルはさらに左の列に出す
         const stackedLevels = catAxis.show && catAxis.levelCount > 1 && !catAxis.concatenateLabels;
         const labelOf = (g: CategoryGroup) => (stackedLevels ? g.levels[g.levels.length - 1] : g.label);
-        const widestLabel = catAxis.show ? Math.max(0, ...groups.map((g) => measureTextWidth(labelOf(g), catFont))) : 0;
-        const catTitleWidth = hasCatTitle ? catTitleFontPx + 8 : 0;
+        const widestLabel = catAxis.show ? Math.max(0, maxOf(groups.map((g) => measureTextWidth(labelOf(g), catFont)))) : 0;
+        // 名前の側（左）の並びは標準の集合横棒と同じ（shared/axisBands）：タイトルの字の画素の左の端をビューの左の端に置き、字の右の端から
+        // SIDE_TITLE_NAME_GAP で一番長い名前の字の左の端、名前の字の右の端から SIDE_NAME_PLOT_GAP で描く範囲の左の端。タイトルが無ければ、
+        // 名前の欄の左の端をビューの左の端にする。名前の欄（名前・ランクの帯・上のレベルの列）は、左の端に SIDE_NAME_LEAD をとる。
+        // 1.36.11.54 までは、タイトルの字の四角をビューの左の端から 4px（字の画素は 5.5px）、名前の欄の左の端をタイトルの字の四角の 8px 右か
+        // ビューの左の端から 4px、名前の字の右の端と描く範囲のあいだを 6px にしていた
+        // タイトルの字の見積もり（titleInkOf）で、既定の組より高い字があればタイトルをその分だけ内側に置く（字の上の端をビューに入れる）。
+        // 1.36.11.55 の最初の作りでは字によらず既定の組の見積もりで置き、É・Å・| などの上の端がビューの左の端で切れた
+        const catTitleInk = titleInkOf(catAxis.titleText, catAxis.titleUnderline, { fontPx: catTitleFontPx, bold: catAxis.titleBold });
+        const nameColumnLeft = hasCatTitle ? sideTitleInkRightOf(catTitleFontPx, catTitleInk) + SIDE_TITLE_NAME_GAP - SIDE_NAME_LEAD : 0;
+        /** 名前の欄の、一番長い名前の字の左右に足す幅 */
+        const namePads = SIDE_NAME_LEAD + SIDE_NAME_PLOT_GAP;
         // パレートのランクの帯。いちばん下のレベルのラベルのすぐ左に 1 列取る
         const pareto = viewModel.pareto;
         const rankBandOn = pareto.enabled && pareto.showRankBand && catAxis.show;
-        const marginRight = 16;
+        // 描く範囲の右の余白。標準の集合横棒と同じ 10px（2026-10-20 の Desktop で、ラベルなしの標準の 800 の線は、16px とっていた
+        // 前の版より 6.4px 右）。目盛りの数字が余白からはみ出すなら、描く目盛りの数字がビューに入るまで広げる（下の plotRight）
+        const marginRight = H_PLOT_RIGHT;
         // いちばん上の行：「プロット エリアの右上」の単位（右）とドリルの位置（左）。どちらか大きい文字に合わせる
         const badgeRowFontPx = badgeAtTopRight ? badgeFontPx : 0;
         const drillRowFontPx = Math.max(badgeRowFontPx, catAxis.fontSize * PT_TO_PX);
-        // 幅は、縦のスクロールバー（12px）が出ても収まるように見積もる
-        const drillMaxWidth = (badgeAtTopRight ? width - marginRight - 12 - badgeWidthOf(badgeText, viewModel.unitInfo.fontSize) - 8 : width - marginRight - 12) - 4;
+        // 幅は、縦のスクロールバー（12px）が出ても収まるように見積もる（行をとるかを決める見積もり。右の余白は目盛りの数字の分を
+        // 広げる前の 10px なので、描くときは広げたあとの単位の位置で頭を打つ。下の drillPathWidth）
+        const badgeWidth = badgeAtTopRight ? badgeWidthOf(badgeText, yUnitFont) : 0;
+        const drillMaxWidth = (badgeAtTopRight ? width - marginRight - 12 - badgeWidth - 8 : width - marginRight - 12) - 4;
         // 低い図で行を足すと描く範囲が潰れ、軸がビジュアルの外へ押し出される。足す高さが図の 12% を超えるなら出さない
         const drillExtra = drillRowFontPx + 6 - (badgeRowFontPx ? badgeRowFontPx + 6 : 0);
         const drillPathOn = Boolean(fittedDrillPath(drillMaxWidth)) && drillExtra <= height * 0.12;
         const topRowFontPx = drillPathOn ? drillRowFontPx : badgeRowFontPx;
         const marginTop = 10 + (valueAtTop ? axisBlockHeight : 0) + (axis2AtTop ? axis2BlockHeight : 0) + (topRowFontPx ? topRowFontPx + 6 : 0);
-        const marginBottom = 6 + (valueAtTop ? axis2BlockHeight : axisBlockHeight);
+        const marginBottom = valueAtTop
+            ? axis2TicksAtBottom
+                ? axis2BottomRow
+                : 6 + axis2BlockHeight
+            : ((hasValTitle && !badgeInAxis) || ticksAtBottom ? 0 : 6) + axisBlockBelow;
         const viewHeight = Math.max(10, height - marginTop - marginBottom);
 
         // 「最小カテゴリの高さ」を下回るなら縦にスクロールする（高さだけで決まるので、名前の欄の幅より先に決める）
@@ -2461,58 +2861,87 @@ export const App: React.FC<AppProps> = ({
 
         // 名前の欄（名前・ランクの帯・上のレベルの列）に使える幅。上限を大きくしても、描く範囲に幅の 4 分の 1 は残す（縦向きと同じ）。
         // 左右の余白とスクロールバーを除く
-        const labelRoom = Math.max(0, width * 0.75 - 4 - catTitleWidth - marginRight - SCROLLBAR_WIDTH);
+        const labelRoom = Math.max(0, width * 0.75 - nameColumnLeft - marginRight - SCROLLBAR_WIDTH);
         // 標準と同じく、凡例を含むビジュアル全体の幅に対する割合
         const nameCap = Math.max(16, viewport.width * (catAxis.maxHeight / 100));
         // ランクの帯の幅は、帯を出すランクの「名前 N件」のいちばん長いもの。ラベルの最大幅で頭を打つ（長い名前でプロットを押し出さない。入らなければ名前だけ、それも入らなければ文字を出さない）
         const rankBandWant = rankBandOn
             ? Math.min(
                 nameCap,
-                Math.max(0, ...(["A", "B", "C"] as ParetoRank[]).map((r) => {
+                Math.max(0, maxOf((["A", "B", "C"] as ParetoRank[]).map((r) => {
                     const count = pareto.ranks.filter((x) => x === r).length;
                     return count > 0 ? measureTextWidth(`${pareto.labels[r]} ${count}件`, catFont) : 0;
-                }))
+                })))
             ) + 16
             : 0;
-        // 名前は、名前の欄からランクの帯と名前の右の余白（8）を除いた幅まで。ただし省いても 1 文字と「…」は残る（truncateText）ので、
+        // 名前は、名前の欄からランクの帯と名前の左右の余白（namePads）を除いた幅まで。ただし省いても 1 文字と「…」は残る（truncateText）ので、
         // どの名前も 1 文字は出せる幅（名前ごとに、そのままか「1 文字＋…」の短いほうを実測）は、ランクの帯より先にとる
         // （とらないと、名前がランクの帯に重なる）。省いた名前が幅に入らなければ、その名前だけ出さない
         const shortestOf = (text: string) => Math.min(measureTextWidth(text, catFont), measureTextWidth(truncateText(text, 0, catFont), catFont));
-        const minNameWidth = catAxis.show ? Math.max(0, ...groups.map((g) => shortestOf(labelOf(g)))) : 0;
-        const maxLabelWidth = Math.min(nameCap, Math.max(0, labelRoom - 8 - rankBandWant, Math.min(minNameWidth, labelRoom - 8)));
+        const minNameWidth = catAxis.show ? Math.max(0, maxOf(groups.map((g) => shortestOf(labelOf(g))))) : 0;
+        const maxLabelWidth = Math.min(nameCap, Math.max(0, labelRoom - namePads - rankBandWant, Math.min(minNameWidth, labelRoom - namePads)));
         const nameOf = (g: CategoryGroup) => {
             const text = truncateText(labelOf(g), maxLabelWidth, catFont);
             return measureTextWidth(text, catFont) <= maxLabelWidth + 0.5 ? text : null;
         };
         const namesShown = catAxis.show && groups.some((g) => nameOf(g) !== null);
-        const lowestLabelWidth = namesShown ? Math.min(widestLabel, maxLabelWidth) + 8 : 0;
-        const rankBandWidth = rankBandOn ? Math.max(0, Math.min(rankBandWant, labelRoom - lowestLabelWidth)) : 0;
+        const lowestLabelWidth = namesShown ? Math.min(widestLabel, maxLabelWidth) + namePads : 0;
+        // ランクの帯・上のレベルの列が名前の左にあれば、名前の欄の左の端（いちばん左の帯か列の左の端）にも SIDE_NAME_LEAD をとる
+        // （名前の左の SIDE_NAME_LEAD は名前の列の中に残る）。1.36.11.55 の最初の作りでは、いちばん左の帯・列がビューの左の端（タイトルが
+        // あればタイトルの字の右の端から SIDE_TITLE_NAME_GAP − SIDE_NAME_LEAD）に付いていた
+        const outerLeadRoom = rankBandOn || stackedLevels ? SIDE_NAME_LEAD : 0;
+        const rankBandWidth = rankBandOn ? Math.max(0, Math.min(rankBandWant, labelRoom - lowestLabelWidth - outerLeadRoom)) : 0;
         // 上のレベルの列。棒に近い（下の）レベルから置き、ラベルと合わせてグラフの幅の半分（と名前の欄）までにする（上のレベルから落とす）
         const levelColumns: Array<{ level: number; width: number }> = [];
         if (stackedLevels) {
             let used = lowestLabelWidth;
             for (let level = catAxis.levelCount - 2; level >= 0; level--) {
-                const widest = Math.max(0, ...groups.map((g) => measureTextWidth(g.levels[level] ?? "", catFont)));
+                const widest = Math.max(0, maxOf(groups.map((g) => measureTextWidth(g.levels[level] ?? "", catFont))));
                 const columnWidth = Math.min(widest, maxLabelWidth) + 12;
-                if (used + columnWidth > Math.min(width * 0.5, labelRoom - rankBandWidth)) break;
+                if (used + columnWidth > Math.min(width * 0.5, labelRoom - rankBandWidth - outerLeadRoom)) break;
                 levelColumns.push({ level, width: columnWidth });
                 used += columnWidth;
             }
         }
-        const labelAreaWidth = lowestLabelWidth + rankBandWidth + levelColumns.reduce((sum, c) => sum + c.width, 0);
+        const outerLead = rankBandWidth > 0 || levelColumns.length > 0 ? SIDE_NAME_LEAD : 0;
+        const labelAreaWidth = outerLead + lowestLabelWidth + rankBandWidth + levelColumns.reduce((sum, c) => sum + c.width, 0);
 
-        const marginLeft = 4 + catTitleWidth + labelAreaWidth;
+        // 名前の欄を出さなければ、描く範囲をタイトルの字の右の端から SIDE_TITLE_PLOT_GAP に、タイトルも無ければビューの左の端から
+        // SIDE_BARE_LEFT（4px）に置く（shared/axisBands の sidePlotLeftOf）。1.36.11.55 の最初の作りでは、
+        // 名前の欄を出さずタイトルだけ出すと、タイトルの字の右の端から SIDE_TITLE_NAME_GAP − SIDE_NAME_LEAD、1.36.11.55 は SIDE_TITLE_NAME_GAP
+        // （標準より 2px 狭い）だった
+        const marginLeft = sidePlotLeftOf(hasCatTitle ? catTitleFontPx : null, labelAreaWidth, catTitleInk);
         const plotHeight = scrolls ? neededHeight : viewHeight;
-        const plotWidth = Math.max(10, width - marginLeft - marginRight - SCROLLBAR_WIDTH);
         // 目盛りの本数は、標準と同じく描く範囲の幅で決める（300px 未満は 3、500px 未満は 5、それ以上は 8 まで）
         // 「目盛りの本数 (目安)」があればその本数、空なら描く範囲の幅で決める（第 2 X 軸も同じ上限）。
         // どちらも、いちばん長い数字＋ 8px が隣とぶつからない本数までにとどめる
-        const tickTarget = valAxis.tickCount || recommendedTickCount(plotWidth, "horizontal");
+        // 値の軸の範囲（viewModel）も、知らせた幅で同じ本数の目安で丸める。目盛りは範囲を丸めた本数で引く（valueTickTarget。ふつうは描いた幅の本数と同じ）
         const valTickSpec: FontSpec = { family: valAxis.fontFamily, size: valTickFontPx, bold: valAxis.bold, italic: valAxis.italic, underline: valAxis.underline };
         const axis2TickSpec: FontSpec = { family: axis2.fontFamily, size: axis2TickFontPx, bold: axis2.bold, italic: axis2.italic, underline: false };
-        const widest = (spec: FontSpec) => (ticks: Tick[]) => Math.max(0, ...ticks.map((tick) => measureTextWidth(tick.label, spec))) + 8;
-        const valueTicks = fitTicks(viewModel.ticksFor, tickTarget, plotWidth, widest(valTickSpec));
-        const axis2Ticks = fitTicks(axis2.ticksFor, tickTarget, plotWidth, widest(axis2TickSpec));
+        const widest = (spec: FontSpec) => (ticks: Tick[]) => Math.max(0, maxOf(ticks.map((tick) => measureTextWidth(tick.label, spec)))) + 8;
+        const ticksAt = (length: number) => {
+            const target = valueTickTarget(viewModel, valAxis.tickCount, length);
+            return { valueTicks: fitTicks(viewModel.ticksFor, target, length, widest(valTickSpec)), axis2Ticks: fitTicks(axis2.ticksFor, target, length, widest(axis2TickSpec)) };
+        };
+        // 描く範囲の左の端からビューの右の端まで。右の余白 right のときの描く範囲の幅
+        const plotSpan = width - marginLeft;
+        const plotWidthAt = (right: number) => Math.max(10, plotSpan - right - SCROLLBAR_WIDTH);
+        // 描く目盛り（ticksAt）の数字の右の端（数字は線の真ん中に置く）をビューの右の端に入れるのに要る右の余白。目盛りの行は
+        // スクロールする箱の外にあるので、数字はスクロールバーの列の下まで使える。左の端（比率 0）の数字は余白で動かないので見ない
+        const tickNeedOf = (ticks: ReturnType<typeof ticksAt>) => {
+            const needOf = (spec: FontSpec) => (t: Tick) =>
+                t.ratio > 1e-9 ? plotSpan - SCROLLBAR_WIDTH - (plotSpan - measureTextWidth(t.label, spec) / 2) / t.ratio : -Infinity;
+            return maxOf([
+                ...(valAxis.show ? ticks.valueTicks.map(needOf(valTickSpec)) : []),
+                ...(axis2On && axis2.valueShow ? ticks.axis2Ticks.map(needOf(axis2TickSpec)) : []),
+            ]);
+        };
+        // 右の余白は、広げたあとの幅で描く目盛りの数字がビューに入るように決める（広げて目盛りが変われば見直す。shared の endMarginOf）。
+        // 広げても、描く範囲に幅の 4 分の 1 は残す（名前の欄の上限と同じ。残らなければ数字の端は切れる）
+        const plotRight = endMarginOf(marginRight, plotSpan - SCROLLBAR_WIDTH - width / 4, (right) => tickNeedOf(ticksAt(plotWidthAt(right))));
+        const plotWidth = plotWidthAt(plotRight);
+        const { valueTicks, axis2Ticks } = ticksAt(plotWidth);
+        valueAxisLengthRef.current = valueAxisLengthToReport(viewModel, plotWidth);
 
         const padRatio = Math.max(0, Math.min(0.5, columnsSettings.categorySpacing / 100));
         const outerRatio = columnsSettings.outerPadding === null
@@ -2537,10 +2966,11 @@ export const App: React.FC<AppProps> = ({
         const frontShiftX = layered ? layerDrawsX.get(shownLayers[0])!.offset : 0;
 
         /** 値の比率 → プロット左端からの x（範囲の反転なら右から） */
-        const xOfRatio = (ratio: number) => {
-            const clamped = Math.max(0, Math.min(1, ratio));
-            return plotWidth * (valAxis.invertRange ? 1 - clamped : clamped);
-        };
+        const xOfRatio = (ratio: number) => xOfLineRatio(Math.max(0, Math.min(1, ratio)));
+        /** 折れ線の比率の x。丸めないので、軸の範囲の外は描画域の外になる（描画域で切る） */
+        const xOfLineRatio = (ratio: number) => plotWidth * (valAxis.invertRange ? 1 - ratio : ratio);
+        /** 横棒の折れ線 1 本の値の座標。第 2 X 軸には範囲の反転が無いので、そのまま左から右へ */
+        const lineXOf = (line: LineSeriesInfo, xOffset: number) => (ratio: number) => xOffset + (onAxis2(line) ? plotWidth * ratio : xOfLineRatio(ratio));
         const extentX = (fromRatio: number, toRatio: number) => {
             const a = xOfRatio(fromRatio);
             const b = xOfRatio(toRatio);
@@ -2563,8 +2993,8 @@ export const App: React.FC<AppProps> = ({
                 const segs = g.points.filter((d) => !d.blank && (positive ? d.value > 0 : d.value < 0));
                 if (!segs.length) return null;
                 const extents = segs.map((d) => segmentExtentX(d, d.valRatio));
-                const left = Math.min(...extents.map((e) => e.left));
-                const right = Math.max(...extents.map((e) => e.left + e.width));
+                const left = minOf(extents.map((e) => e.left));
+                const right = maxOf(extents.map((e) => e.left + e.width));
                 const outer = segs.find((d) => d.outermost) ?? segs[segs.length - 1];
                 const r = Math.max(0, Math.min(columnsSettings.cornerRadius, thickness / 2, right - left));
                 return (
@@ -2588,9 +3018,12 @@ export const App: React.FC<AppProps> = ({
         const categoryOpacity = Math.max(0, Math.min(1, 1 - gridlines.verticalTransparency / 100));
 
         const dl = viewModel.dataLabels;
-        /** 描いた棒のデータ ラベルの枠。線のデータ ラベルはこれと重なるものを描かない */
-        const hLabelBoxes: Array<{ x0: number; x1: number; y0: number; y1: number }> = [];
-        // 横棒のデータラベルの位置。「自動」は集合なら外側の端、積み上げなら中央（積み上げでは外側に置かない）
+        /** 描いた棒のデータ ラベル・合計ラベルの枠。重なるラベルを省き、線のデータ ラベルもこれと重なるものを描かない */
+        const hLabelBoxes = createLabelBoxes();
+        // データ ラベルは、すべての棒を描いたあとに重ねる（縦棒と同じ。外に出したラベルが隣の棒に隠れない）。重なるものを省くのも、全部がそろってから
+        const hDataLabelCandidates: Array<LabelCandidate<React.ReactNode>> = [];
+        // 横棒のデータラベルの位置。「自動」は集合なら外側の端、積み上げなら中央（積み上げでは外側に置かない）。
+        // 集合の「自動」で外に置くとほかのラベルと重なるときに試す棒の中の候補は、ラベルを組む所（fallback）
         const hLabelPositionOf = (d: DataPoint) => {
             const position = (d.labelSettings ?? dl).position;
             return position === "auto" || (stacked && position === "outsideEnd") ? (stacked ? "insideCenter" : "outsideEnd") : position;
@@ -2603,14 +3036,16 @@ export const App: React.FC<AppProps> = ({
                 j,
                 part,
                 (i) => yOffset + centerOf(i),
-                (ratio) => xOffset + (onAxis2(line) ? plotWidth * Math.max(0, Math.min(1, ratio)) : xOfRatio(ratio)),
+                lineXOf(line, xOffset),
                 true,
                 step / 2,
                 [yOffset, yOffset + plotHeight],
-                clusterSpan
+                clusterSpan,
+                `${gridMaskId}-hline-${j}`
             );
 
-        const renderHBar = (d: DataPoint, cy: number, key: string, xOffset: number, yOffset: number, layer?: LayerDraw) => {
+        /** 横棒 1 本。labelSpot はデータ ラベルを置く順と積み上げ（dataLabelSpotOf） */
+        const renderHBar = (d: DataPoint, cy: number, key: string, xOffset: number, yOffset: number, labelSpot: DataLabelSpot, layer?: LayerDraw) => {
             if (d.blank) return null;
             // 比較レイヤーの棒は、レイヤーの太さで描く
             const th = layer?.width ?? thickness;
@@ -2646,88 +3081,114 @@ export const App: React.FC<AppProps> = ({
             // ハイコントラストでは、選んだ棒を選択の色で太く囲む（縦棒と同じ）
             const hcPicked = !!viewModel.highContrast && selectedIds.length > 0 && isPicked(d);
 
-            // データラベル（横に並べる。「縦」の方向は横棒では使わない）
-            const label = (() => {
+            // データラベル（横に並べる。「縦」の方向は横棒では使わない）。描くのは棒の後ろ
+            const label = ((): LabelCandidate<React.ReactNode> | null => {
                 // 系列ごとに変えた設定があればそれ（保存の無い項目は「すべて」の値）
                 const dl = d.labelSettings ?? viewModel.dataLabels;
-                if (!dl.show || !d.labelShow || w <= 0 || layer?.label === false) return null;
-                const lines = labelLinesOf(dl, d);
-                if (!lines.length) return null;
-                const block = labelBlock(lines, { singleLine: dl.singleLine, align: dl.horizontalAlignment });
-                const textW = block.width;
-                const right = left + w;
-                let x: number;
-                let anchor: "start" | "middle" | "end";
-                let inside = true;
-                const hLabelPosition = hLabelPositionOf(d);
-                if (hLabelPosition === "insideTop") {
-                    // 内側の端
-                    x = rightward ? right - LABEL_PADDING : left + LABEL_PADDING;
-                    anchor = rightward ? "end" : "start";
-                } else if (hLabelPosition === "insideCenter") {
-                    x = left + w / 2;
-                    anchor = "middle";
-                } else if (hLabelPosition === "insideBottom") {
-                    // 内側の基準（0 の側）
-                    x = rightward ? left + LABEL_PADDING : right - LABEL_PADDING;
-                    anchor = rightward ? "start" : "end";
-                } else {
-                    inside = false;
-                    x = rightward ? right + LABEL_PADDING : left - LABEL_PADDING;
-                    anchor = rightward ? "start" : "end";
-                }
-                const fitsLength = textW + LABEL_PADDING * 2 <= w;
-                const blockHeight = lines.length > 1 ? block.bottomEdge - block.topEdge : lines[0].font.size;
-                const fitsThickness = th >= blockHeight + 2;
-                // 積み上げでは隣が別の棒なので、値の向きに入りきらないラベルは出さない
-                if (inside && stacked && !fitsLength) return null;
-                if (inside && !(fitsLength && fitsThickness) && !dl.overflow) return null;
-                const autoColor = labelAutoColor(inside, seenColorOf(d.color, baseFillOpacity), dl, viewModel.highContrast, viewModel.background);
-                const toneHere = !inside || dl.backgroundShow;
-                const midY = top + th / 2;
-                // 背景は 1 行なら 1.10 までと同じ高さ、複数行ならまとまりの上端から下端
-                const firstPx = lines[0].font.size;
-                const bgTop = lines.length > 1 ? midY + block.topEdge - 1 : midY - firstPx * 0.6 - 1;
-                const bgHeight = lines.length > 1 ? blockHeight + 2 : firstPx * 1.2 + 2;
-                const boxX = anchor === "start" ? x - LABEL_PADDING : anchor === "end" ? x - textW - LABEL_PADDING : x - textW / 2 - LABEL_PADDING;
-                // 行はまとまりの中心から置く（左・右そろえと単一行は、行ごとに x が違う）
-                const blockCenter = boxX + LABEL_PADDING + textW / 2;
-                hLabelBoxes.push({ x0: boxX, x1: boxX + textW + LABEL_PADDING * 2, y0: bgTop, y1: bgTop + bgHeight });
-                // 中央そろえは、どの行も棒に対する同じ位置（x・anchor）で描ける（1.35 までと同じ書き方）
-                const centered = block.anchor === "middle";
-                return (
-                    <g className="data-label-group" pointerEvents="none">
-                        {dl.backgroundShow && (
-                            <rect
-                                x={boxX}
-                                y={bgTop}
-                                width={textW + LABEL_PADDING * 2}
-                                height={bgHeight}
-                                rx={2}
-                                fill={dl.backgroundColor}
-                                fillOpacity={(100 - dl.backgroundTransparency) / 100}
-                            />
-                        )}
-                        {lines.map((line, k) => (
-                            <text
-                                key={line.kind}
-                                x={centered ? x : blockCenter + block.xs[k]}
-                                y={midY + block.baselines[k]}
-                                className={labelClassOf(line)}
-                                textAnchor={centered ? anchor : block.anchor}
-                                style={labelTextStyle(dl, line, d, autoColor, toneHere)}
-                            >
-                                {line.text}
-                            </text>
-                        ))}
-                    </g>
-                );
+                if (!dl.show || !d.labelShow || layer?.label === false) return null;
+                // 値が 0 の棒（長さ 0）にも、外に置くラベルは 0 の線の右に出す（縦棒と同じ。標準と同じ）
+                if (w <= 0 && !zeroLabelShown(d)) return null;
+                const allLines = labelLinesOf(dl, d);
+                if (!allLines.length) return null;
+                /**
+                 * hLabelPosition に置いたラベル。insideCandidate は集合の「自動」で外に置くと重なるときの棒の中の候補（内側上と同じ置き方）
+                 */
+                const labelAt = (hLabelPosition: string, insideCandidate: boolean): LabelPlacement<React.ReactNode> | null => {
+                    // 内側の位置は、オーバーフロー テキストがオンなら棒の長さに入らなければ出さず（0 の線を越えて描かない）、太さははみ出して描く。
+                    // オフなら太さに入らなければ出さず、長さに入らなければ「…」で省く（積み上げも同じ。標準と同じ）
+                    const placedH = placeBarLabel({
+                        position: hLabelPosition,
+                        left,
+                        right: left + w,
+                        rightward,
+                        thickness: th,
+                        lines: allLines,
+                        layout: { singleLine: dl.singleLine, align: dl.horizontalAlignment },
+                        overflow: dl.overflow,
+                        background: dl.backgroundShow,
+                    });
+                    if (!placedH.show) return null;
+                    // 棒の中の候補は、棒の長さに入り、オーバーフロー テキストがオフなら太さにも入るときだけ（「…」で省かない。標準と同じ）
+                    if (insideCandidate && !(placedH.fitsLength && (dl.overflow || placedH.fitsThickness))) return null;
+                    const { lines, block } = placedH;
+                    const textW = block.width;
+                    const inside = !placedH.outside;
+                    // 行を描く x と text-anchor。棒の端の側にそろえる（内側の端と外は値の端、内側の基準は 0 の側）
+                    const anchor: "start" | "middle" | "end" =
+                        hLabelPosition === "insideCenter"
+                            ? "middle"
+                            : (hLabelPosition === "insideTop") === rightward
+                              ? "end"
+                              : "start";
+                    const x = anchor === "start" ? placedH.textLeft : anchor === "end" ? placedH.textLeft + textW : placedH.textLeft + textW / 2;
+                    const blockHeight = lines.length > 1 ? block.bottomEdge - block.topEdge : lines[0].font.size;
+                    const autoColor = labelAutoColor(inside, seenColorOf(d.color, baseFillOpacity), dl, viewModel.highContrast, viewModel.background);
+                    const toneHere = !inside || dl.backgroundShow;
+                    const firstPx = lines[0].font.size;
+                    // 背景の四角は、字の送りの左右に H_LABEL_BACKGROUND_PAD 広げる（標準の集合横棒と同じ。字の位置は背景の有無で変えない）。
+                    // 1.36.11.54 までは左右に LABEL_PADDING（3px）で、外のラベルは背景の分だけ字を内側へ寄せていた
+                    const boxX = placedH.textLeft - H_LABEL_BACKGROUND_PAD;
+                    // 背景は 1 行なら 1.10 までと同じ高さ、複数行ならまとまりの上端から下端（棒の太さの中心 barMidY から）
+                    const bgTopAt = (mid: number) => (lines.length > 1 ? mid + block.topEdge - 1 : mid - firstPx * 0.6 - 1);
+                    const bgHeight = lines.length > 1 ? blockHeight + 2 : firstPx * 1.2 + 2;
+                    const textAt = (mid: number) => ({ x0: boxX + H_LABEL_BACKGROUND_PAD, x1: boxX + H_LABEL_BACKGROUND_PAD + textW, y0: mid + block.topEdge, y1: mid + block.bottomEdge });
+                    const bgAt = (mid: number) => (dl.backgroundShow ? { x0: boxX, x1: boxX + textW + H_LABEL_BACKGROUND_PAD * 2, y0: bgTopAt(mid), y1: bgTopAt(mid) + bgHeight } : null);
+                    const halo = haloOutsetOf(dl.halo, lines.map((line) => labelFillOf(dl, line, d, autoColor, toneHere)));
+                    // 棒の外に置いたラベルが描く範囲の上下からはみ出すなら、収まるだけ内側へ寄せる（棒の中のラベルは寄せない）
+                    const barMidY = top + th / 2;
+                    const ink = inkBoxOf(textAt(barMidY), bgAt(barMidY), halo);
+                    const midY = barMidY + (inside ? 0 : shiftIntoSpan(ink.y0, ink.y1, yOffset, yOffset + plotHeight));
+                    const bgTop = bgTopAt(midY);
+                    // 行はまとまりの中心から置く（左・右そろえと単一行は、行ごとに x が違う）
+                    const blockCenter = boxX + H_LABEL_BACKGROUND_PAD + textW / 2;
+                    // 中央そろえは、どの行も棒に対する同じ位置（x・anchor）で描ける（1.35 までと同じ書き方）
+                    const centered = block.anchor === "middle";
+                    const text = textAt(midY);
+                    return {
+                        // 重なりを見る枠（背景を描くなら背景、描かないなら文字に 1px 足したもの。文字の縁の分も入れる）
+                        box: hitBoxOf(text, bgAt(midY), halo),
+                        stacked: stacked ? { stack: labelSpot.stack, text } : undefined,
+                        draw: () => (
+                            <g key={`dl-${key}`} className="data-label-group" pointerEvents="none">
+                                {dl.backgroundShow && (
+                                    <rect
+                                        x={boxX}
+                                        y={bgTop}
+                                        width={textW + H_LABEL_BACKGROUND_PAD * 2}
+                                        height={bgHeight}
+                                        rx={2}
+                                        fill={dl.backgroundColor}
+                                        fillOpacity={(100 - dl.backgroundTransparency) / 100}
+                                    />
+                                )}
+                                {lines.map((line, k) => (
+                                    <text
+                                        key={line.kind}
+                                        x={centered ? x : blockCenter + block.xs[k]}
+                                        y={midY + block.baselines[k]}
+                                        className={labelClassOf(line)}
+                                        textAnchor={centered ? anchor : block.anchor}
+                                        style={labelTextStyle(dl, line, d, autoColor, toneHere)}
+                                    >
+                                        {line.text}
+                                    </text>
+                                ))}
+                            </g>
+                        ),
+                    };
+                };
+                const outer = labelAt(hLabelPositionOf(d), false);
+                if (!outer) return null;
+                // 集合の「自動」は外に置き、ほかのラベルと重なれば、入るなら棒の中（内側上と同じ所）に置く（縦棒と同じ。標準と同じ）
+                const fallback = !stacked && dl.position === "auto" ? () => labelAt("insideTop", true) : null;
+                return { ...outer, order: labelSpot.order, ...(fallback ? { fallback } : {}) };
             })();
+            if (label) hDataLabelCandidates.push(label);
 
             return (
                 <g
                     key={key}
-                    className={`bar-item ${hoveredKey === key ? "hovered" : ""}`}
+                    className="bar-item"
                     onClick={(e) => {
                         e.stopPropagation();
                         if (d.selectionIds) onSelectMany?.(d.selectionIds, e.ctrlKey || e.metaKey);
@@ -2736,10 +3197,8 @@ export const App: React.FC<AppProps> = ({
                     onContextMenu={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        onContextMenu(d.selectionIds ? (null as unknown as ISelectionId) : d.selectionId, e.clientX, e.clientY);
+                        onContextMenu(d.selectionIds ?? [d.selectionId], e.clientX, e.clientY);
                     }}
-                    onMouseEnter={() => setHoveredKey(key)}
-                    onMouseLeave={() => setHoveredKey(null)}
                     {...keysOf({
                         label: seriesName ? `${d.category} ${seriesName}: ${d.formattedValue}` : `${d.category}: ${d.formattedValue}`,
                         onSelect: (multi) => (d.selectionIds ? onSelectMany?.(d.selectionIds, multi) : onSelect(d.selectionId, multi)),
@@ -2770,33 +3229,45 @@ export const App: React.FC<AppProps> = ({
                             style={{ fill: viewModel.highContrast?.selected ?? d.color, fillOpacity: baseFillOpacity }}
                         />
                     )}
-                    {label}
                 </g>
             );
         };
 
-        /** 合計ラベル（積み上げ）。正の棒の右の端・負の棒の左の端の外側に置く */
-        const renderHTotals = (g: CategoryGroup, cy: number, xOffset: number, yOffset: number) => {
+        /**
+         * 合計ラベル（積み上げ）。正の棒の右の端・負の棒の左の端の外側に置く。描く範囲（yOffset〜yOffset + plotHeight）の上下から
+         * はみ出すラベルは、収まるだけ内側へ寄せる（縦棒と同じ shiftIntoSpan）。
+         * 置いた合計ラベルと重なるものは省く（縦棒と同じ。上のカテゴリのものが残る。重なりは寄せたあとの位置で見る）。重なりは背景の箱で見る
+         */
+        const renderHTotals = (g: CategoryGroup, cy: number, xOffset: number, yOffset: number, stack: string) => {
             const tl = viewModel.totalLabels;
             const t = g.totals;
             if (!tl.show || !t) return null;
-            const labels: Array<{ key: string; text: string; ratio: number; positive: boolean }> = [];
-            if (tl.split) {
-                if (t.hasPositive) labels.push({ key: "pos", text: t.positiveText, ratio: t.positiveEndRatio, positive: true });
-                if (t.hasNegative) labels.push({ key: "neg", text: t.negativeText, ratio: t.negativeEndRatio, positive: false });
-            } else if (t.hasPositive || t.hasNegative) {
-                const positive = t.net >= 0 ? t.hasPositive : !t.hasNegative;
-                labels.push({ key: "net", text: t.netText, ratio: positive ? t.positiveEndRatio : t.negativeEndRatio, positive });
-            }
+            const labels = totalLabelsOf(t, tl.split);
             const fontPx = tl.fontSize * PT_TO_PX;
+            const font = { family: tl.fontFamily, size: fontPx, bold: tl.bold, italic: tl.italic, underline: tl.underline };
             return labels.map((label) => {
-                const outwardRight = label.positive !== valAxis.invertRange;
+                const outwardRight = label.up !== valAxis.invertRange;
                 const edgeX = xOffset + xOfRatio(label.ratio);
-                return (
+                const x = outwardRight ? edgeX + TOTAL_LABEL_GAP : edgeX - TOTAL_LABEL_GAP;
+                const centerBaseline = yOffset + cy + fontPx * 0.35;
+                const width = measureTextWidth(label.text, font);
+                const left = outwardRight ? x : x - width;
+                // 描くものの上下の端（背景があれば背景、無ければ文字の四角）
+                const inkTop = centerBaseline - fontPx * TOTAL_LABEL_ASCENT - (tl.backgroundShow ? LABEL_PADDING / 2 : 0);
+                const inkBottom = inkTop + fontPx + (tl.backgroundShow ? LABEL_PADDING : 0);
+                const baseline = centerBaseline + shiftIntoSpan(inkTop, inkBottom, yOffset, yOffset + plotHeight);
+                const emTop = baseline - fontPx * TOTAL_LABEL_ASCENT;
+                const boxTop = emTop - LABEL_PADDING / 2;
+                const hit = hitBoxOf(
+                    { x0: left, x1: left + width, y0: emTop, y1: emTop + fontPx },
+                    tl.backgroundShow ? { x0: left - LABEL_PADDING, x1: left + width + LABEL_PADDING, y0: boxTop, y1: boxTop + fontPx + LABEL_PADDING } : null
+                );
+                if (!hLabelBoxes.place({ ...hit, stack, background: tl.backgroundShow })) return null;
+                const text = (
                     <text
                         key={`total-${label.key}`}
-                        x={outwardRight ? edgeX + 4 : edgeX - 4}
-                        y={yOffset + cy + fontPx * 0.35}
+                        x={x}
+                        y={baseline}
                         className="total-label"
                         textAnchor={outwardRight ? "start" : "end"}
                         pointerEvents="none"
@@ -2807,6 +3278,22 @@ export const App: React.FC<AppProps> = ({
                     >
                         {label.text}
                     </text>
+                );
+                if (!tl.backgroundShow) return text;
+                // 背景は縦棒と同じ形（文字の幅に余白を足した角丸の箱）。文字の始まりの側から広げる
+                return (
+                    <g key={`total-${label.key}`} className="total-label-group" pointerEvents="none">
+                        <rect
+                            x={left - LABEL_PADDING}
+                            y={boxTop}
+                            width={width + LABEL_PADDING * 2}
+                            height={fontPx + LABEL_PADDING}
+                            rx={2}
+                            fill={tl.backgroundColor}
+                            fillOpacity={(100 - tl.backgroundTransparency) / 100}
+                        />
+                        {text}
+                    </g>
                 );
             });
         };
@@ -2970,16 +3457,16 @@ export const App: React.FC<AppProps> = ({
                                     ? [...shownLayers].reverse().flatMap((l) => {
                                           const draw = layerDrawsX.get(l)!;
                                           return drawOrder(layerPointsOf(g, l)).map(([d, s]) =>
-                                              renderHBar(d, cy + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0) + draw.offset, `${i}-${s}-${l}`, xOffset, yOffset, draw)
+                                              renderHBar(d, cy + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0) + draw.offset, `${i}-${s}-${l}`, xOffset, yOffset, dataLabelSpotOf(s, i, l), draw)
                                           );
                                       })
                                     : drawOrder(g.points).map(([d, s]) =>
-                                          renderHBar(d, cy + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0), `${i}-${s}`, xOffset, yOffset)
+                                          renderHBar(d, cy + (stacked ? 0 : cluster.offsets[viewModel.seriesPositions[s] ?? s] ?? 0), `${i}-${s}`, xOffset, yOffset, dataLabelSpotOf(s, i, 0))
                                       )}
                                 {outlineOnlyX && !layered && renderHStackOutline(g, cy, xOffset, yOffset)}
                                 {viewModel.measureGroups
-                                    ? shownLayers.map((l) => <g key={`totals-${l}`}>{renderHTotals(withLayerTotals(g, l), cy + layerDrawsX.get(l)!.offset, xOffset, yOffset)}</g>)
-                                    : frontTotalsX && renderHTotals(g, cy + frontShiftX, xOffset, yOffset)}
+                                    ? shownLayers.map((l) => <g key={`totals-${l}`}>{renderHTotals(withLayerTotals(g, l), cy + layerDrawsX.get(l)!.offset, xOffset, yOffset, stackOf(i, l))}</g>)
+                                    : frontTotalsX && renderHTotals(g, cy + frontShiftX, xOffset, yOffset, stackOf(i, 0))}
                                 {namesShown && nameOf(g) !== null && !viewModel.noCategory && (
                                     <g {...categoryLabelHit(i, g.category)}>
                                         <text
@@ -3001,6 +3488,8 @@ export const App: React.FC<AppProps> = ({
                         );
                     })}
                 </g>
+                {/* 棒をすべて描いてから、重なるデータ ラベルを省いて描く（置いた合計ラベルと重なるものも省く） */}
+                <g className="data-labels-group">{keepUnoverlapped(hDataLabelCandidates, hLabelBoxes)}</g>
                 {levelColumns.length > 0 && renderHLevelColumns(xOffset, yOffset)}
                 {rankBandOn && (
                     <g className="pareto-ranks">
@@ -3053,7 +3542,7 @@ export const App: React.FC<AppProps> = ({
                                     line,
                                     j,
                                     (i) => yOffset + centerOf(i),
-                                    (ratio) => xOffset + (onAxis2(line) ? plotWidth * Math.max(0, Math.min(1, ratio)) : xOfRatio(ratio)),
+                                    lineXOf(line, xOffset),
                                     true,
                                     [xOffset, xOffset + plotWidth],
                                     boxes
@@ -3071,15 +3560,19 @@ export const App: React.FC<AppProps> = ({
 
         /** 値の軸（目盛り・タイトル・単位ラベル）とカテゴリの軸のタイトル。スクロールしても動かない */
         const plotRightX = marginLeft + plotWidth;
+        // 「プロット エリアの右上」の単位は描く範囲の右の端に置くので、右の余白を目盛りの数字の分だけ広げると左へ寄る。
+        // ドリルの位置は、広げたあとの単位の左の端から 8px 手前までにとどめる（見積もりの drillMaxWidth より広くはしない）
+        const drillPathWidth = badgeAtTopRight ? Math.min(drillMaxWidth, plotRightX - badgeWidth - 8 - 4) : drillMaxWidth;
 
         /** 第 2 X 軸の目盛り・タイトル・単位ラベル。値の軸の反対側（上か下）に、プロットから外へ向かって並べる */
         const renderH2Axis = () => {
             if (!axis2On) return null;
-            const tickY = axis2AtTop ? marginTop - 4 : marginTop + viewHeight + axis2TickFontPx + 2;
+            const tickY = axis2AtTop ? marginTop - 4 : marginTop + viewHeight + axis2TickFontPx + (axis2TicksAtBottom ? AXIS_TEXT_DROP : 2);
             const titleY = axis2AtTop ? marginTop - axis2TickRow - 4 : marginTop + viewHeight + axis2TickRow + axis2TitleFontPx + 2;
+            // 下に置くときは、字の下側（UNIT_TEXT_DESCENT）までを単位の行に入れる（大きい字でもビューの下の端を越えない）
             const badgeY = axis2AtTop
                 ? marginTop - axis2TickRow - axis2TitleHeight - 4
-                : marginTop + viewHeight + axis2TickRow + axis2TitleHeight + axis2BadgeFontPx + 2;
+                : marginTop + viewHeight + axis2BlockHeight - axis2BadgeFontPx * UNIT_TEXT_DESCENT;
             return (
                 <g className="y2-axis-container">
                     {axis2.valueShow &&
@@ -3120,11 +3613,11 @@ export const App: React.FC<AppProps> = ({
                     )}
                     {axis2BadgeText && (
                         <text
-                            x={plotRightX}
+                            x={edgeBadgeXOf(axis2BadgeText, y2UnitFont, plotRightX)}
                             y={badgeY}
                             className="unit-axis-badge unit-axis2-badge"
                             textAnchor="end"
-                            style={{ fontSize: `${axis2.unitFontSize}pt`, fill: axis2.unitColor }}
+                            style={{ ...fontStyleOf(y2UnitFont), fill: axis2.unitColor }}
                         >
                             {axis2BadgeText}
                         </text>
@@ -3133,11 +3626,13 @@ export const App: React.FC<AppProps> = ({
             );
         };
         const renderHAxes = () => {
-            const tickY = valueAtTop ? marginTop - 4 : marginTop + viewHeight + valTickFontPx + 2;
-            const titleY = valueAtTop ? marginTop - tickRowHeight - 4 : marginTop + viewHeight + tickRowHeight + valTitleFontPx + 2;
+            const tickY = valueAtTop ? marginTop - 4 : marginTop + viewHeight + valTickFontPx + AXIS_TEXT_DROP;
+            const titleY = valueAtTop ? marginTop - tickRowHeight - 4 : marginTop + viewHeight + tickRowBelow + valTitleFontPx * AXIS_TITLE_ASCENT;
+            // 下に置くときは、字の下側（UNIT_TEXT_DESCENT）までを単位の行に入れる（大きい字でもビューの下の端を越えない。
+            // 1.36.11.47 までは行の下の端の 2px 上がベースラインで、目盛り 28pt くらいから字の下がビューの下の端を越えた）
             const badgeY = valueAtTop
                 ? marginTop - tickRowHeight - valTitleHeight - 4
-                : marginTop + viewHeight + tickRowHeight + valTitleHeight + badgeFontPx + 2;
+                : marginTop + viewHeight + axisBlockBelow - badgeFontPx * UNIT_TEXT_DESCENT;
             const valueTextStyle = {
                 ...fontStyleOf(fontOf(valAxis)),
                 fill: valAxis.labelColor,
@@ -3182,23 +3677,22 @@ export const App: React.FC<AppProps> = ({
                     )}
                     {badgeText && (
                         <text
-                            x={plotRightX}
+                            x={edgeBadgeXOf(badgeText, yUnitFont, plotRightX)}
                             y={badgeAtTopRight ? 10 + topRowFontPx * 0.85 : badgeY}
                             className="unit-axis-badge"
                             textAnchor="end"
-                            style={{ fontSize: `${viewModel.unitInfo.fontSize}pt`, fill: viewModel.unitInfo.color }}
+                            style={{ ...fontStyleOf(yUnitFont), fill: viewModel.unitInfo.color }}
                         >
                             {badgeText}
                         </text>
                     )}
                     {drillPathOn &&
-                        renderDrillPath(4, 10 + topRowFontPx * 0.85, drillMaxWidth)}
+                        renderDrillPath(4, 10 + topRowFontPx * 0.85, drillPathWidth)}
                     {renderH2Axis()}
                     {hasCatTitle && (
                         <text
-                            transform={`translate(${4 + catTitleFontPx * 0.5}, ${marginTop + viewHeight / 2}) rotate(-90)`}
+                            transform={`translate(${sideTitleBaselineOf(catTitleFontPx, catTitleInk)}, ${marginTop + viewHeight / 2}) rotate(-90)`}
                             textAnchor="middle"
-                            dominantBaseline="central"
                             className="x-axis-title"
                             style={{
                                 ...fontStyleOf(fontOf(catAxis, "title")),
@@ -3221,7 +3715,9 @@ export const App: React.FC<AppProps> = ({
         if (scrolls) {
             return (
                 <>
-                    {/* 縦にスクロールする領域。カテゴリ名も棒と一緒に流れる */}
+                    {/* 縦にスクロールする領域。カテゴリ名も棒と一緒に流れる。右の余白も箱に入れ、スクロールバーはビューの右の端に出す
+                        （描く範囲の右の端で切ると、右の端に付けて置いたラベルの文字の縁や斜体のはみ出しが切れる。スクロールしない形と同じく、
+                        右の余白の中まで描ける） */}
                     <div
                         className="unit-bar-vscroll"
                         ref={scrollStart.ref}
@@ -3230,21 +3726,21 @@ export const App: React.FC<AppProps> = ({
                             position: "absolute",
                             left: marginLeft - labelAreaWidth,
                             top: marginTop,
-                            width: labelAreaWidth + plotWidth + SCROLLBAR_WIDTH,
+                            width: labelAreaWidth + plotWidth + plotRight + SCROLLBAR_WIDTH,
                             height: viewHeight,
                             overflowX: "hidden",
                             overflowY: "auto",
                         }}
                     >
                         <svg
-                            width={labelAreaWidth + plotWidth}
+                            width={labelAreaWidth + plotWidth + plotRight}
                             height={plotHeight}
                             className="unit-bar-plot-svg"
                             style={{ display: "block" }}
                             role="group"
                             aria-label="単位つき棒グラフ（プロット）"
                         >
-                            {renderHPlot(labelAreaWidth, 0, labelAreaWidth - 6)}
+                            {renderHPlot(labelAreaWidth, 0, labelAreaWidth - SIDE_NAME_PLOT_GAP)}
                         </svg>
                     </div>
                     <svg
@@ -3262,7 +3758,7 @@ export const App: React.FC<AppProps> = ({
         }
         return (
             <svg width={width} height={height} className="unit-bar-svg" role="group" aria-label="単位つき棒グラフ">
-                {renderHPlot(marginLeft, marginTop, marginLeft - 6)}
+                {renderHPlot(marginLeft, marginTop, marginLeft - SIDE_NAME_PLOT_GAP)}
                 {renderHAxes()}
             </svg>
         );
@@ -3310,29 +3806,19 @@ export const App: React.FC<AppProps> = ({
      * 横棒では線が上から下へ流れるので、縦の短い線にする（ユーザーの提案）。
      * 線を出していなければマーカーだけ（線もマーカーも出していなければ、印が消えないよう線を引く）
      */
-    const renderLegendLineGlyph = (entry: LegendItemInfo, item: LegendItemBox, dimmed: boolean, r: number) => {
+    const renderLegendLineGlyph = (entry: LegendItemInfo, item: LegendItemBox, dimmed: boolean) => {
         const line = viewModel.lines[entry.index];
         const mk = line?.marker ?? viewModel.markers;
         const dim = dimmed ? HIGHLIGHT_DIM_FACTOR : 1;
         const color = line?.color ?? item.color;
-        const width = Math.max(1, Math.min(3, line?.width ?? 2));
-        // スタイル：線とマーカー（既定・1.35 まで）・線・マーカー・マーカー（円）
-        const style = viewModel.legend.markerStyle;
-        const markerOnly = style === "markerOnly" || style === "markerCircleDefault";
-        const drawLine = style === "lineOnly" || (!markerOnly && (!line || line.lineShow || !mk.show));
-        const drawMarker = markerOnly || (style !== "lineOnly" && mk.show);
-        const markerShape = style === "markerCircleDefault" ? "circle" : mk.shape;
+        // 線・マーカーの出し方と大きさ、線の模様と端の形（組み方に渡した印の幅と同じ形。legendGlyph.ts）
+        const glyph = legendLineGlyphOf(legendGlyphSpecOf(entry));
+        const { drawLine, drawMarker, markerShape, half } = glyph;
         const markerFill = viewModel.legend.matchLineColor ? color : mk.color || color;
-        const custom = line?.lineStyle === CUSTOM_LINE_STYLE ? lineStrokeOf(line, width) : null;
-        const dash = custom
-            ? custom.dashArray
-            : line?.lineStyle === "dashed" ? `${width * 2} ${width * 1.5}` : line?.lineStyle === "dotted" ? `${width * 0.1} ${width * 2}` : undefined;
-        const cx = item.x + item.glyphWidth / 2;
+        // 線とマーカーの真ん中。印の幅は描いた印の見える幅なので、見える左の端が項目の左の端（item.x）に来るように置く
+        // （破線・点線は最後のダッシュが線の終わりより手前で終わるので、真ん中は印の幅の真ん中とは限らない）。どこも見えない印は真ん中
+        const cx = glyph.ink ? item.x - glyph.ink.left : item.x + item.glyphWidth / 2;
         const horizontal = viewModel.orientation === "horizontal";
-        // 横棒の縦の線は、行の高さに収まる長さ
-        const half = horizontal ? r * 1.4 : item.glyphWidth / 2;
-        // マーカーは行に収まる大きさまで（半径はサイズの 0.75 倍）
-        const size = Math.min(mk.size, (r * 1.3) / 0.75);
         return (
             <>
                 {drawLine && (
@@ -3343,15 +3829,15 @@ export const App: React.FC<AppProps> = ({
                         y2={horizontal ? item.y + half : item.y}
                         className="legend-line"
                         stroke={color}
-                        strokeWidth={width}
-                        strokeDasharray={dash}
-                        strokeLinecap={custom ? custom.lineCap : line?.lineStyle === "dotted" ? "round" : "butt"}
+                        strokeWidth={glyph.lineWidth}
+                        strokeDasharray={glyph.dash}
+                        strokeLinecap={glyph.cap}
                         strokeOpacity={dim}
                     />
                 )}
                 {drawMarker && (
                     <path
-                        d={markerPath(markerShape, cx, item.y, markerOnly ? Math.min(Math.max(size, r / 0.75), (r * 1.3) / 0.75) : size, horizontal)}
+                        d={markerPath(markerShape, cx, item.y, glyph.markerSize, horizontal)}
                         transform={mk.rotation && markerShape !== "circle" ? `rotate(${mk.rotation} ${cx} ${item.y})` : undefined}
                         className="legend-marker"
                         style={{
@@ -3538,7 +4024,7 @@ export const App: React.FC<AppProps> = ({
                 {layout.title && (
                     <text
                         x={layout.title.x}
-                        y={layout.title.y + legendFontPx * 0.35}
+                        y={legendBaselineOf(layout.title.y, legendFontPx)}
                         className="legend-title"
                         style={{ ...textStyle, fontWeight: "bold" }}
                     >
@@ -3546,7 +4032,7 @@ export const App: React.FC<AppProps> = ({
                     </text>
                 )}
                 {layout.groupTitles.map((t) => (
-                    <text key={`legend-group-${t.text}`} x={t.x} y={t.y + legendFontPx * 0.35} className="legend-title" style={{ ...textStyle, fontWeight: "bold" }}>
+                    <text key={`legend-group-${t.text}`} x={t.x} y={legendBaselineOf(t.y, legendFontPx)} className="legend-title" style={{ ...textStyle, fontWeight: "bold" }}>
                         {t.text}
                     </text>
                 ))}
@@ -3594,11 +4080,11 @@ export const App: React.FC<AppProps> = ({
                             {entry?.kind === "layer"
                                 ? renderLegendLayerGlyph(entry, item, dimmed, r)
                                 : entry?.kind === "line"
-                                  ? renderLegendLineGlyph(entry, item, dimmed, r)
+                                  ? renderLegendLineGlyph(entry, item, dimmed)
                                   : renderLegendBarGlyph(entry, item, dimmed, r)}
                             <text
-                                x={item.x + item.glyphWidth + LEGEND_MARKER_GAP}
-                                y={item.y + legendFontPx * 0.35}
+                                x={item.textX}
+                                y={legendBaselineOf(item.y, legendFontPx)}
                                 className="legend-label"
                                 style={{ ...textStyle, fontWeight: lg.bold ? "bold" : "normal" }}
                             >
@@ -3693,6 +4179,17 @@ export const App: React.FC<AppProps> = ({
             renderBody(width, height)
         );
 
+    // 「画像としてコピー」：スクロールするときは、スクロールしない大きさで同じグラフを見えない所に描き直し、隠れた所まで撮る（shared/wholeImage）。
+    // 描き直したほうは画面と同じ値・選択で描き、visual.ts へ値の軸の長さを知らせない。大きすぎるとき・スクロールしないときは見えている範囲
+    const captureWhole = async (root: HTMLElement, background: string) =>
+        (await wholeChartImage(
+            root,
+            background,
+            grownSize(viewport, hiddenOf(root.querySelector(SCROLLERS))),
+            (size) => <App {...props} viewport={size} onValueAxisLength={undefined} />,
+            (host) => host.querySelector(SCROLLERS)
+        )) ?? chartImage(root, background);
+
     return (
         <div
             className="unit-bar-container"
@@ -3703,7 +4200,7 @@ export const App: React.FC<AppProps> = ({
             onClick={() => onClearSelection?.()}
             onContextMenu={(e) => {
                 e.preventDefault();
-                onContextMenu(null as unknown as ISelectionId, e.clientX, e.clientY);
+                onContextMenu([], e.clientX, e.clientY);
             }}
         >
             {toolbarOn && renderToolbar()}
@@ -3736,11 +4233,13 @@ export const App: React.FC<AppProps> = ({
             {interactive && viewModel.copyButton && (
                 <CopyImageButton
                     alt="グラフの画像"
-                    stamp={[viewModel, viewport.width, viewport.height, selectedIds, legendPage]}
+                    // 描いたものが変わる値。凡例で絞った比較レイヤーは中身で比べる（同じなら作り直さない）
+                    stamp={[viewModel, viewport.width, viewport.height, selectedIds, legendPage, pickedLayers.join(",")]}
                     {...(viewModel.highContrast
                         ? { background: viewModel.highContrast.background, colors: { foreground: viewModel.highContrast.foreground, background: viewModel.highContrast.background } }
                         : {})}
                     browserMenu={browserMenu}
+                    capture={captureWhole}
                 />
             )}
         </div>

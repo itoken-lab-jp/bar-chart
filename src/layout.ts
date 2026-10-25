@@ -81,6 +81,29 @@ export function layerLayout(slotWidth: number, count: number, overlap: number, r
 }
 
 /**
+ * 凡例で選んだ比較レイヤーのうち、いまの枚数で効く選択。今の枚数の外の番号が 1 つでもあれば（比較レイヤーが減った・比較を外した更新）、
+ * 選択は無い（すべて描く）とする。組む側（値の軸の余白）・描く側・凡例を押したときの組み直しの判断は、どれもこの関数を通す
+ */
+export function pickedLayersOf(layerCount: number, visibleLayers: readonly number[]): number[] {
+    return visibleLayers.some((l) => l >= layerCount) ? [] : [...visibleLayers];
+}
+
+/**
+ * 描く比較レイヤー（compareLayers の添字）。凡例で選んだレイヤーがあれば、それだけを選んだ順に（手前から）。無ければすべて。
+ * 比較レイヤーが 1 枚以下なら手前の 1 枚
+ */
+export function shownLayersOf(layerCount: number, visibleLayers: readonly number[]): number[] {
+    const picked = pickedLayersOf(layerCount, visibleLayers);
+    return layerCount > 1 && picked.length ? picked : Array.from({ length: Math.max(1, layerCount) }, (_, l) => l);
+}
+
+/** データ ラベルを描く比較レイヤー。メジャーを並べるときは描くすべて、比較で重ねるときは描くうちのいちばん手前の 1 枚 */
+export function labelLayersOf(layerCount: number, visibleLayers: readonly number[], measureGroups: boolean): number[] {
+    const shown = shownLayersOf(layerCount, visibleLayers);
+    return measureGroups ? shown : shown.slice(0, 1);
+}
+
+/**
  * いちばん奥の不透明度 back（0〜1）まで、手前から同じ割合で薄くする。k は手前から何枚目か（0 が手前）
  */
 export function layerOpacity(k: number, count: number, back: number): number {
@@ -96,11 +119,6 @@ export interface LevelRun {
     text: string;
 }
 
-/**
- * 階層の上のレベル（level 番目）で、同じ親が続くところを 1 つにまとめる。
- * 親は上のレベルから level 番目までの並びで見る。上が違えば、同じ名前（別の年の Q1 など）でも別の区切り。
- * keys（元の値のキー）があればそれで見分ける。表示が同じでも値が違えば別の区切り
- */
 /**
  * 縦のグリッド線を引く階層（上から何段目か）。書式の値は "categories"（カテゴリごと）、
  * "levels"（1 つ上のレベル。1.36.10.0 までの「階層の区切り」）、"level<n>"（上から n 段目）。
@@ -124,6 +142,11 @@ export function categoryGridBreaks(levels: string[][], level: number | null, key
         .map((run) => run.start);
 }
 
+/**
+ * 階層の上のレベル（level 番目）で、同じ親が続くところを 1 つにまとめる。
+ * 親は上のレベルから level 番目までの並びで見る。上が違えば、同じ名前（別の年の Q1 など）でも別の区切り。
+ * keys（元の値のキー）があればそれで見分ける。表示が同じでも値が違えば別の区切り
+ */
 export function levelRunsOf(levels: string[][], level: number, keys?: string[][]): LevelRun[] {
     const runs: LevelRun[] = [];
     let key: string | null = null;

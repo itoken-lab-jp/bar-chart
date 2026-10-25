@@ -1,11 +1,11 @@
 {
   "name": "bar-chart",
-  "version": "1.36.11.0",
+  "version": "1.36.15.0",
   "description": "標準では届かないグラフ表現を足していく棒グラフ",
   "license": "MIT",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19.0"
   },
   "scripts": {
     "package": "pbiviz package --skip-api",

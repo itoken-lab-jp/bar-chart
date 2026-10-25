@@ -10,9 +10,10 @@ import IVisualHost = powerbi.extensibility.visual.IVisualHost;
 
 import { COMPARE_DIRECTIONS, COMPARE_ORDERS, MAX_COMPARE_LAYERS, VisualFormattingSettingsModel } from "./settings";
 import { categoricalOf } from "./matrixDataView";
-import { CalculationRuntime, CompareSettings, DataPoint, LegendItemInfo, ValueExtent, ViewModel, transform, tooltipStackOf } from "./viewModel";
+import { CalculationRuntime, CompareSettings, DataPoint, LegendItemInfo, LabelRoom, ValueExtent, ViewModel, readTransform, transform, tooltipStackOf, unionLabelRoom } from "./viewModel";
 import { tooltipItemsOf } from "./tooltip";
-import { layerOpacity } from "./layout";
+import { labelLayersOf, layerOpacity } from "./layout";
+import { formatOfColumn, nameTextOf } from "./shared/dataValue";
 
 /** 比較レイヤー 1 枚ぶんの元データ。view はこのレイヤーを「値」として読む DataView */
 interface LayerSource {
@@ -35,6 +36,7 @@ export const COMPARE_LINE_ONLY_TITLE = "折れ線だけでは比較で重ねま�
  *   （行の木を値ごとに分ける。docs: dev/probes/compareRowsProbe/README.md）。どれを手前にするかは「比較」カードで選ぶ
  *
  * レイヤーごとに transform を走らせ（奥のレイヤーは、そのレイヤーの値を「値」として読む）、手前のレイヤーに重ねる。
+ * 行を読むのはレイヤーごとに 1 回。読み終えたところで止め、すべてのレイヤーの範囲をそろえてから続きを組む。
  * 積み上げ・累計・ツールヒントは、レイヤーごとに今までと同じ規則で計算される。
  * どのレイヤーも同じ軸で描くよう、軸はすべてのレイヤーの範囲で決める。カテゴリの並びと「その他」にまとめる行は、
  * 手前のレイヤーで決めたものを奥のレイヤーにも使う（値順でも、奥の棒が別のカテゴリの位置に入れ替わらない）
@@ -53,46 +55,67 @@ export function transformWithLayers(
     const compare = grouped ? GROUPED_LAYOUT : compareSettingsOf(settings);
     const view = grouped ? measureViewOf(whole!, keyOf(measures[0])) : whole;
     const sources = split || grouped ? [] : compareSourcesOf(view);
-    const front = transform(view, host, settings, runtime);
     const show = grouped || (settings.compare.show.value ?? true);
     const layers: LayerSource[] = split
         ? split.layers
         : grouped
             ? measures.map((source) => ({ name: source.displayName ?? "", view: measureViewOf(whole!, keyOf(source)) }))
             : [{ name: frontNameOf(view), view: view! }, ...sources.map((source) => ({ name: source.displayName ?? "", view: layerViewOf(view!, source) }))];
-    // 折れ線だけ（値が空）のときは、重ねる棒が無いので重ねない。線は手前の値で描き、そのことを知らせる
-    if (front.lineOnly && layers.length > 1 && show) {
-        const compareLineOnlyWarning = split
-            ? `「比較の列」は棒を前後に重ねる欄で、折れ線だけのときは重ねません。線は${split.name}が「${layers[0].name}」の値で描いています。`
-            : "「比較値」は棒を前後に重ねる欄で、折れ線だけのときは描きません。";
-        return { ...front, compare, compareLineOnlyWarning };
-    }
-    const layered = layers.length > 1 && show && !front.isEmpty && !front.pareto.enabled;
-    // 「比較の列」で受けて重ねないとき（オフ・パレート・値が 1 つ）は、手前の値だけを描く
-    if (!layered) return { ...front, compare, ...(split?.warning && show ? { compareWarning: split.warning } : {}) };
+    // 手前のレイヤーの行を読む。重ねないなら、このレイヤーの範囲のまま続きを組んで返す
+    const frontRead = readTransform(view, host, settings, runtime);
+    const alone = (): ViewModel => {
+        const pending = frontRead.resume({});
+        return pending.finish(pending.labelRoom);
+    };
+    const notLayered = (front: ViewModel): ViewModel => {
+        // 折れ線だけ（値が空）のときは、重ねる棒が無いので重ねない。線は手前の値で描き、そのことを知らせる
+        if (front.lineOnly && layers.length > 1 && show) {
+            const compareLineOnlyWarning = split
+                ? `「比較の列」は棒を前後に重ねる欄で、折れ線だけのときは重ねません。線は${split.name}が「${layers[0].name}」の値で描いています。`
+                : "「比較値」は棒を前後に重ねる欄で、折れ線だけのときは描きません。";
+            return { ...front, compare, compareLineOnlyWarning };
+        }
+        // 「比較の列」で受けて重ねないとき（オフ・パレート・値が 1 つ）は、手前の値だけを描く
+        return { ...front, compare, ...(split?.warning && show ? { compareWarning: split.warning } : {}) };
+    };
+    // 重ねうるのは、レイヤーが 2 枚以上で「比較」がオンで、折れ線だけ・パレートでないとき（データが無ければ読む前に組み終えて重ねない）
+    if (!(layers.length > 1 && show && frontRead.canLayer)) return notLayered(alone());
 
+    const frontBasis = frontRead.basis;
     const backViews = layers.slice(1, MAX_COMPARE_LAYERS).map((layer) => categoricalOf(layer.view)!);
     const order = {
-        keepRows: front.basis.keepRows ?? undefined,
-        displayOrder: front.basis.displayOrder,
-        seriesOrder: front.basis.seriesOrder,
+        keepRows: frontBasis.keepRows ?? undefined,
+        displayOrder: frontBasis.displayOrder,
+        seriesOrder: frontBasis.seriesOrder,
     };
-    // 1 回目でレイヤーごとの範囲を集め、2 回目ですべてのレイヤーの範囲の軸で描き直す
-    const firstPass = backViews.map((v) => transform(v, host, settings, runtime, order));
-    const extent = unionOf([front.basis.extent, ...firstPass.map((vm) => vm.basis.extent)]);
-    const merged = transform(view, host, settings, runtime, { extent, ...(grouped ? { valueTitleNames: layers.map((l) => l.name) } : {}) });
-    const backs = backViews.map((v) => transform(v, host, settings, runtime, { ...order, extent }));
+    // 奥のレイヤーの行を読んで範囲を集め、すべてのレイヤーの範囲の軸でどのレイヤーも続きを組む（行は読み直さない）
+    const backReads = backViews.map((v) => readTransform(v, host, settings, runtime, order));
+    const extent = unionOf([frontBasis.extent, ...backReads.map((read) => read.basis.extent)]);
+    const pendingFront = frontRead.resume({ extent, ...(grouped ? { valueTitleNames: layers.map((l) => l.name) } : {}) });
+    const pendingBacks = backReads.map((read) => read.resume({ extent }));
+    // 値の軸の余白は、データ ラベルを描くすべてのレイヤー（メジャーを並べるなら描くすべて、重ねるなら描くうちのいちばん手前。
+    // 凡例で隠したレイヤーは除く）のラベルで取り、どのレイヤーも同じ範囲で組む
+    const layerLabelRooms = [pendingFront, ...pendingBacks].map((pending) => pending.labelRoom);
+    const room = unionLabelRoom(labelLayersOf(layerLabelRooms.length, runtime.visibleLayers ?? [], grouped).map((l) => layerLabelRooms[l]));
+    const merged = pendingFront.finish(room);
+    // 棒が 1 本も無かった（値がすべて空白など）なら重ねず、手前の値だけを組み直して描く（棒が無いので軽い）
+    if (merged.isEmpty) return notLayered(transform(view, host, settings, runtime));
+    const backs = pendingBacks.map((pending) => pending.finish(room));
 
-    const backsByRow = backs.map((vm) => new Map(vm.categoryGroups.map((g) => [g.rowIndex, g.points])));
+    // 行の番号で引く（行ごとに探すと、行の数の 2 乗になる）
+    const backsByRow = backs.map((vm) => new Map(vm.categoryGroups.map((g) => [g.rowIndex, g])));
     for (const group of merged.categoryGroups) {
         group.points.forEach((d) => (d.layerIndex = 0));
+        const frontBySeries = new Map<number, DataPoint>();
+        // 同じ系列が 2 つあれば先のもの（find と同じ）
+        for (const p of group.points) if (!frontBySeries.has(p.seriesIndex)) frontBySeries.set(p.seriesIndex, p);
         group.layerPoints = backsByRow.map((byRow, k) => {
-            const points: DataPoint[] = byRow.get(group.rowIndex) ?? [];
+            const points: DataPoint[] = byRow.get(group.rowIndex)?.points ?? [];
             points.forEach((d) => {
                 d.layerIndex = k + 1;
                 // 色は手前の同じ系列の棒にそろえる（奥のレイヤーは別のメジャーなので、テーマの色の割り当てが変わる）。
                 // レイヤーの違いは濃さで見せる
-                const front = group.points.find((p) => p.seriesIndex === d.seriesIndex);
+                const front = frontBySeries.get(d.seriesIndex);
                 if (front) {
                     d.color = front.color;
                     d.borderColor = front.borderColor;
@@ -100,7 +123,7 @@ export function transformWithLayers(
             });
             return points;
         });
-        if (grouped) group.layerTotals = backs.map((vm) => vm.categoryGroups.find((g) => g.rowIndex === group.rowIndex)?.totals ?? null);
+        if (grouped) group.layerTotals = backsByRow.map((byRow) => byRow.get(group.rowIndex)?.totals ?? null);
     }
     const compareLayers = layers.slice(0, MAX_COMPARE_LAYERS).map((layer) => ({ name: layer.name }));
     const legendEntries = legendEntriesOf(merged, compareLayers.map((l) => l.name), compare, settings.legend.reverseOrder.value ?? false);
@@ -109,6 +132,7 @@ export function transformWithLayers(
         compare,
         compareLayers,
         ...(grouped ? { measureGroups: true } : {}),
+        layerLabelRooms,
         layerTooltips: [merged.tooltip, ...backs.map((vm) => vm.tooltip)],
         legendEntries,
         legend: { ...merged.legend, show: (settings.legend.show.value ?? true) && legendEntries.length > 0 && (merged.seriesMode || merged.legend.show || legendEntries.length > 1) },
@@ -146,7 +170,12 @@ export function splitByCompareBy(
     // カテゴリが無い（比較の列だけ）ときは分けない（比較の列をカテゴリとして描く）
     if (!dataView || !matrix?.rows?.root || depth <= 0) return null;
     const keyOf = (value: unknown) => (value instanceof Date ? `date:${value.getTime()}` : `${typeof value}:${String(value)}`);
-    const nameOf = (value: unknown) => (value === null || value === undefined || value === "" ? "(空白)" : value instanceof Date ? value.toLocaleDateString() : String(value));
+    // 値の名前は比較の列の書式で出す（カテゴリと同じ書き方。日付は書式どおりで、実行環境の言語に左右されない。
+    // 空白は「(空白)」、真偽は True・False、NaN・±Infinity は空白にせず字で出す）
+    const nameOf = nameTextOf(formatOfColumn(levels[depth].sources.find((source) => source.roles?.compareBy)));
+    // 1.36.10 までの名前（書式を通さない。日付は実行環境の toLocaleDateString）。その版で保存した「手前にする値の名前」を読むため
+    const legacyNameOf = (value: unknown) =>
+        value === null || value === undefined || value === "" ? "(空白)" : value instanceof Date ? value.toLocaleDateString() : String(value);
 
     // 列の値（届いた順。Power BI は列の並べ替えの順で返す）
     const values = new Map<string, unknown>();
@@ -166,7 +195,10 @@ export function splitByCompareBy(
     let ordered = [...values.keys()];
     if (String(card.order.value?.value ?? COMPARE_ORDERS.lastFront) !== COMPARE_ORDERS.firstFront) ordered.reverse();
     const frontName = (card.frontValue.value ?? "").trim();
-    const named = frontName ? ordered.find((key) => nameOf(values.get(key)) === frontName) : undefined;
+    // まず今の名前で探し、無ければ前の版の名前で探す
+    const named = frontName
+        ? (ordered.find((key) => nameOf(values.get(key)) === frontName) ?? ordered.find((key) => legacyNameOf(values.get(key)) === frontName))
+        : undefined;
     if (named) ordered = [named, ...ordered.filter((key) => key !== named)];
     const warning =
         ordered.length > MAX_COMPARE_LAYERS
@@ -352,6 +384,18 @@ function legendEntriesOf(vm: ViewModel, names: string[], compare: CompareSetting
     const lines = vm.legendEntries.filter((e) => e.kind === "line");
     // レイヤーは別のまとまり（見出し「比較」）として最後に置く。系列と折れ線は今までの並びのまま
     return [...bars, ...lines, ...layers];
+}
+
+/**
+ * 凡例で描くレイヤーを before から after に変えると、データ ラベルを描くレイヤーが変わって値の軸の余白が変わるか。
+ * 変わるなら組み直す（変わらなければ、組んだ viewModel のまま描き直す）
+ */
+export function labelRoomChanges(viewModel: ViewModel, before: readonly number[], after: readonly number[]): boolean {
+    const rooms: LabelRoom[] = viewModel.layerLabelRooms ?? [];
+    if (!rooms.some((room) => room.top.length || room.bottom.length)) return false;
+    const roomOf = (visible: readonly number[]) =>
+        JSON.stringify(unionLabelRoom(labelLayersOf(rooms.length, visible, !!viewModel.measureGroups).map((l) => rooms[l])));
+    return roomOf(before) !== roomOf(after);
 }
 
 /**

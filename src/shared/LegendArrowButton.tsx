@@ -19,23 +19,57 @@ export interface LegendPaging {
     arrows: { prev: LegendArrow; next: LegendArrow } | null;
 }
 
-/** 幅（間を含む）の並びを、room に収まるページに分ける。1 つで room を超える物はそのページに 1 つだけ置く */
-export function pagesByWidth(widths: number[], room: number, gap: number): number[][] {
-    const pages: number[][] = [];
+/** 行の分け方の指定 */
+export interface LineOptions {
+    /** true の物は、次の物と同じ行に置く（見出しだけが行の末に取り残されないように） */
+    joinNext?: (index: number) => boolean;
+    /** true の物は、行の頭に来たら置かない（文字の無い間など） */
+    dropAtStart?: (index: number) => boolean;
+}
+
+/**
+ * 幅の並びを左から詰めて、room に収まる行に分ける（返すのは行ごとの添字）。物のあいだに gap を空ける。
+ * 1 つ（joinNext でつないだ物はひとまとまり）で room を超えるときは、その行にそれだけを置く
+ */
+export function linesByWidth(widths: number[], room: number, gap: number, options: LineOptions = {}): number[][] {
+    const units: number[][] = [];
+    widths.forEach((_, i) => {
+        const last = units[units.length - 1];
+        if (last && options.joinNext?.(last[last.length - 1])) last.push(i);
+        else units.push([i]);
+    });
+    const lines: number[][] = [];
     let current: number[] = [];
     let used = 0;
-    widths.forEach((w, i) => {
-        const need = (current.length ? gap : 0) + w;
+    for (const unit of units) {
+        const unitWidth = unit.reduce((sum, i, k) => sum + (k ? gap : 0) + widths[i], 0);
+        const need = (current.length ? gap : 0) + unitWidth;
         if (current.length && used + need > room) {
-            pages.push(current);
+            lines.push(current);
             current = [];
             used = 0;
         }
-        used += (current.length ? gap : 0) + w;
-        current.push(i);
-    });
-    if (current.length) pages.push(current);
+        for (const i of unit) {
+            if (!current.length && options.dropAtStart?.(i)) continue;
+            used += (current.length ? gap : 0) + widths[i];
+            current.push(i);
+        }
+    }
+    if (current.length) lines.push(current);
+    return lines;
+}
+
+/** 行を rows 行ずつのページにまとめる（返すのは ページ → 行 → 添字） */
+export function pagesOfLines<T>(lines: T[], rows: number): T[][] {
+    const perPage = Math.max(1, Math.floor(rows));
+    const pages: T[][] = [];
+    for (let i = 0; i < lines.length; i += perPage) pages.push(lines.slice(i, i + perPage));
     return pages;
+}
+
+/** 幅（間を含む）の並びを、room に収まるページに分ける（1 ページ 1 行）。1 つで room を超える物はそのページに 1 つだけ置く */
+export function pagesByWidth(widths: number[], room: number, gap: number): number[][] {
+    return linesByWidth(widths, room, gap);
 }
 /** 動きを減らす設定・強制カラー（Windows のハイコントラスト）か。読めない環境では false */
 const mediaMatches = (query: string): boolean => {

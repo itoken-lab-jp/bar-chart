@@ -4,7 +4,8 @@
  * - マウスを乗せたとき・キーボードで来たときだけ、右下に小さく出す。入れ物の中のスクロールバーが右下にあれば、その内側に避ける
  * - 押すと、入れ物の中の見えているグラフを画像にしてクリップボードに入れ、「コピーしました」を短く出す（HTML で描いたものは capture に htmlImage）
  * - クリップボードに書けるのはクリックの操作の中だけなので、画像は入れ物にマウスが入ったとき（とボタンに来たとき）に作っておき、
- *   押したらその場で書く。中身が変わったとき（stamp が変わったとき）とスクロールしたときに捨てる。作っておけなかったときは
+ *   押したらその場で書く。中身が変わったとき（stamp が変わったとき）とスクロールしたときに捨てる（スクロールのあとの作り直しは、
+ *   止まってから 1 回）。作っておけなかったときは
  *   押してから作って書き、ブラウザーが止めたら作った画像を覚えて「もう一度押してください」と出す（次に押せばその場で書く）
  * - 押して入るのは画像入りの HTML（Office は図として貼る）。画像しか受け取らない所（チャットなど）へは、ボタンをドラッグすると
  *   画像のファイルとして持ち出せる。ブラウザーのメニューが出る所（Power BI サービス）では、ボタンの右クリックで「画像をコピー」も使える。
@@ -12,7 +13,7 @@
  */
 import * as React from "react";
 
-import { ChartImage, IMAGE_SCALE, PreparedImage, SKIP_ATTRIBUTE, chartImage, writeImage } from "./copyImage";
+import { ChartImage, IMAGE_SCALE, PreparedImage, SKIP_ATTRIBUTE, chartImage, scrollRefresher, writeImage } from "./copyImage";
 import { DARK_TEXT } from "./color";
 import { CONTROL_RADIUS, CONTROL_TRANSITION, FLOATING_SHADOW, controlColorsOf } from "./controls";
 
@@ -91,6 +92,39 @@ function scrollbarInsets(root: HTMLElement): { right: number; bottom: number } {
     return { right, bottom };
 }
 
+/**
+ * 今の描き直しと、それに続く親の配置の直し（useLayoutEffect・そこからの描き直し）が済んでから fn を呼ぶ（次の絵の次の絵の前）。
+ * 取り消しの関数を返す
+ */
+export function afterLayout(fn: () => void): () => void {
+    let id = requestAnimationFrame(() => {
+        id = requestAnimationFrame(fn);
+    });
+    return () => cancelAnimationFrame(id);
+}
+
+/** 見張る入れ物（HTMLElement のうち使うところだけ） */
+type Host = Pick<HTMLElement, "classList" | "addEventListener" | "removeEventListener" | "matches">;
+
+/**
+ * 入れ物を見張る。中のスクロール（捕まえて拾う）で見えている範囲が変わったら作っておいた画像をその場で捨て（invalidate）、スクロールが
+ * 止まってからボタンにマウスが乗っていれば（onButton）1 回作り直す。片付けの関数を返す。
+ * 入れ物にマウスが入っただけでは作らない。作るのは、ボタンにマウスが乗るか、フォーカスが来たとき（ボタンの onPointerEnter・onFocus）。
+ * 入れ物で作っていたときは、大きな表で開き閉じやスクロールのたびに表全体の画像（1 回 1〜3 秒）を作り直し、そのあいだ操作が止まった（2026-10-24 ユーザー「全体的にレンダリングが重い。スクロールもスムーズに行かない」）
+ */
+export function watchHost(root: Host, prepare: () => void, invalidate: () => void, onButton: () => boolean): () => void {
+    root.classList.add(HOST_CLASS);
+    const scrolled = scrollRefresher(invalidate, () => {
+        if (onButton()) prepare();
+    });
+    root.addEventListener("scroll", scrolled.onScroll, true);
+    return () => {
+        scrolled.dispose();
+        root.removeEventListener("scroll", scrolled.onScroll, true);
+        root.classList.remove(HOST_CLASS);
+    };
+}
+
 export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, browserMenu = false, capture = chartImage }: CopyImageButtonProps): React.JSX.Element {
     const ref = React.useRef<HTMLButtonElement>(null);
     const cache = React.useRef(new PreparedImage());
@@ -99,6 +133,10 @@ export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, br
     const [insets, setInsets] = React.useState({ right: 0, bottom: 0 });
     /** ドラッグ・右クリックの的に重ねる画像（作っておいた画像） */
     const [imageUrl, setImageUrl] = React.useState<string | null>(null);
+    // 画像の作り方は最新を読む。描き直しのたびに新しい関数が来ても、入れ物の見張りを付け直さない
+    // （付け直すと、スクロールのあとに待っている作り直しが片付けで消える）
+    const captureRef = React.useRef(capture);
+    captureRef.current = capture;
 
     const invalidate = React.useCallback(() => {
         cache.current.invalidate();
@@ -113,7 +151,7 @@ export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, br
         if (ready) return Promise.resolve(ready);
         const started = cache.current.begin();
         if (pending.current && pending.current.started === started) return pending.current.promise;
-        const promise = capture(root, background).then(
+        const promise = captureRef.current(root, background).then(
             (image) => {
                 if (cache.current.store(started, image)) setImageUrl(image?.url ?? null);
                 // 作れなかったら、次に頼まれたときに作り直す
@@ -127,19 +165,27 @@ export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, br
         );
         pending.current = { started, promise };
         return promise;
-    }, [background, capture]);
+    }, [background]);
 
     /** 失敗しても何もしない（押したときに作り直す） */
     const prepareQuietly = React.useCallback((): void => {
         prepare().catch((): null => null);
     }, [prepare]);
 
-    /** 捨てたあと、マウスが乗ったままなら作り直しておく（ドラッグ・右クリックの的が消えたままにならないように） */
-    const refresh = React.useCallback((): void => {
+    /** ボタンにマウスが乗っているか（作り置きを作り直すのは、このときだけ） */
+    const onButton = React.useCallback((): boolean => ref.current?.matches(":hover") ?? false, []);
+
+    /**
+     * 捨てたあと、ボタンにマウスが乗ったままなら作り直しておく（ドラッグ・右クリックの的が消えたままにならないように）。作り直しは描き終わってから
+     * （次の 2 枚の絵の前。afterLayout）。この部品の useLayoutEffect は親より先に動くので、その場で作ると、親がそのあと直す配置
+     * （列の幅、並べた表の行の高さそろえなど）の前を写した。マウスを乗せたまま中身が変わると、行の見出しと数字の行がずれた画像になった
+     */
+    const refresh = React.useCallback((): (() => void) => {
         invalidate();
-        const root = ref.current?.parentElement;
-        if (root?.matches(":hover")) prepareQuietly();
-    }, [invalidate, prepareQuietly]);
+        return afterLayout(() => {
+            if (onButton()) prepareQuietly();
+        });
+    }, [invalidate, prepareQuietly, onButton]);
 
     // 中身が変わったら、作っておいた画像は古い（ボタン自身の表示の描き直しでは捨てない）。描いた直後に捨てる
     React.useLayoutEffect(() => refresh(), [...stamp, background]);
@@ -147,17 +193,8 @@ export function CopyImageButton({ alt, stamp, background = "#ffffff", colors, br
     React.useEffect(() => {
         const root = ref.current?.parentElement;
         if (!root) return undefined;
-        root.classList.add(HOST_CLASS);
-        // 中のスクロール（捕まえて拾う）で見えている範囲が変わる
-        const onScroll = () => refresh();
-        root.addEventListener("pointerenter", prepareQuietly);
-        root.addEventListener("scroll", onScroll, true);
-        return () => {
-            root.removeEventListener("pointerenter", prepareQuietly);
-            root.removeEventListener("scroll", onScroll, true);
-            root.classList.remove(HOST_CLASS);
-        };
-    }, [prepareQuietly, refresh]);
+        return watchHost(root, prepareQuietly, invalidate, onButton);
+    }, [invalidate, prepareQuietly, onButton]);
 
     // スクロールバーは描き直しで出たり消えたりするので、描き直すたびに測る（同じなら描き直さない）
     React.useLayoutEffect(() => {

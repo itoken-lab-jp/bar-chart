@@ -7,6 +7,7 @@ import PrimitiveValue = powerbi.PrimitiveValue;
 import DataViewValueColumn = powerbi.DataViewValueColumn;
 
 import { BLANK_TEXT, toRootCoordinates } from "./shared/tooltip";
+import { isBlankValue, valueTextOf } from "./shared/dataValue";
 
 /** ツールヒントに出す 1 列。values は DataView の配列をそのまま持ち、行番号で引く */
 export interface TooltipColumn {
@@ -61,8 +62,8 @@ export { BLANK_TEXT };
  * モデルの書式文字列どおりの全桁で出す。軸・データラベルの単位付き表記とは別物
  */
 export function formatTooltipValue(value: PrimitiveValue | undefined, format: string | undefined): string {
-    if (value === null || value === undefined) return BLANK_TEXT;
-    return valueFormatter.format(value, format);
+    // 空白・NaN・±Infinity は「(空白)」（空の文字は空のまま）、日付は日付の書式で出す
+    return valueTextOf(format, BLANK_TEXT, "")(value);
 }
 
 /** カテゴリの行。階層なら標準と同じくレベルごとに 1 行ずつ（上のレベルから） */
@@ -110,7 +111,7 @@ export function tooltipItemsOf(
     const before = series ? series.before : source.before;
     const extras = series?.extras ?? source.extras;
     const measureText = formatTooltipValue(measure.values[rowIndex], measure.format);
-    const hasShare = stack.share !== null && stack.share !== undefined && measure.values[rowIndex] !== null && measure.values[rowIndex] !== undefined;
+    const hasShare = stack.share !== null && stack.share !== undefined && !isBlankValue(measure.values[rowIndex]);
     return [
         ...categoryTooltipRows(source, rowIndex, category),
         ...(layerRow ? [layerRow] : []),

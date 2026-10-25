@@ -15,6 +15,8 @@ import DataViewValueColumn = powerbi.DataViewValueColumn;
 import DataViewValueColumnGroup = powerbi.DataViewValueColumnGroup;
 import PrimitiveValue = powerbi.PrimitiveValue;
 
+import { numberOf } from "./shared/dataValue";
+
 export interface CollapsedOthers {
     dataView: DataView | undefined;
     /** 畳んだあとの DataView での「その他」の行番号。畳まなければ -1 */
@@ -35,11 +37,8 @@ const isSummable = (column: DataViewValueColumn) => {
     return !!(roles?.measure || roles?.lineRatioNumerator || roles?.lineRatioDenominator);
 };
 
-const toNumber = (raw: PrimitiveValue | undefined): number | null => {
-    if (raw === null || raw === undefined) return null;
-    const n = typeof raw === "number" ? raw : Number(raw);
-    return Number.isFinite(n) ? n : null;
-};
+/** 数に直す。空白・空の文字・数にならない値・NaN・±Infinity は空白 */
+const toNumber = (raw: PrimitiveValue | undefined): number | null => numberOf(raw);
 
 /** 数の合計。すべて空白なら空白 */
 const sumOf = (values: Array<PrimitiveValue | undefined>): number | null => {

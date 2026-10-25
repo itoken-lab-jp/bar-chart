@@ -8,10 +8,58 @@
 import powerbi from "powerbi-visuals-api";
 import { formattingSettings } from "powerbi-visuals-utils-formattingmodel";
 
-import { LEGEND_POSITION_ITEMS } from "./legend";
-import { CUSTOM_LINE_STYLE, CUSTOM_LINE_STYLE_ITEM, DASH_CAP_ITEMS } from "./gridlines";
+import { LEGEND_POSITION_ITEMS, LEGEND_ROW_ITEMS, legendRowsApply } from "./legend";
+import { CUSTOM_LINE_STYLE, CUSTOM_LINE_STYLE_ITEM, DASH_CAP_ITEMS, LINE_STYLES } from "./gridlines";
+import { FONT_SIZE_MAX, FONT_SIZE_MIN } from "./textStyle";
+import { enumValue } from "./formatting";
+import { TONE_MODES } from "./numberFormat";
 
 export const DEFAULT_FONT_FAMILY = "Segoe UI";
+
+/** 数値の欄の下限・上限（書式ペインで入れられる範囲）。描くときに丸める範囲と同じにする。上で丸めない欄の上限は Infinity */
+export type NumberRange = readonly [min: number, max: number];
+
+/** 文字サイズの欄の範囲。描くときも同じ範囲に丸める（textStyle.ts の clampFontSize） */
+export const FONT_SIZE_RANGE: NumberRange = [FONT_SIZE_MIN, FONT_SIZE_MAX];
+
+/** NumUpDown・Slider の options（下限・上限） */
+export function rangeOptions([min, max]: NumberRange): powerbi.visuals.NumUpDownFormat {
+    return {
+        minValue: { type: powerbi.visuals.ValidatorType.Min, value: min },
+        ...(Number.isFinite(max) ? { maxValue: { type: powerbi.visuals.ValidatorType.Max, value: max } } : {}),
+    };
+}
+
+type RangeCard = {
+    name: string;
+    slices?: formattingSettings.Slice[];
+    groups?: Array<{ slices?: formattingSettings.Slice[]; container?: formattingSettings.Container }>;
+    container?: formattingSettings.Container;
+};
+
+/**
+ * 書式モデルの数値の欄に下限・上限を付ける。ranges は「オブジェクト名.プロパティ名」ごとの範囲で、描くときに丸める範囲と同じにする
+ * （作品の test/numberRanges が描画と突き合わせる）。FontControl の文字サイズは、ranges に無ければ FONT_SIZE_RANGE。
+ * 「設定の適用先」の項目の欄にも付けるので、項目を作り直したあとにも呼ぶ
+ */
+export function applyNumberRanges(cards: RangeCard[], ranges: Readonly<Record<string, NumberRange>>): void {
+    for (const card of cards) {
+        const containers = [card.container, ...(card.groups ?? []).map((g) => g.container)];
+        const slices = [
+            ...(card.slices ?? []),
+            ...(card.groups ?? []).flatMap((g) => g.slices ?? []),
+            ...containers.flatMap((c) => c?.containerItems.flatMap((item) => item.slices ?? []) ?? []),
+        ];
+        for (const slice of slices) {
+            const range = (s: formattingSettings.NumUpDown, fallback?: NumberRange) => {
+                const r = ranges[`${card.name}.${s.name}`] ?? fallback;
+                if (r) s.options = rangeOptions(r);
+            };
+            if (slice instanceof formattingSettings.FontControl) range(slice.fontSize, FONT_SIZE_RANGE);
+            else if (slice instanceof formattingSettings.NumUpDown) range(slice);
+        }
+    }
+}
 
 export interface FontOptions {
     /** FontControl 自体の名前（書式ペインの部品の識別。保存先ではない） */
@@ -47,7 +95,7 @@ export interface LegendOptions {
     font: FontOptions;
 }
 
-/** 凡例カードのスライスとグループ（オプション・テキスト・タイトル） */
+/** 凡例カードのスライスとグループ（オプション・テキスト・タイトル）。オプションは位置と行数 */
 export function legendParts(options: LegendOptions) {
     const show = new formattingSettings.ToggleSwitch({ name: "show", displayName: options.showDisplayName, value: true });
     const position = new formattingSettings.ItemDropdown({
@@ -56,14 +104,26 @@ export function legendParts(options: LegendOptions) {
         items: LEGEND_POSITION_ITEMS,
         value: LEGEND_POSITION_ITEMS[0],
     });
+    // 上下に置いた凡例を何行まで並べるか（入らない分はページに分けて矢印で送る）。左右に置いたときは出さない（syncRows）
+    const rows = new formattingSettings.ItemDropdown({
+        name: "rows",
+        displayName: "行数",
+        description: "上・下に置いた凡例を並べる行の数。入りきらない項目は、この行数ずつページに分けて矢印で送る",
+        items: LEGEND_ROW_ITEMS,
+        value: LEGEND_ROW_ITEMS[0],
+    });
     const font = fontControl(options.font);
     const labelColor = new formattingSettings.ColorPicker({ name: "labelColor", displayName: "カラー", value: { value: "#605E5C" } });
     const titleShow = new formattingSettings.ToggleSwitch({ name: "titleShow", displayName: "タイトル", value: options.titleShow });
     const titleText = new formattingSettings.TextInput({ name: "titleText", displayName: "タイトル テキスト", value: "", placeholder: "自動" });
-    const optionsGroup = new formattingSettings.Group({ name: "legendOptions", displayName: "オプション", slices: [position] });
+    const optionsGroup = new formattingSettings.Group({ name: "legendOptions", displayName: "オプション", slices: [position, rows] });
     const textGroup = new formattingSettings.Group({ name: "legendText", displayName: "テキスト", slices: [font, labelColor] });
     const titleGroup = new formattingSettings.Group({ name: "legendTitle", displayName: "タイトル", topLevelSlice: titleShow, slices: [titleText] });
-    return { show, position, font, labelColor, titleShow, titleText, optionsGroup, textGroup, titleGroup };
+    /** 保存値を読んだあとに呼ぶ。行数は凡例を上・下に置いたときだけ出す */
+    const syncRows = () => {
+        rows.visible = legendRowsApply(position.value?.value);
+    };
+    return { show, position, rows, font, labelColor, titleShow, titleText, optionsGroup, textGroup, titleGroup, syncRows };
 }
 
 export interface GridlineOptions {
@@ -97,11 +157,13 @@ export function gridlineParts(options: GridlineOptions) {
     const scaleWithWidth = new formattingSettings.ToggleSwitch({ name: n("ScaleWithWidth"), displayName: "幅で拡大縮小", value: false });
     const dashCap = new formattingSettings.ItemDropdown({ name: n("DashCap"), displayName: "ダッシュ キャップ", items: DASH_CAP_ITEMS, value: DASH_CAP_ITEMS[0], visible: false });
     const width = new formattingSettings.NumUpDown({ name: n("Width"), displayName: "幅 (px)", value: 1 });
-    /** 保存値を読んだあとに呼ぶ。カスタムのときだけダッシュ配列とダッシュ キャップを出す */
+    /** 保存値を読んだあとに呼ぶ。カスタムのときだけダッシュ配列とダッシュ キャップを出す。実線には模様が無いので、幅で拡大縮小は出さない */
     const sync = () => {
-        const custom = String((style.value as powerbi.IEnumMember | undefined)?.value) === CUSTOM_LINE_STYLE;
+        const styleValue = String((style.value as powerbi.IEnumMember | undefined)?.value);
+        const custom = styleValue === CUSTOM_LINE_STYLE;
         dashArray.visible = custom;
         dashCap.visible = custom;
+        scaleWithWidth.visible = styleValue !== LINE_STYLES.solid;
     };
     return {
         show,
@@ -152,10 +214,10 @@ export function categoryAxisParts(options: CategoryAxisOptions) {
     const titleColor = new formattingSettings.ColorPicker({ name: "titleColor", displayName: "カラー", value: { value: "#252423" } });
     // 帯がこれより狭くなるときは、スクロールする（標準と同じ）
     const minCategoryWidth = new Num({ name: "minCategoryWidth", displayName: "カテゴリの最小幅 (px)", value: 20 });
-    // はみ出してスクロールするとき、開いたときにどこから見せるか。末尾は最後のカテゴリの側
+    // はみ出してスクロールするとき、開いたときにどこから見せるか（名前は標準の X 軸と同じ）。終了は最後のカテゴリの側
     const scrollStart = new formattingSettings.ItemDropdown({
         name: "scrollStart",
-        displayName: "スクロールの最初の位置",
+        displayName: "初期スクロール位置",
         items: options.scrollStartItems,
         value: options.scrollStartItems[0],
     });
@@ -277,6 +339,21 @@ export function labelValueParts(items: {
         positiveColor: new formattingSettings.ColorPicker({ name: "positiveColor", displayName: "プラスの色", value: { value: items.goodColor } }),
         negativeColor: new formattingSettings.ColorPicker({ name: "negativeColor", displayName: "マイナスの色", value: { value: items.badColor } }),
     };
+}
+
+/**
+ * 符号の色（プラスの色・マイナスの色）は、使う設定のときだけ出す。色なしなら 2 色とも、マイナスだけならプラスの色を隠す。
+ * 符号の色の欄そのものを隠しているあいだ（効かない形のとき）は、2 色とも隠す。
+ * 保存値は残す（描くときも、使わない色は読まない。numberFormat.ts の toneOf）。書式ペインを組む前に呼ぶ
+ */
+export function syncToneColors(slices: {
+    toneMode: formattingSettings.ItemDropdown;
+    positiveColor: formattingSettings.ColorPicker;
+    negativeColor: formattingSettings.ColorPicker;
+}): void {
+    const mode = slices.toneMode.visible === false ? TONE_MODES.none : enumValue(slices.toneMode.value, TONE_MODES.none);
+    slices.positiveColor.visible = mode === TONE_MODES.both;
+    slices.negativeColor.visible = mode === TONE_MODES.both || mode === TONE_MODES.bad;
 }
 
 /** データ ラベルの背景（表示・カラー・透過性）。表示名と既定は作品ごとに渡す */

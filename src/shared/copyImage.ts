@@ -2,7 +2,8 @@
  * グラフを画像としてクリップボードに入れる。
  *
  * - 画像：要素の中の見えている SVG を、画面の位置のまま canvas に重ねて描き、PNG にする。スクロールする箱の中は、
- *   見えている範囲で切る。スタイルシートで付けた見た目は、SVG を単独で画像にすると効かないので、計算済みのスタイルを写す。
+ *   見えている範囲で切る。外を切らない（overflow: visible の）SVG は、箱の外へ出た中身も描く。スタイルシートで付けた見た目は、
+ *   SVG を単独で画像にすると効かないので、計算済みのスタイルを写す。
  *   HTML で描いた部分は入らない（ボタン・お知らせなど）。文字だけの HTML は TEXT_ATTRIBUTE を付けると 1 行の文字として描く。
  *   SVG ごとに別の画像にするので、ほかの SVG に書いた定義（<defs> の模様など）は url(#id) で参照できない。フォントは
  *   端末に入っているものだけ（文書で読み込んだフォントは画像の SVG では使えない）。選択・ハイライト・フォーカスは見えているまま写る
@@ -143,20 +144,115 @@ export function dataUrlWithResolution(url: string, dpi: number): string {
     return prefix + btoa(text);
 }
 
+/**
+ * canvas を解像度つきの PNG の data URL にする。PNG にするのは toBlob（ブラウザーが描画の外で縮める）。toDataURL はその場で縮め、
+ * 大きな表（7,000 × 6,500 画素ほど）では 1 秒以上ほかの操作が止まった。toBlob が無い・失敗したときは toDataURL
+ */
+export async function canvasPng(canvas: HTMLCanvasElement): Promise<string> {
+    const blob = await new Promise<Blob | null>((resolve) => {
+        try {
+            canvas.toBlob(resolve, "image/png");
+        } catch {
+            resolve(null);
+        }
+    });
+    if (!blob) return dataUrlWithResolution(canvas.toDataURL("image/png"), 96 * IMAGE_SCALE);
+    // 解像度はバイトのまま足してから data URL にする（data URL を開いて足し直すと、大きな画像で文字の作り直しが重い）
+    const png = withResolution(new Uint8Array(await blob.arrayBuffer()), 96 * IMAGE_SCALE);
+    return new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result));
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(new Blob([png.slice()], { type: "image/png" }));
+    });
+}
+
 export const rectOf = (el: Element): Rect => {
     const r = el.getBoundingClientRect();
     return { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
 };
 
-/** 要素から root までの、はみ出しを切る箱で切った見えている範囲 */
+/**
+ * 箱の、スクロールバーを除いた四角（枠線の外の端まで）。右と下のスクロールバーの幅だけ縮める。はみ出しを切らない要素と、幅の分からない要素（SVG の要素など）は箱のまま。
+ * 位置は拡大したあと、clientWidth などは拡大する前の値で来るので、箱の倍率を掛ける
+ */
+export function withoutScrollbars(el: Element): Rect {
+    const box = rectOf(el);
+    const html = el as Partial<HTMLElement>;
+    if (!html.offsetWidth || !html.offsetHeight || html.clientWidth === undefined || html.clientHeight === undefined) return box;
+    const scaleX = (box.right - box.left) / html.offsetWidth;
+    const scaleY = (box.bottom - box.top) / html.offsetHeight;
+    const style = getComputedStyle(el);
+    // スクロールバーを持てるのは、はみ出しを切る箱だけ（インラインの要素は clientWidth が 0 なので、ほかの要素では幅を引かない）
+    if (style.overflowX === "visible" && style.overflowY === "visible") return box;
+    const width = (side: string) => Number.parseFloat(style.getPropertyValue(`border-${side}-width`)) || 0;
+    const vertical = Math.max(0, html.offsetWidth - html.clientWidth - width("left") - width("right"));
+    const horizontal = Math.max(0, html.offsetHeight - html.clientHeight - width("top") - width("bottom"));
+    return { ...box, right: box.right - Math.round(vertical) * scaleX, bottom: box.bottom - Math.round(horizontal) * scaleY };
+}
+
+/**
+ * はみ出しを切る箱が中身を切る四角：枠線の内側（padding box）から、スクロールバーを除いたもの。スクロールバーの下に隠れた中身
+ * （バーの帯にかかる行・線、箱に切られる前提で外へ伸ばした地）を写さない。幅の分からない要素は箱のまま
+ */
+export function clipRectOf(el: Element, style?: Pick<CSSStyleDeclaration, "overflowX" | "overflowY"> & { overflowClipMargin?: string }): Rect {
+    const box = rectOf(el);
+    // overflow: clip に overflow-clip-margin: border-box なら、枠線の外の端で切る（枠線に重ねて描いた中身も見える。枠線の上に地の色の覆いを
+    // 重ねて線の一部を消す表で、枠線の内側で切ると覆いが切られて線が残った）。余白の長さは使っていない
+    if (style?.overflowX === "clip" && style.overflowY === "clip" && style.overflowClipMargin?.includes("border-box")) return box;
+    const html = el as Partial<HTMLElement>;
+    if (!html.offsetWidth || !html.offsetHeight || html.clientWidth === undefined || html.clientHeight === undefined) return box;
+    const scaleX = (box.right - box.left) / html.offsetWidth;
+    const scaleY = (box.bottom - box.top) / html.offsetHeight;
+    const left = box.left + (html.clientLeft ?? 0) * scaleX;
+    const top = box.top + (html.clientTop ?? 0) * scaleY;
+    return { left, top, right: left + html.clientWidth * scaleX, bottom: top + html.clientHeight * scaleY };
+}
+
+/** 要素から root までの、はみ出しを切る箱（の中身を見せる所）と root で切った見えている範囲 */
 export function visibleRect(el: Element, root: HTMLElement): Rect | null {
     let rect: Rect | null = rectOf(el);
     for (let node = el.parentElement; node && rect; node = node.parentElement) {
+        if (node === root) {
+            rect = intersect(rect, rectOf(node));
+            break;
+        }
         const style = getComputedStyle(node);
-        if (node === root || style.overflowX !== "visible" || style.overflowY !== "visible") rect = intersect(rect, rectOf(node));
-        if (node === root) break;
+        if (style.overflowX !== "visible" || style.overflowY !== "visible") rect = intersect(rect, clipRectOf(node, style));
     }
     return rect;
+}
+
+/**
+ * root の中の要素の見えている範囲（visibleRect）と、中身がはみ出して見える範囲（overflowRect）を、祖先ごとに覚えて求める。答えは 2 つの関数と同じ。
+ * 要素ごとに root までたどると、要素の数 × 深さだけ計算スタイルと四角を読み、大きな表では画像を作るのに秒かかった
+ */
+export function clipTracker(root: HTMLElement): { visible: (el: Element) => Rect | null; overflow: (el: Element) => Rect | null } {
+    const inner = new Map<Element, Rect | null>();
+    // node の子孫が見える範囲：node から root までの、はみ出しを切る箱（root は箱そのもの）の重なり
+    const within = (node: Element): Rect | null => {
+        const cached = inner.get(node);
+        if (cached !== undefined) return cached;
+        let rect: Rect | null;
+        if (node === root || !node.parentElement) rect = rectOf(node);
+        else {
+            rect = within(node.parentElement);
+            if (rect) {
+                const style = getComputedStyle(node);
+                if (style.overflowX !== "visible" || style.overflowY !== "visible") rect = intersect(rect, clipRectOf(node, style));
+            }
+        }
+        inner.set(node, rect);
+        return rect;
+    };
+    return {
+        visible: (el) => {
+            if (el === root || !el.parentElement) return visibleRect(el, root);
+            const clip = within(el.parentElement);
+            return clip && intersect(rectOf(el), clip);
+        },
+        overflow: (el) => (el === root || !el.parentElement ? overflowRect(el, root) : within(el.parentElement)),
+    };
 }
 
 /** 計算済みのスタイルを、写しの同じ位置の要素へ書く */
@@ -172,9 +268,26 @@ function inlineStyles(source: SVGSVGElement, copy: SVGSVGElement): void {
     });
 }
 
+/** 要素の中身がはみ出して見える範囲。要素から root までの、はみ出しを切る箱（と root）の重なり（要素の箱では切らない） */
+export function overflowRect(el: Element, root: HTMLElement): Rect | null {
+    let rect: Rect | null = rectOf(root);
+    for (let node = el.parentElement; node && rect && node !== root; node = node.parentElement) {
+        const style = getComputedStyle(node);
+        if (style.overflowX !== "visible" || style.overflowY !== "visible") rect = intersect(rect, clipRectOf(node, style));
+    }
+    return rect;
+}
+
+/**
+ * SVG を画面の位置のまま canvas に描く。ふつうは SVG の箱の大きさの画像にして、見えている範囲（visibleRect）で切る。
+ * SVG の外を切らない（overflow: visible の）SVG は、箱の外へ出た中身も画面に見えるので、外の SVG（はみ出して見える範囲 overflowRect の大きさ）の
+ * 中に写しを同じ位置に入れて画像にし、はみ出して見える範囲で切る
+ */
 export async function drawSvg(ctx: CanvasRenderingContext2D, svg: SVGSVGElement, root: HTMLElement, origin: Rect): Promise<void> {
     const box = rectOf(svg);
-    const visible = visibleRect(svg, root);
+    const svgStyle = getComputedStyle(svg);
+    const overflowing = svgStyle.overflowX === "visible" && svgStyle.overflowY === "visible";
+    const visible = overflowing ? overflowRect(svg, root) : visibleRect(svg, root);
     const width = box.right - box.left;
     const height = box.bottom - box.top;
     if (!visible || width <= 0 || height <= 0) return;
@@ -187,14 +300,28 @@ export async function drawSvg(ctx: CanvasRenderingContext2D, svg: SVGSVGElement,
     copy.style.removeProperty("height");
     copy.style.removeProperty("min-width");
     copy.style.removeProperty("position");
+    // 画像の SVG と、それを置く canvas の上の四角
+    let picture: SVGSVGElement = copy;
+    let at: Rect = box;
+    if (overflowing) {
+        picture = document.createElementNS(SVG_NS, "svg");
+        picture.setAttribute("xmlns", SVG_NS);
+        picture.setAttribute("width", String(visible.right - visible.left));
+        picture.setAttribute("height", String(visible.bottom - visible.top));
+        copy.setAttribute("x", String(box.left - visible.left));
+        copy.setAttribute("y", String(box.top - visible.top));
+        copy.style.setProperty("overflow", "visible");
+        picture.appendChild(copy);
+        at = visible;
+    }
     const image = new Image();
-    image.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(copy));
+    image.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(picture));
     await image.decode();
     ctx.save();
     ctx.beginPath();
     ctx.rect(visible.left - origin.left, visible.top - origin.top, visible.right - visible.left, visible.bottom - visible.top);
     ctx.clip();
-    ctx.drawImage(image, box.left - origin.left, box.top - origin.top, width, height);
+    ctx.drawImage(image, at.left - origin.left, at.top - origin.top, at.right - at.left, at.bottom - at.top);
     ctx.restore();
 }
 
@@ -238,7 +365,7 @@ export async function chartImage(root: HTMLElement, background = "#ffffff"): Pro
     for (const el of Array.from(root.querySelectorAll<HTMLElement>(`[${TEXT_ATTRIBUTE}]`))) {
         if (!el.closest(`[${SKIP_ATTRIBUTE}]`)) drawText(ctx, el, root, origin);
     }
-    return { url: dataUrlWithResolution(canvas.toDataURL("image/png"), 96 * IMAGE_SCALE), width, height };
+    return { url: await canvasPng(canvas), width, height };
 }
 
 /**
@@ -274,6 +401,32 @@ export class PreparedImage {
     isCurrent(started: number): boolean {
         return started === this.generation;
     }
+}
+
+/** スクロールが止まったとみなすまでの時間 (ms)。止まってから画像を作り直す */
+export const SCROLL_SETTLE_MS = 250;
+
+/**
+ * スクロールしたときの作り置きの扱い。見えている範囲が変わるので、作っておいた画像はスクロールのたびにその場で捨てる（軽い）。
+ * 作り直し（見えている要素のスタイルを全部写す。重い）は、スクロールが止まってから 1 回だけにする
+ */
+export function scrollRefresher(invalidate: () => void, rebuild: () => void, delay = SCROLL_SETTLE_MS): { onScroll: () => void; dispose: () => void } {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const cancel = () => {
+        if (timer !== null) clearTimeout(timer);
+        timer = null;
+    };
+    return {
+        onScroll: () => {
+            invalidate();
+            cancel();
+            timer = setTimeout(() => {
+                timer = null;
+                rebuild();
+            }, delay);
+        },
+        dispose: cancel,
+    };
 }
 
 /** powerbi.common.CustomVisualHostEnv のビット（const enum なので数で持つ） */

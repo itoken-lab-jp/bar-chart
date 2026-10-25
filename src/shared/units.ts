@@ -3,6 +3,8 @@
  * 日本語の表記は 十・百・千・万…兆、英語の表記は K・M・bn・T だけ（1000 の冪以外は語が無い）
  */
 
+import { localeNumber } from "./localeNumber";
+
 export interface UnitDefinition {
     exponent: number;
     divisor: number;
@@ -95,14 +97,36 @@ export function resolveUnit(unitTypeKey: string, maxAbsValue: number, notation =
     return { ...base, unitWord: standard ? base.unitWordStd : base.unitWordJa };
 }
 
-/** 数値を単位で割って書式化する。precision が auto なら小数 2 桁まで */
-export function formatValue(value: number, divisor: number, precision: string): string {
+/**
+ * 桁区切り（1,000）を付けるか。true・false はいつもそのとおり。
+ * { plain, decimals } は、表示単位で割らず小数点以下の桁数も決めないとき（plain）と、割るか桁数を決めたとき（decimals）で分ける。
+ * Power BI の書式の部品（valueFormatter）は、書式が g・G（整数の列の既定）で小数の桁を渡すとき（表示単位で割る・桁数を決める）、
+ * 書式を #,0.00 に替えて桁区切りを付ける。その振る舞いに合わせるための形で、今の groupingOf は g・G を標準のビジュアルに合わせて
+ * いつも桁区切りなしにするので、書式からはこの形は出ない
+ */
+export type Grouping = boolean | { plain: boolean; decimals: boolean };
+
+/**
+ * divisor で割って precision の桁で書くときの桁区切り。割る（divisor が 1 より大きい）か桁数を決めた（auto でない）なら decimals、
+ * どちらでもなければ plain。boolean と省いたときはそのまま
+ */
+export function groupingAt(grouping: Grouping | undefined, divisor: number, precision: string): boolean | undefined {
+    if (typeof grouping !== "object") return grouping;
+    return divisor > 1 || precision !== "auto" ? grouping.decimals : grouping.plain;
+}
+
+/**
+ * 数値を単位で割って書式化する。precision が auto なら小数 2 桁まで。
+ * grouping は桁区切り（1,000）を付けるか。省くと付ける（ブラウザーの既定。書式の桁区切りで決めるなら groupingOf の結果を渡す）
+ */
+export function formatValue(value: number, divisor: number, precision: string, grouping?: Grouping): string {
     const scaled = value / divisor;
+    const useGrouping = groupingAt(grouping, divisor, precision);
     if (precision === "auto") {
-        return scaled.toLocaleString("ja-JP", { maximumFractionDigits: AUTO_FRACTION_DIGITS, minimumFractionDigits: 0 });
+        return localeNumber(scaled, 0, AUTO_FRACTION_DIGITS, useGrouping);
     }
     const digits = Math.max(0, parseInt(precision, 10) || 0);
-    return scaled.toLocaleString("ja-JP", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    return localeNumber(scaled, digits, digits, useGrouping);
 }
 
 /** 書式ペインの選択肢。表示名は文字列（powerbi.IEnumMember としてそのまま渡せる） */
