@@ -2,6 +2,7 @@
 
 import powerbi from "powerbi-visuals-api";
 import { formattingSettings, FormattingSettingsService } from "powerbi-visuals-utils-formattingmodel";
+import { PlotAreaCardSettings } from "./shared/plotArea";
 
 import FormattingSettingsCard = formattingSettings.SimpleCard;
 import FormattingSettingsCompositeCard = formattingSettings.CompositeCard;
@@ -27,6 +28,7 @@ import { AXIS_SCROLL_START_ITEMS } from "./shared/scrollStart";
 import { NEGATIVE_STYLE_ITEMS, ZERO_STYLE_ITEMS, SIGN_TONE_MODE_ITEMS, DEFAULT_GOOD_COLOR, DEFAULT_BAD_COLOR } from "./shared/numberFormat";
 import { CUSTOM_LINE_STYLE, CUSTOM_LINE_STYLE_ITEM, DASH_CAP_ITEMS, LINE_STYLES, LINE_STYLE_ITEMS } from "./shared/gridlines";
 import { applyThemeBasics } from "./shared/theme";
+import { clampFontSize } from "./shared/textStyle";
 import {
     REFERENCE_LINE_LAYERS,
     REFERENCE_LINE_LAYER_ITEMS,
@@ -55,6 +57,16 @@ import {
     NumberRange,
 } from "./shared/formatCards";
 import { gridLevelOf } from "./layout";
+
+/** 「積む柱」で自分の柱を選んだときの保存値（メジャーの queryName と重ならない文字） */
+export const STACK_OWN = "__own";
+
+/** 「積む柱」の欄に並べるメジャー。key は queryName、stackOnto は保存された積む先（無ければ空） */
+export interface StackTarget {
+    key: string;
+    name: string;
+    stackOnto: string;
+}
 
 export interface ColumnTarget {
     name: string;
@@ -315,7 +327,7 @@ export class ChartCardSettings extends FormattingSettingsCard {
     copyButton = new formattingSettings.ToggleSwitch({
         name: "copyButton",
         displayName: "画像のコピー",
-        description: "マウスを乗せたとき、右下に「画像としてコピー」のボタンを出す。押すと、見えているグラフを画像としてクリップボードに入れ、PowerPoint などに貼れる",
+        description: "マウスを乗せたとき、右下に「画像としてコピー」のボタンを出す。押すと、スクロールで隠れた所も含めたグラフ全体を画像としてクリップボードに入れ（とても大きいグラフは見えている範囲）、PowerPoint などに貼れる",
         value: true,
     });
 
@@ -789,7 +801,54 @@ export class ColumnsCardSettings extends FormattingSettingsCompositeCard {
         slices: [this.otherCount, this.otherLabel, this.otherFill],
     });
 
-    groups = [this.targetGroup, this.sortGroup, this.layoutGroup, this.otherGroup];
+    /**
+     * ほかの柱に積むメジャーの負の値（赤字）を、最初の柱の上に絶対値で積む（PL の比例縮尺図で損失を収益の側に置く形）。
+     * オフなら、積む柱の 0 の下へ、ふつうの積み上げと同じく伸ばす
+     */
+    stackLossToFirst = new formattingSettings.ToggleSwitch({
+        name: "stackLossToFirst",
+        displayName: "マイナスは最初の柱に積む",
+        value: true,
+    });
+
+    /**
+     * 積む柱。「値」のメジャーごとに、どのメジャーの柱の上に積むかを選ぶ（利益を費用の柱に積む、など）。
+     * 1 つでも選ぶと、選ばなかったメジャーはそれぞれ自分の柱になり、柱を横に並べる。欄はメジャーが 2 つ以上のときだけ出す。
+     * 保存先はメジャーのメタデータ（selector の metadata）で、値は積む先のメジャーの queryName
+     */
+    stackGroup = new FormattingSettingsGroup({
+        name: "columnsStack",
+        displayName: "積む柱",
+        // 書式の値を読み込むときに欄が要るので、負の値の置き方は初めから入れておく（メジャーごとの欄は applyStackTargets で前に足す）
+        slices: [this.stackLossToFirst],
+        visible: false,
+    });
+
+    groups = [this.targetGroup, this.sortGroup, this.layoutGroup, this.stackGroup, this.otherGroup];
+
+    /** 「積む柱」の欄を、「値」のメジャーごとに 1 つ並べる。選べるのは「自分の柱」とほかのメジャー */
+    applyStackTargets(measures: StackTarget[]): void {
+        this.stackGroup.visible = measures.length > 1;
+        this.stackGroup.slices = measures.length > 1
+            ? measures.map((measure) => {
+                const items: powerbi.IEnumMember[] = [
+                    { value: STACK_OWN, displayName: "自分の柱" },
+                    ...measures.filter((other) => other.key !== measure.key).map((other) => ({ value: other.key, displayName: other.name })),
+                ];
+                return new formattingSettings.ItemDropdown({
+                    name: "stackOnto",
+                    displayName: measure.name,
+                    items,
+                    value: items.find((item) => item.value === measure.stackOnto) ?? items[0],
+                    selector: { metadata: measure.key },
+                });
+            })
+            : [];
+        // ほかの柱に積むメジャーがあるときだけ、負の値の置き方を出す
+        const keys = new Set(measures.map((m) => m.key));
+        this.stackLossToFirst.visible = measures.length > 1 && measures.some((m) => m.stackOnto !== STACK_OWN && m.stackOnto !== m.key && keys.has(m.stackOnto));
+        if (measures.length > 1) this.stackGroup.slices.push(this.stackLossToFirst);
+    }
 
     /**
      * 「設定の適用先」に対象を並べる。系列が 1 本ならカテゴリ、複数なら系列が対象になる
@@ -1838,7 +1897,15 @@ export class TotalLabelsCardSettings extends FormattingSettingsCompositeCard {
         slices: [this.backgroundColor, this.backgroundTransparency],
     });
 
-    groups = [this.valuesGroup, this.backgroundGroup];
+    /** 文字の縁（データ ラベルと同じ部品・既定。標準の合計ラベルには無い） */
+    private halo = labelHaloParts();
+    haloShow = this.halo.haloShow;
+    haloColor = this.halo.haloColor;
+    haloWidth = this.halo.haloWidth;
+    /** まとまりの名前はビジュアルの中で重ねられないので、データ ラベルの縁（labelHalo）と分ける */
+    haloGroup = Object.assign(this.halo.haloGroup, { name: "totalHalo" });
+
+    groups = [this.valuesGroup, this.backgroundGroup, this.haloGroup];
 }
 
 export { LINE_STYLES, LINE_STYLE_ITEMS };
@@ -2484,6 +2551,25 @@ export interface LineTarget {
     transparency: number;
     /** この線のマーカーの書式 */
     marker: LineMarkerValues;
+    /**
+     * 線を載せる軸（LINE_AXES）。線ごとに軸を選べるとき（棒と線の複合で、100% 積み上げ・パレートでないとき）だけ渡す。
+     * 標準の複合グラフには無い項目（会社の利用者の声）
+     */
+    axis?: string;
+    /** 横棒か（軸の選択肢を「X 軸」「第 2 X 軸」と呼ぶ） */
+    horizontal?: boolean;    /** この線の系列ラベルの書式（線ごとの保存に「すべて」を重ねたもの） */
+    seriesLabel?: SeriesLabelValues;
+}
+
+/** 線を載せる軸。自動は「第 2 Y 軸」のトグル（保存が無ければ範囲で自動）に従う */
+export const LINE_AXES = { auto: "auto", primary: "primary", secondary: "secondary" } as const;
+
+export function lineAxisItems(horizontal: boolean): powerbi.IEnumMember[] {
+    return [
+        { value: LINE_AXES.auto, displayName: "自動" },
+        { value: LINE_AXES.primary, displayName: horizontal ? "X 軸" : "Y 軸" },
+        { value: LINE_AXES.secondary, displayName: horizontal ? "第 2 X 軸" : "第 2 Y 軸" },
+    ];
 }
 
 /** 線の形の値（「すべて」と線ごとに同じ項目） */
@@ -2873,6 +2959,18 @@ export class LinesCardSettings extends FormattingSettingsCompositeCard {
                             selector: target.selector,
                             visible: target.formatMode === LINE_FORMAT_MODES.custom,
                         }),
+                        ...(target.axis !== undefined
+                            ? [
+                                new formattingSettings.ItemDropdown({
+                                    name: "axis",
+                                    displayName: "軸",
+                                    description: "この線を載せる値の軸。自動は「第 2 Y 軸」の表示に従う（保存が無ければ、棒と範囲が近ければ棒と同じ軸）",
+                                    items: lineAxisItems(target.horizontal ?? false),
+                                    value: itemOf(lineAxisItems(target.horizontal ?? false), target.axis),
+                                    selector: target.selector,
+                                }),
+                            ]
+                            : []),
                     ]);
                 }),
             ],
@@ -3515,6 +3613,232 @@ class MarkerTargetItem extends FormattingSettingsCard {
     }
 }
 
+/** 系列ラベルの位置（標準と同じ「右へ移動」「左へ移動」。保存値は right・left） */
+export const SERIES_LABEL_POSITIONS = { right: "right", left: "left" } as const;
+export const SERIES_LABEL_POSITION_ITEMS: powerbi.IEnumMember[] = [
+    { value: SERIES_LABEL_POSITIONS.left, displayName: "左へ移動" },
+    { value: SERIES_LABEL_POSITIONS.right, displayName: "右へ移動" },
+];
+
+/** 系列ラベルの線ごとの書式（「すべて」の値に線ごとに保存した値を重ねたもの） */
+export interface SeriesLabelValues {
+    show: boolean;
+    fontFamily: string;
+    fontSize: number;
+    bold: boolean;
+    italic: boolean;
+    underline: boolean;
+    /** 字を線の色にするか（標準の「データ系列の色を一致させる」。既定オン） */
+    matchSeriesColor: boolean;
+    color: string;
+    transparency: number;
+    /** 幅に入らない名前を折り返すか（標準の「右端での折り返し」）。オフなら「…」で切る */
+    wrap: boolean;
+    backgroundShow: boolean;
+    backgroundMatchSeriesColor: boolean;
+    backgroundColor: string;
+    backgroundTransparency: number;
+}
+
+class SeriesLabelTargetItem extends FormattingSettingsCard {
+    name = "seriesLabelTarget";
+
+    constructor(displayName: string, slices: FormattingSettingsSlice[]) {
+        super();
+        this.displayName = displayName;
+        this.slices = slices;
+    }
+}
+
+/**
+ * 系列ラベル（標準の折れ線・複合グラフの「系列ラベル」。2026-10-26 に Desktop で項目と既定を写した）。
+ * 線の端（既定は右）の外に列をとり、線の名前を置く。端が近いラベルは上下にずらし、引き出し線を折って線の端とつなぐ。
+ * 「値」「背景」は線ごとに変えられ、「オプション」「引き出し線」は全部の線で共通（標準と同じ）。
+ * 背景の透過性の既定は 90%（標準の折れ線と同じ。標準の複合グラフは 1% で、黒い地に濃い色の字が読めないのでそろえない）
+ */
+export class SeriesLabelsCardSettings extends FormattingSettingsCompositeCard {
+    name = "seriesLabels";
+    displayName = "系列ラベル";
+
+    show = new formattingSettings.ToggleSwitch({ name: "show", displayName: "系列ラベル", value: false });
+    topLevelSlice = this.show;
+
+    /** 列の幅（ビジュアルの幅に対する %）。空なら名前の長さに合わせる（標準の「自動」） */
+    width = new formattingSettings.TextInput({ name: "width", displayName: "幅 (%)", value: "", placeholder: "自動" });
+    position = new formattingSettings.ItemDropdown({
+        name: "position",
+        displayName: "位置",
+        items: SERIES_LABEL_POSITION_ITEMS,
+        value: itemOf(SERIES_LABEL_POSITION_ITEMS, SERIES_LABEL_POSITIONS.right),
+    });
+
+    /** 線ごとの「このシリーズに表示」の実体。「すべて」には出さない（標準は「すべて」では灰色） */
+    seriesShow = new formattingSettings.ToggleSwitch({ name: "seriesShow", displayName: "このシリーズに表示", value: true });
+    font = new formattingSettings.FontControl({
+        name: "font",
+        displayName: "フォント",
+        fontFamily: new formattingSettings.FontPicker({ name: "fontFamily", displayName: "フォント", value: "Segoe UI" }),
+        fontSize: new formattingSettings.NumUpDown({ name: "fontSize", displayName: "文字サイズ", value: 9 }),
+        bold: new formattingSettings.ToggleSwitch({ name: "bold", displayName: "太字", value: false }),
+        italic: new formattingSettings.ToggleSwitch({ name: "italic", displayName: "斜体", value: false }),
+        underline: new formattingSettings.ToggleSwitch({ name: "underline", displayName: "下線", value: false }),
+    });
+    matchSeriesColor = new formattingSettings.ToggleSwitch({ name: "matchSeriesColor", displayName: "データ系列の色を一致させる", value: true });
+    color = new formattingSettings.ColorPicker({ name: "color", displayName: "カラー", value: { value: "#605E5C" } });
+    transparency = new formattingSettings.NumUpDown({ name: "transparency", displayName: "透過性 (%)", value: 0 });
+    wrap = new formattingSettings.ToggleSwitch({ name: "wrap", displayName: "右端での折り返し", value: false });
+
+    backgroundShow = new formattingSettings.ToggleSwitch({ name: "backgroundShow", displayName: "背景", value: true });
+    backgroundMatchSeriesColor = new formattingSettings.ToggleSwitch({ name: "backgroundMatchSeriesColor", displayName: "データ系列の色を一致させる", value: false });
+    backgroundColor = new formattingSettings.ColorPicker({ name: "backgroundColor", displayName: "カラー", value: { value: "#000000" } });
+    backgroundTransparency = new formattingSettings.NumUpDown({ name: "backgroundTransparency", displayName: "透過性 (%)", value: 90 });
+
+    leaderShow = new formattingSettings.ToggleSwitch({ name: "leaderShow", displayName: "引き出し線", value: true });
+    /** ラベルを線の端の高さからずらしてよい上限（描く範囲の高さに対する %）。入らないラベルは出さない */
+    leaderMaxOffset = new formattingSettings.NumUpDown({ name: "leaderMaxOffset", displayName: "最大オフセット (%)", value: 10 });
+    leaderColor = new formattingSettings.ColorPicker({ name: "leaderColor", displayName: "カラー", value: { value: "#A0A0A0" } });
+    leaderTransparency = new formattingSettings.NumUpDown({ name: "leaderTransparency", displayName: "透過性 (%)", value: 0 });
+    leaderLineStyle = new formattingSettings.ItemDropdown({
+        name: "leaderLineStyle",
+        displayName: "線のスタイル",
+        items: LINE_STYLE_ITEMS,
+        value: itemOf(LINE_STYLE_ITEMS, LINE_STYLES.solid),
+    });
+    leaderWidth = new formattingSettings.NumUpDown({ name: "leaderWidth", displayName: "幅 (px)", value: 1 });
+
+    private optionsSection = (): TargetSection => ({ name: "Options", displayName: "オプション", slices: [this.width, this.position] });
+    private leaderSection = (): TargetSection => ({
+        name: "Leader",
+        displayName: "引き出し線",
+        toggle: this.leaderShow,
+        slices: [this.leaderMaxOffset, this.leaderColor, this.leaderTransparency, this.leaderLineStyle, this.leaderWidth],
+    });
+    private allSections(): TargetSection[] {
+        hideColorWhenMatched(this.matchSeriesColor, this.color);
+        hideColorWhenMatched(this.backgroundMatchSeriesColor, this.backgroundColor);
+        return [
+            this.optionsSection(),
+            { name: "Values", displayName: "値", slices: [this.font, this.matchSeriesColor, this.color, this.transparency, this.wrap] },
+            { name: "Background", displayName: "背景", toggle: this.backgroundShow, slices: [this.backgroundMatchSeriesColor, this.backgroundColor, this.backgroundTransparency] },
+            this.leaderSection(),
+        ];
+    }
+
+    groups: FormattingSettingsGroup[] = [];
+
+    /** 適用先の項目ごとのまとまり（applyTargets が作る。並びは「すべて」、線の順） */
+    targetSections: TargetSection[][] = [];
+
+    constructor() {
+        super();
+        this.applyTargets([]);
+    }
+
+    /**
+     * 「設定の適用先」に「すべて」と線を並べる（線が無ければ「すべて」だけ）。線ごとの項目は「このシリーズに表示」と値・背景で、
+     * オプション・引き出し線は全部の線で共通なので「すべて」にだけ置く
+     */
+    applyTargets(targets: LineTarget[]): void {
+        const items = targets.slice(0, MAX_COLUMN_TARGETS).map((target): TargetSection[] => {
+            const v = target.seriesLabel ?? this.values();
+            const selector = target.selector;
+            const toggle = (name: string, displayName: string, value: boolean) => new formattingSettings.ToggleSwitch({ name, displayName, value, selector });
+            const color = (name: string, value: string) => new formattingSettings.ColorPicker({ name, displayName: "カラー", value: { value }, selector });
+            const number = (name: string, displayName: string, value: number) => new formattingSettings.NumUpDown({ name, displayName, value, selector });
+            const match = toggle("matchSeriesColor", "データ系列の色を一致させる", v.matchSeriesColor);
+            const textColor = color("color", v.color);
+            hideColorWhenMatched(match, textColor);
+            const backgroundMatch = toggle("backgroundMatchSeriesColor", "データ系列の色を一致させる", v.backgroundMatchSeriesColor);
+            const backgroundColor = color("backgroundColor", v.backgroundColor);
+            hideColorWhenMatched(backgroundMatch, backgroundColor);
+            return [
+                { name: "Options", displayName: "オプション", slices: [toggle("seriesShow", "このシリーズに表示", v.show)] },
+                {
+                    name: "Values",
+                    displayName: "値",
+                    slices: [
+                        new formattingSettings.FontControl({
+                            name: "targetFont",
+                            displayName: "フォント",
+                            fontFamily: new formattingSettings.FontPicker({ name: "fontFamily", displayName: "フォント", value: v.fontFamily, selector }),
+                            fontSize: number("fontSize", "文字サイズ", v.fontSize),
+                            bold: toggle("bold", "太字", v.bold),
+                            italic: toggle("italic", "斜体", v.italic),
+                            underline: toggle("underline", "下線", v.underline),
+                        }),
+                        match,
+                        textColor,
+                        number("transparency", "透過性 (%)", v.transparency),
+                        toggle("wrap", "右端での折り返し", v.wrap),
+                    ],
+                },
+                {
+                    name: "Background",
+                    displayName: "背景",
+                    toggle: toggle("backgroundShow", "背景", v.backgroundShow),
+                    slices: [backgroundMatch, backgroundColor, number("backgroundTransparency", "透過性 (%)", v.backgroundTransparency)],
+                },
+            ];
+        });
+        this.targetSections = [this.allSections(), ...items];
+        const names = ["すべて", ...targets.slice(0, MAX_COLUMN_TARGETS).map((target) => target.name)];
+        const flat = (sections: TargetSection[]) => sections.flatMap((section) => [...(section.toggle ? [section.toggle] : []), ...section.slices]);
+        this.groups = [
+            new FormattingSettingsGroup({
+                name: "seriesLabelTargets",
+                slices: [],
+                container: new FormattingSettingsContainer({
+                    displayName: "設定の適用先",
+                    containerItems: this.targetSections.map((sections, i) => new SeriesLabelTargetItem(names[i], flat(sections))),
+                }),
+            }),
+        ];
+    }
+
+    /** 組み立てた書式モデルの適用先の項目を、オプション・値・背景・引き出し線のまとまりに分ける */
+    sectionTargetItems(model: powerbi.visuals.FormattingModel): void {
+        sectionContainerItems(model, this.name, "seriesLabelTargets", this.targetSections);
+    }
+
+    /** 系列ラベルの書式。own（線ごとに保存した値）があればそれを、無い項目は「すべて」の値を使う */
+    values(own?: powerbi.DataViewObject): SeriesLabelValues {
+        const raw = (property: string): powerbi.DataViewPropertyValue | undefined => {
+            const value = own?.[property];
+            return value === undefined || value === null ? undefined : value;
+        };
+        const num = (property: string, fallback: number): number => {
+            const value = raw(property);
+            return typeof value === "number" ? value : fallback;
+        };
+        const bool = (property: string, fallback: boolean): boolean => {
+            const value = raw(property);
+            return typeof value === "boolean" ? value : fallback;
+        };
+        const fill = (property: string, fallback: string): string => {
+            const color = (raw(property) as powerbi.Fill | undefined)?.solid?.color;
+            return color !== undefined && color !== null ? String(color) : fallback;
+        };
+        const percent = (v: number) => Math.max(0, Math.min(100, v));
+        const family = raw("fontFamily");
+        return {
+            show: bool("seriesShow", this.seriesShow.value ?? true),
+            fontFamily: family !== undefined ? String(family) : this.font.fontFamily.value || "Segoe UI",
+            fontSize: clampFontSize(num("fontSize", this.font.fontSize.value ?? 9), 9),
+            bold: bool("bold", this.font.bold?.value ?? false),
+            italic: bool("italic", this.font.italic?.value ?? false),
+            underline: bool("underline", this.font.underline?.value ?? false),
+            matchSeriesColor: bool("matchSeriesColor", this.matchSeriesColor.value ?? true),
+            color: fill("color", this.color.value?.value || "#605E5C"),
+            transparency: percent(num("transparency", this.transparency.value ?? 0)),
+            wrap: bool("wrap", this.wrap.value ?? false),
+            backgroundShow: bool("backgroundShow", this.backgroundShow.value ?? true),
+            backgroundMatchSeriesColor: bool("backgroundMatchSeriesColor", this.backgroundMatchSeriesColor.value ?? false),
+            backgroundColor: fill("backgroundColor", this.backgroundColor.value?.value || "#000000"),
+            backgroundTransparency: percent(num("backgroundTransparency", this.backgroundTransparency.value ?? 90)),
+        };
+    }
+}
+
 class AreaTargetItem extends FormattingSettingsCard {
     name = "areaTarget";
 
@@ -3718,6 +4042,11 @@ export const NUMBER_RANGES: Readonly<Record<string, NumberRange>> = {
     "areas.transparency": PERCENT_RANGE,
     "markers.size": [1, 20],
     "markers.transparency": PERCENT_RANGE,
+    "seriesLabels.transparency": PERCENT_RANGE,
+    "seriesLabels.backgroundTransparency": PERCENT_RANGE,
+    "seriesLabels.leaderMaxOffset": PERCENT_RANGE,
+    "seriesLabels.leaderTransparency": PERCENT_RANGE,
+    "seriesLabels.leaderWidth": [1, 10],
     "markers.borderTransparency": PERCENT_RANGE,
     "markers.borderWidth": [1, 10],
     "ribbons.transparency": PERCENT_RANGE,
@@ -3740,7 +4069,9 @@ export const NUMBER_RANGES: Readonly<Record<string, NumberRange>> = {
     "dataLabels.detailTransparency": PERCENT_RANGE,
     "dataLabels.backgroundTransparency": PERCENT_RANGE,
     "dataLabels.haloWidth": [0, 10],
+    "totalLabels.haloWidth": [0, 10],
     "totalLabels.backgroundTransparency": PERCENT_RANGE,
+    "plotArea.backgroundColorTransparency": PERCENT_RANGE,
 };
 
 export class VisualFormattingSettingsModel extends FormattingSettingsModel {
@@ -3755,12 +4086,14 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
     lines = new LinesCardSettings();
     areas = new AreasCardSettings();
     markers = new MarkersCardSettings();
+    seriesLabels = new SeriesLabelsCardSettings();
     ribbons = new RibbonsCardSettings();
     compare = new CompareCardSettings();
     categoryLine = new CategoryLineCardSettings();
     valueLine = new ValueLineCardSettings();
     dataLabels = new DataLabelsCardSettings();
     totalLabels = new TotalLabelsCardSettings();
+    plotArea = new PlotAreaCardSettings();
 
     // 標準の複合グラフと同じ並び（グラフの種類のあと、X 軸・Y 軸・第 2 Y 軸・凡例・グリッド線・棒・線・網掛け領域・マーカー・データ ラベル・合計ラベル）。
     // リボンは標準のリボン グラフと同じく棒のあと
@@ -3781,7 +4114,10 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.areas,
         this.markers,
         this.dataLabels,
+        this.seriesLabels,
         this.totalLabels,
+        // 標準と同じく、ビジュアルのタブのいちばん最後
+        this.plotArea,
     ];
 
     constructor() {
@@ -3850,6 +4186,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.lines.applyTargets(options.lineTargets ?? []);
         this.areas.applyTargets(options.lineTargets ?? []);
         this.markers.applyTargets(options.lineTargets ?? []);
+        this.seriesLabels.applyTargets(options.lineTargets ?? []);
         this.ribbons.syncMatchedColors();
         // 作り直した適用先の項目の数値の欄にも、下限・上限を付ける
         applyNumberRanges(this.cards, NUMBER_RANGES);
@@ -3865,6 +4202,7 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.dataLabels.sectionTargetItems(model);
         this.columns.sectionTargetItems(model);
         this.markers.sectionTargetItems(model);
+        this.seriesLabels.sectionTargetItems(model);
         return numberContainerItems(model);
     }
 
@@ -3962,6 +4300,8 @@ export class VisualFormattingSettingsModel extends FormattingSettingsModel {
         this.lines.visible = p.linesDrawn;
         this.areas.visible = p.linesDrawn;
         this.markers.visible = p.anyLine;
+        // 系列ラベルは「折れ線の値」の線を描く縦棒だけ（横棒の線はマーカーだけなので、線の端に名前を置かない）
+        this.seriesLabels.visible = p.linesDrawn && !horizontal;
         this.markers.applyInUse(p.markersUsed, p.markerTargetsUsed);
         this.columns.applyChartType(stacked, p.linesDrawn, measureGroups);
         this.columns.applyModes(p);

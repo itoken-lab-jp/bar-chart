@@ -42,7 +42,10 @@ import {
     legendPlacementValue,
     LEGEND_BAR_ITEMS,
     LINE_BLANKS,
+    LINE_AXES,
     AXIS_KINDS,
+    SeriesLabelValues,
+    SERIES_LABEL_POSITIONS,
 } from "./settings";
 import { legendRowsOf } from "./shared/legend";
 import { ContinuousAxis, axisValueOf } from "./continuousAxis";
@@ -68,6 +71,7 @@ import { formatOfColumn, isBlankName, isBlankValue, nameTextOf, numberFormatOf, 
 import { PT_TO_PX } from "./shared/text";
 import { LABEL_ROOM_SHARE_MAX } from "./shared/plotTop";
 import { Halo, haloOf, NO_HALO } from "./shared/halo";
+import { PlotAreaFill, plotAreaFillOf } from "./shared/plotArea";
 import { enumValue } from "./shared/formatting";
 import { clampFontSize, fontFields, titleFontFields } from "./shared/textStyle";
 import { DRILL_PATH_SEPARATOR, SERIES_TRUNCATED_TITLE, SERIES_TRUNCATED_NOTICE } from "./shared/warnings";
@@ -90,6 +94,8 @@ export interface DataPoint {
      * （標準も空白の棒にはラベルを出さない）
      */
     blankAsZero?: true;
+    /** 赤字を最初の柱の上に積んだ棒（「積む柱」）。量は絶対値で、ラベルとツールヒントは元の負の値 */
+    loss?: true;
     value: number;
     /** 棒の始まりの位置（軸の比率）。集合なら 0 の位置、積み上げなら下（負なら上）に積んだ棒の端 */
     startRatio: number;
@@ -219,9 +225,40 @@ export interface LinePoint {
     selectionId: ISelectionId;
 }
 
+/** 系列ラベルの全部の線で共通の書式（オプション・引き出し線） */
+export interface SeriesLabelsInfo {
+    show: boolean;
+    position: "left" | "right";
+    /** 列の幅（ビジュアルの幅に対する割合 0〜1）。null なら名前の長さに合わせる */
+    width: number | null;
+    leaderShow: boolean;
+    /** ラベルを線の端の高さからずらしてよい上限（描く範囲の高さに対する割合 0〜1） */
+    leaderMaxOffset: number;
+    leaderColor: string;
+    leaderTransparency: number;
+    leaderLineStyle: string;
+    leaderWidth: number;
+}
+
+export const NO_SERIES_LABELS: SeriesLabelsInfo = {
+    show: false,
+    position: "right",
+    width: null,
+    leaderShow: true,
+    leaderMaxOffset: 0.1,
+    leaderColor: "#A0A0A0",
+    leaderTransparency: 0,
+    leaderLineStyle: "solid",
+    leaderWidth: 1,
+};
+
 /** 折れ線 1 本（「折れ線の値」に入れたメジャー 1 つ） */
 export interface LineSeriesInfo {
     name: string;
+    /** 第 2 軸に載せるか（「折れ線の値」の線。パレートの累積比の線には無く、描くときに決める） */
+    secondary?: boolean;
+    /** 系列ラベルの書式（「折れ線の値」の線。パレートの累積比の線には無い） */
+    seriesLabel?: SeriesLabelValues;
     color: string;
     width: number;
     lineStyle: string;
@@ -363,6 +400,8 @@ export interface TotalLabelsSettings {
     backgroundShow: boolean;
     backgroundColor: string;
     backgroundTransparency: number;
+    /** 文字の縁（表示がオフなら幅 0） */
+    halo: Halo;
 }
 
 export interface LegendInfo {
@@ -633,6 +672,8 @@ export interface ViewModel {
     /** 凡例に並べる項目（棒の系列 → 折れ線） */
     legendEntries: LegendItemInfo[];
     totalLabels: TotalLabelsSettings;
+    /** プロット領域の背景色。塗らないなら null（ハイコントラストでも塗らない） */
+    plotArea: PlotAreaFill | null;
     /**
      * 値の軸の長さが分かれば、ラベルの余白を値の軸に取るか（合計ラベルか、棒の外に置きうるデータ ラベルがある）。App はこのときだけ
      * 値の軸の長さを visual.ts へ知らせる（valueAxisLengthToReport。ほかのときは組み直さない）。無ければ取らない
@@ -653,6 +694,8 @@ export interface ViewModel {
     /** 折れ線（複合）。無ければ空 */
     lines: LineSeriesInfo[];
     lineTargets: LineTarget[];
+    /** 系列ラベルの共通の書式。描くのは縦棒の「折れ線の値」の線だけ */
+    seriesLabels: SeriesLabelsInfo;
     /** X 軸が日付か数値の 1 列で、種類「連続」を選べる */
     continuousAvailable?: boolean;
     /** X 軸の種類「連続」で描くときの値（categoryGroups と同じ並び）。カテゴリの軸なら無し */
@@ -1063,6 +1106,7 @@ const EMPTY_TOTAL_LABELS: TotalLabelsSettings = {
     backgroundShow: false,
     backgroundColor: DEFAULT_LABEL_BACKGROUND,
     backgroundTransparency: DEFAULT_LABEL_BACKGROUND_TRANSPARENCY,
+    halo: NO_HALO,
 };
 
 const EMPTY_PARETO: ParetoInfo = {
@@ -1115,8 +1159,10 @@ const EMPTY: ViewModel = {
     legend: EMPTY_LEGEND,
     legendEntries: [],
     totalLabels: EMPTY_TOTAL_LABELS,
+    plotArea: null,
     lines: [],
     lineTargets: [],
+    seriesLabels: NO_SERIES_LABELS,
     markers: {
         show: false,
         shape: "circle",
@@ -1233,6 +1279,8 @@ export function lineTooltipItems(
 export function tooltipStackOf(viewModel: ViewModel, d: DataPoint): TooltipStack {
     // 比較レイヤーの奥の棒は、合計・割合を持たない（積み上げの合計は手前のレイヤーのもの）
     if ((d.layerIndex ?? 0) > 0) return viewModel.chartType === CHART_TYPES.stacked100 ? { share: d.share } : {};
+    // 赤字を最初の柱に積んだ棒：柱の上端（収益＋損失）は、どの合計とも意味が違うので出さない
+    if (d.loss) return {};
     if (viewModel.chartType === CHART_TYPES.stacked100) return { share: d.share };
     if (viewModel.chartType === CHART_TYPES.stacked && viewModel.seriesMode) {
         const group = viewModel.categoryGroups.find((g) => g.rowIndex === d.rowIndex);
@@ -1261,6 +1309,35 @@ interface SeriesSlot {
     group: DataViewValueColumnGroup;
     /** 系列ごとの書式の保存先。凡例の系列はグループ、メジャーの系列は列のメタデータに入る */
     objects: Array<DataViewObjects | undefined>;
+    /** 凡例で分けずに積むメジャー（「積む柱」でほかの柱に積んだもの）。選択と書式の保存先はメジャー */
+    whole?: boolean;
+    /** 棒の量と違う符号の値（赤字を最初の柱に積むときの元の値）。ラベルとツールヒントはこの値で出す */
+    signed?: DataViewValueColumn;
+}
+
+/**
+ * 柱に積むメジャーの列の役割。凡例があっても凡例で分けず、1 つの系列として積む（「積む柱」）。
+ * 列に signed があれば、ラベルとツールヒントはその値で出す
+ */
+export const STACK_WHOLE_ROLE = "stackWhole";
+export type StackWholeColumn = DataViewValueColumn & { signed?: DataViewValueColumn };
+const isStackWhole = (column: DataViewValueColumn): boolean => !!column.source?.roles?.[STACK_WHOLE_ROLE];
+
+/** 柱に積むメジャーの系列。凡例の有無によらず、メジャーごとに 1 本 */
+function stackWholeSlotsOf(columns: DataViewValueColumn[], group: DataViewValueColumnGroup): SeriesSlot[] {
+    return columns.filter(isStackWhole).map((column): SeriesSlot => {
+        const signed = (column as StackWholeColumn).signed;
+        return {
+            key: column.source.queryName ?? column.source.displayName,
+            name: column.source.displayName,
+            column,
+            tooltips: [] as DataViewValueColumn[],
+            group,
+            objects: [column.source.objects],
+            whole: true,
+            ...(signed ? { signed } : {}),
+        };
+    });
 }
 
 const isMeasure = (column: DataViewValueColumn): boolean => !!column.source?.roles?.measure;
@@ -1288,7 +1365,7 @@ function seriesSlotsOf(
     if (legendSource) {
         // 空の文字は空のまま（空白と別の値）。NaN・±Infinity は空白にせず字で出す
         const legendText = nameTextOf(formatOfColumn(legendSource), BLANK_TEXT, "");
-        return groups.flatMap((group) => {
+        return groups.flatMap((group): SeriesSlot[] => {
             const column = group.values.find(isMeasure);
             if (!column) return [];
             const raw = group.name;
@@ -1306,7 +1383,7 @@ function seriesSlotsOf(
                 group,
                 objects: [group.objects, column.source?.objects],
             }];
-        });
+        }).concat(groups[0] ? stackWholeSlotsOf(groups[0].values, groups[0]) : []);
     }
     // 凡例なし：「値」に入れたフィールドごとに 1 本。「ツールヒント」の列は位置ではなくロールで分ける
     // （値を空にしてツールヒントだけ入れたときに、ツールヒントの列を棒として描かない）
@@ -1318,18 +1395,20 @@ function seriesSlotsOf(
     const value = columns.find((c) => c.source?.roles?.labelValue);
     // 「棒の色」は系列 1 本のときだけ使う（値が複数で凡例が無いときは、どの系列の色か決められない）
     const colorColumn = measures.length === 1 ? columns.find(isDataColor) : undefined;
-    return measures.map((column) => ({
-        key: column.source.queryName ?? column.source.displayName,
-        name: column.source.displayName,
-        column,
-        tooltips,
-        detail,
-        title,
-        value,
-        colorColumn,
-        group: groups[0],
-        objects: [column.source.objects],
-    }));
+    return measures
+        .map((column): SeriesSlot => ({
+            key: column.source.queryName ?? column.source.displayName,
+            name: column.source.displayName,
+            column,
+            tooltips,
+            detail,
+            title,
+            value,
+            colorColumn,
+            group: groups[0],
+            objects: [column.source.objects],
+        }))
+        .concat(stackWholeSlotsOf(columns, groups[0]));
 }
 
 /**
@@ -1688,6 +1767,8 @@ export interface LayerBasis {
     seriesOrder?: number[];
     /** 値の軸の自動のタイトルに並べる名前（メジャーごとに棒を並べるとき、すべてのメジャーの名前） */
     valueTitleNames?: string[];
+    /** 「積む柱」で柱を並べるときの 1 本ぶん。系列が 1 つでも系列として塗り、集合でも積む */
+    pillar?: boolean;
 }
 
 /** 値の軸の端に要るラベル 1 つ：ラベルを付ける棒の端（値の軸の上の位置）と、軸の長さに対するラベルの長さの割合 */
@@ -2185,7 +2266,8 @@ function* buildSteps(
         return fieldsPlaced ? { ...EMPTY, noData: true } : EMPTY;
     }
 
-    const seriesMode = !lineOnly && (!!legendSource || slots.length > 1);
+    // 柱を並べるとき（「積む柱」）は、柱に 1 つしかメジャーが無くても系列として塗る（どの柱もメジャーの色）
+    const seriesMode = !lineOnly && (!!legendSource || slots.length > 1 || !!basis.pillar);
     const rowCount = categories.values.length;
 
     // 階層。X 軸にフィールドが複数あり、展開していると、上のレベルから順に 1 列ずつ届く。
@@ -2426,7 +2508,8 @@ function* buildSteps(
     // パレート。100% 積み上げのパレートはどの棒も同じ高さで意味が無いので、そのあいだは積み上げとして描く
     const paretoOn = getDropdownValue(settings.calculation.mode.value, CALCULATION_MODES.none) === CALCULATION_MODES.pareto;
     // 1.18 までの「リボン」は、書式の読み込み（applyChartTypeDefaults）で積み上げ＋リボンに読み替える。ここでは積み上げとして扱う
-    const chartType = effectiveChartTypeOf(chartTypeValue, paretoOn);
+    // 柱を並べるとき（「積む柱」）は、集合でも柱の中は積む
+    const chartType = basis.pillar && chartTypeValue === CHART_TYPES.clustered ? CHART_TYPES.stacked : effectiveChartTypeOf(chartTypeValue, paretoOn);
     const stacked = chartType !== CHART_TYPES.clustered;
     const percent = chartType === CHART_TYPES.stacked100;
     // リボン（帯）は積み上げ・100% 積み上げで出せる。積む順が「値の大きい順」なら、カテゴリごとに値の大きい系列を外側に積み替える
@@ -2587,7 +2670,7 @@ function* buildSteps(
     });
     /** ツールヒントの値の行。累計なら「値（累計）」と、累計の前の値の行を出す */
     const measureTooltipOf = (slot: SeriesSlot): { measure: TooltipColumn; before?: TooltipColumn } => {
-        const measure = tooltipColumnOf(slot.column);
+        const measure = tooltipColumnOf(slot.signed ?? slot.column);
         const before = beforeCumulative.get(slot);
         return before ? { measure: { ...measure, displayName: `${measure.displayName}（累計）` }, before: tooltipColumnOf(before) } : { measure };
     };
@@ -2695,36 +2778,61 @@ function* buildSteps(
 
     // 折れ線を右の第 2 Y 軸で描くか、左の軸を共有するか。
     // 第 2 Y 軸の表示を保存していなければ自動（標準と同じく、棒と範囲が近ければ共有する）。
-    // 100% 積み上げの軸は割合なので、折れ線はいつも第 2 Y 軸
-    const lineNumbers = lineDefs.flatMap((d) => d.values.filter((v): v is number => v !== null));
-    const lineMin = lineNumbers.length ? minOf(lineNumbers) : 0;
-    const lineMax = lineNumbers.length ? maxOf(lineNumbers) : 0;
+    // 100% 積み上げの軸は割合なので、折れ線はいつも第 2 Y 軸。
+    // 棒と線の複合（100% 積み上げ・パレートでない）では、線ごとに「軸」を選べる（標準に無い項目。会社の利用者の声）。
+    // 選んだ線はその軸に載せ、「自動」の線だけを今までどおりトグルと範囲で決める
+    const numbersOfLines = (defs: LineDef[]) => defs.flatMap((d) => d.values.filter((v): v is number => v !== null));
+    const lineAxisSelectable = lineDefs.length > 0 && !paretoOn && !lineOnly && !percent;
+    /** 線ごとに保存した軸（選べないとき・保存が無いときは自動） */
+    const lineAxisChoices: string[] = lineDefs.map((def) => {
+        const saved: unknown = lineAxisSelectable ? def.objects?.lines?.axis : undefined;
+        return saved === LINE_AXES.primary || saved === LINE_AXES.secondary ? saved : LINE_AXES.auto;
+    });
+    const autoLineDefs = lineDefs.filter((_, j) => lineAxisChoices[j] === LINE_AXES.auto);
     const axis2Saved = (dataView?.metadata?.objects?.valueAxis2 as powerbi.DataViewObject | undefined)?.show;
-    let onSecondary = false;
+    /** 「自動」の線を第 2 Y 軸に載せるか */
+    let autoOnSecondary = false;
     /** 表示を保存していないときに自動で決めた結果（書式ペインのトグルに出す）。自動で決めなければ無し */
     let autoSecondary: boolean | undefined;
     // パレートでは右の軸を累積比（0〜100%）に使うので、「折れ線の値」の線は左の軸を共有する
-    if (lineDefs.length && !paretoOn && !lineOnly) {
+    if (autoLineDefs.length && !paretoOn && !lineOnly) {
         if (percent) {
-            onSecondary = true;
+            autoOnSecondary = true;
         } else if (typeof axis2Saved === "boolean") {
-            onSecondary = axis2Saved;
+            autoOnSecondary = axis2Saved;
         } else {
+            const autoNumbers = numbersOfLines(autoLineDefs);
+            const autoMin = autoNumbers.length ? minOf(autoNumbers) : 0;
+            const autoMax = autoNumbers.length ? maxOf(autoNumbers) : 0;
             const barAbs = Math.max(Math.abs(maxValue), Math.abs(minValue));
-            const lineAbs = Math.max(Math.abs(lineMax), Math.abs(lineMin));
+            const lineAbs = Math.max(Math.abs(autoMax), Math.abs(autoMin));
             const comparable = barAbs > 0 && lineAbs >= barAbs * 0.2 && lineAbs <= barAbs * 1.5;
-            const sameSide = !(lineMin < 0 && minValue >= 0) && !(lineMax > 0 && maxValue <= 0);
-            onSecondary = !(comparable && sameSide);
-            autoSecondary = onSecondary;
+            const sameSide = !(autoMin < 0 && minValue >= 0) && !(autoMax > 0 && maxValue <= 0);
+            autoOnSecondary = !(comparable && sameSide);
+            autoSecondary = autoOnSecondary;
         }
     }
-    // 左の軸を共有するなら、軸の範囲と単位に折れ線の値も入れる
-    if (lineDefs.length && !onSecondary) {
-        maxValue = Math.max(maxValue, lineMax);
-        minValue = Math.min(minValue, lineMin);
+    /** 線ごとに、第 2 Y 軸に載せるか */
+    const lineOnSecondary = lineAxisChoices.map((choice) =>
+        choice === LINE_AXES.auto ? autoOnSecondary : choice === LINE_AXES.secondary
+    );
+    /** 第 2 Y 軸に載る線があるか（第 2 Y 軸を描くか） */
+    const onSecondary = lineOnSecondary.some(Boolean);
+    // 第 2 Y 軸の範囲・単位・書式は、そこに載る線だけで決める
+    const secondaryLineDefs = lineDefs.filter((_, j) => lineOnSecondary[j]);
+    const lineNumbers = numbersOfLines(secondaryLineDefs);
+    const lineMin = lineNumbers.length ? minOf(lineNumbers) : 0;
+    const lineMax = lineNumbers.length ? maxOf(lineNumbers) : 0;
+    // 左の軸を共有する線は、軸の範囲と単位にその値も入れる
+    const primaryLineNumbers = numbersOfLines(lineDefs.filter((_, j) => !lineOnSecondary[j]));
+    const primaryMin = primaryLineNumbers.length ? minOf(primaryLineNumbers) : 0;
+    const primaryMax = primaryLineNumbers.length ? maxOf(primaryLineNumbers) : 0;
+    if (primaryLineNumbers.length) {
+        maxValue = Math.max(maxValue, primaryMax);
+        minValue = Math.min(minValue, primaryMin);
         // 1 つずつ足す（push(...xs) は点が多いと RangeError を投げる）
-        for (const v of lineNumbers) allValues.push(v);
-        maxAbs = Math.max(maxAbs, Math.abs(lineMax), Math.abs(lineMin));
+        for (const v of primaryLineNumbers) allValues.push(v);
+        maxAbs = Math.max(maxAbs, Math.abs(primaryMax), Math.abs(primaryMin));
     }
 
     // --- Y 軸の定数線の値 -------------------------------------------------------
@@ -2824,7 +2932,7 @@ function* buildSteps(
     // データが変わって条件を外れると自動で線形に切り替わる）。標準は書式ペインに警告アイコンを出すが
     // カスタムビジュアルからは出せないため、状態は valueAxis.logarithmicFallback に持つ。
     // 折れ線だけのときは棒の値が無く、範囲の下端の 0 は棒の基準なので、線の値で決める（標準の折れ線と同じく、線がすべて正なら対数）
-    const logSign = lineOnly ? (lineMin > 0 ? 1 : lineMax < 0 ? -1 : 0) : minValue > 0 ? 1 : maxValue < 0 ? -1 : 0;
+    const logSign = lineOnly ? (primaryMin > 0 ? 1 : primaryMax < 0 ? -1 : 0) : minValue > 0 ? 1 : maxValue < 0 ? -1 : 0;
     // 積み上げでは対数を使わない（積んだ棒の長さが値の和にならなくなる）
     const isLogScaleActive = logarithmic && logSign !== 0 && !stacked;
     const logarithmicFallback = logarithmic && !isLogScaleActive;
@@ -3010,7 +3118,7 @@ function* buildSteps(
         for (let i = 0; i < rowCount && fieldColor === null; i++) fieldColor = dataColorAt(slot.colorColumn, i);
         const color = fieldColor ?? ownSeriesColors[ownSeriesColors.length - 1];
         fieldColoredSeries[ownSeriesColors.length - 1] = fieldColor !== null;
-        const selectionId = legendSource
+        const selectionId = legendSource && !slot.whole
             ? withSeriesOf(host.createSelectionIdBuilder(), categorical!, slot.group).createSelectionId()
             : host.createSelectionIdBuilder().withMeasure(slot.column.source.queryName).createSelectionId();
         return { name: slot.name, color, selectionId };
@@ -3018,7 +3126,7 @@ function* buildSteps(
 
     /** 書式ペインで系列を指す selector。凡例の系列は系列の ID、メジャーの系列はメジャーの queryName */
     const seriesSelector = (s: number): powerbi.data.Selector =>
-        legendSource ? series[s].selectionId!.getSelector() : { metadata: slots[s].column.source.queryName };
+        legendSource && !slots[s].whole ? series[s].selectionId!.getSelector() : { metadata: slots[s].column.source.queryName };
 
     // 系列ごとの見た目（複数系列のとき）。個別の指定が無ければ「すべて」の値
     const seriesStyles = slots.map((slot, s) => {
@@ -3060,6 +3168,7 @@ function* buildSteps(
         backgroundShow: tl.backgroundShow.value ?? false,
         backgroundColor: tl.backgroundColor.value?.value || DEFAULT_LABEL_BACKGROUND,
         backgroundTransparency: Math.max(0, Math.min(100, tl.backgroundTransparency.value ?? DEFAULT_LABEL_BACKGROUND_TRANSPARENCY)),
+        halo: haloOf(tl.haloShow.value, tl.haloColor.value?.value, tl.haloWidth.value),
     };
 
     // リボンの帯（積み上げ・100% 積み上げで、リボンがオンのとき。縦棒・横棒とも）
@@ -3242,6 +3351,9 @@ function* buildSteps(
         return text === "" ? null : text;
     };
 
+    /** データ ラベルに書く値。赤字を最初の柱に積んだ棒は、棒の量（絶対値）でなく元の負の値 */
+    const labelValueOf = (slot: SeriesSlot, i: number, val: number): number => (slot.signed ? numberAt(slot.signed, i) : val);
+
     /** 棒のデータ ラベルの値の小数点以下の桁数。系列ごとに決めていればその桁 */
     const labelPrecisionOf = (own: DataLabelsSettings | undefined) => (own && own.precision !== "auto" ? own.precision : labelPrecision);
 
@@ -3297,7 +3409,7 @@ function* buildSteps(
                 const valueField = labels.valueShow ? valueFieldTextOf(slot, i) : undefined;
                 const made: MadeLabelTexts = {
                     valueField,
-                    formatted: labels.valueShow && valueField === null ? formatted(val, labelPrecisionOf(style.labelSettings), slotLabelSigns[s], slotGroupings[s]) : undefined,
+                    formatted: labels.valueShow && valueField === null ? formatted(labelValueOf(slot, i, val), labelPrecisionOf(style.labelSettings), slotLabelSigns[s], slotGroupings[s]) : undefined,
                     title: labels.titleShow ? titleTextOf(slot, i, false) : undefined,
                     detail: labels.detailShow ? detailTextOf(slot, i, val, false) : undefined,
                 };
@@ -3580,7 +3692,7 @@ function* buildSteps(
             const end = stacked ? start + amount : val;
             // 系列 1 本の ID はカテゴリだけ（1.4 までと同じ。カテゴリごとの色の保存先がこの ID の selector）。系列があれば凡例の値かメジャーを足す
             const withSlot = (builder: powerbi.visuals.ISelectionIdBuilder) =>
-                !seriesMode ? builder : legendSource ? withSeriesOf(builder, categorical!, slot.group) : builder.withMeasure(slot.column.source.queryName);
+                !seriesMode ? builder : legendSource && !slot.whole ? withSeriesOf(builder, categorical!, slot.group) : builder.withMeasure(slot.column.source.queryName);
             const selectionId = withSlot(withCategories(host.createSelectionIdBuilder(), i)).createSelectionId();
 
             // ハイライトは該当しない行が null。数値で持ち、棒の高さは軸と同じ calcRatio で出す。
@@ -3603,6 +3715,7 @@ function* buildSteps(
                 seriesIndex: s,
                 blank: skipped,
                 ...(!skipped && isBlankAt(slot.column, i) ? { blankAsZero: true as const } : {}),
+                ...(slot.signed ? { loss: true as const } : {}),
                 value: val,
                 startRatio: stacked ? calcRatio(start) : zeroRatio,
                 valRatio: calcRatio(end),
@@ -3610,7 +3723,7 @@ function* buildSteps(
                 outermost: true,
                 insetStart,
                 rank: ribbonsOn ? ribbonRanks.get(s) ?? null : null,
-                ...(made?.formatted ?? formatted(val, labelPrecisionOf(style.labelSettings), slotLabelSigns[s], slotGroupings[s])),
+                ...(made?.formatted ?? formatted(labelValueOf(slot, i, val), labelPrecisionOf(style.labelSettings), slotLabelSigns[s], slotGroupings[s])),
                 ...(style.labelSettings ? { labelSettings: style.labelSettings } : {}),
                 ...(() => {
                     const text = made?.valueField !== undefined ? made.valueField : valueFieldTextOf(slot, i);
@@ -3742,12 +3855,12 @@ function* buildSteps(
     const v2Precision = getDropdownValue(v2.precision.value, "auto");
     // 表示単位・単位ラベル・タイトルのスタイルは Y 軸と同じ。載る線の書式がすべて率（% か ‰）なら、
     // 100% 積み上げの Y 軸と同じく表示単位によらず % で出し、単位の語を付けない。率と数の線が混ざれば数の軸（Y 軸と同じ判定）
-    const lineRate = sameRateOf(lineDefs.map((def) => numberFormatOf(def.format)));
+    const lineRate = sameRateOf(secondaryLineDefs.map((def) => numberFormatOf(def.format)));
     // 載る線の書式の「正;負;0」の節の書き方がすべて同じなら、目盛りに当てる（Y 軸と同じ）
-    const lineSections = sameSectionSignOf(lineDefs.map((def) => numberFormatOf(def.format)));
+    const lineSections = sameSectionSignOf(secondaryLineDefs.map((def) => numberFormatOf(def.format)));
     // 第 2 Y 軸の目盛りと、そこに載せた定数線の桁区切り。載る線のどれかの書式に桁区切りがあれば付ける（Y 軸と同じ）。
     // 線の書式は、書式ペインで「カスタム書式」「パーセント」を選べばその書式（lineFormatOf）
-    const lineGrouping = someGroupingOf(lineDefs.map((def) => numberFormatOf(def.format)));
+    const lineGrouping = someGroupingOf(secondaryLineDefs.map((def) => numberFormatOf(def.format)));
     const isPercentLine = lineRate !== null;
     const lineScale = lineRate?.scale ?? 100;
     const v2Notation = getDropdownValue(v2.unitNotation.value, "japanese");
@@ -3901,7 +4014,7 @@ function* buildSteps(
     const areaCard = settings.areas;
     const areasOn = areaCard.show.value ?? false;
     // 網掛け領域の下の辺は値 0 の高さ（軸の範囲の外なら端。対数なら端）
-    const baselineRatio = onSecondary ? calcRatio2(0) : calcRatio(0);
+    const baselineRatioOf = (secondary: boolean) => (secondary ? calcRatio2(0) : calcRatio(0));
     // 折れ線のデータ ラベル。標準と同じく、カードの表示がオンなら線にも出す（線ごとの「このシリーズに表示」をオフにした線は出さない）。
     // 値の書き方は、率（% の書式）なら %、それ以外は線を描く軸（第 2 Y 軸か Y 軸）の表示単位と桁数。桁数は線ごと・「すべて」の順に選んだもの
     const lineLabelOwnShow = (objects: DataViewObjects | undefined) => ownLabelValue(objects, "show") !== false;
@@ -3910,12 +4023,12 @@ function* buildSteps(
         const saved = ownLabelValue(objects, "linePosition");
         return saved === LINE_LABEL_POSITIONS.above ? "above" : saved === LINE_LABEL_POSITIONS.below ? "below" : "auto";
     };
-    const lineLabelOf = (def: LineDef): LineLabelInfo => {
+    const lineLabelOf = (def: LineDef, secondary: boolean): LineLabelInfo => {
         const own = dataLabelsSettingsOf(dl, def.objects);
         const chosen = own.precision;
         const ownRate = rateFormatOf(numberFormatOf(def.format));
-        const digits = chosen !== "auto" ? chosen : ownRate ? "auto" : onSecondary ? v2Precision : precision;
-        const divisor = onSecondary ? unitDef2.divisor : unitDef.divisor;
+        const digits = chosen !== "auto" ? chosen : ownRate ? "auto" : secondary ? v2Precision : precision;
+        const divisor = secondary ? unitDef2.divisor : unitDef.divisor;
         // 符号の書き方は、保存の無いペインの項目なら線のメジャーの書式の節に従う（棒のラベルと同じ）
         const sign = sectionLabelSignOf(def.format);
         // 桁区切りは線の書式（書式ペインのカスタム書式を含む）に従う
@@ -3950,6 +4063,8 @@ function* buildSteps(
         const themeColor = lineThemeColors[lineIndex];
         return {
             name: def.name,
+            secondary: lineOnSecondary[lineIndex],
+            seriesLabel: settings.seriesLabels.values(def.objects?.seriesLabels),
             color: ownFill ? String(ownFill) : themeColor,
             width: Math.max(1, Math.min(10, ownWidth ?? lineCard.width.value ?? 3)),
             lineStyle: ownStyle !== undefined && ownStyle !== null ? String(ownStyle) : defaultLineStyle,
@@ -3966,14 +4081,14 @@ function* buildSteps(
             stepWidth: ownText("stepWidth", defaultShape.stepWidth),
             areaShow: areasOn && (typeof ownAreaShow === "boolean" ? ownAreaShow : true),
             lineShow: typeof ownLineShow === "boolean" ? ownLineShow : lineCard.show.value ?? true,
-            baselineRatio,
+            baselineRatio: baselineRatioOf(lineOnSecondary[lineIndex]),
             marker: settings.markers.values(def.objects?.markers),
             selectionId: measureBuilder().withMeasure(measureKey).createSelectionId(),
             points: categoryGroups.map((g) => {
                 const value = def.values[g.rowIndex];
                 const highlight = def.highlights ? def.highlights[g.rowIndex] ?? null : undefined;
                 // 線の比は丸めない（範囲の外の点は描画域で切り、マーカー・データ ラベルを出さない）
-                const ratioOf = (v: number) => (onSecondary ? lineRatio2Of(v) : lineRatioOf(v));
+                const ratioOf = (v: number) => (lineOnSecondary[lineIndex] ? lineRatio2Of(v) : lineRatioOf(v));
                 return {
                     rowIndex: g.rowIndex,
                     ...(cumulativeLineKeys.has(def.key) && resetBefore[positionOf.get(g.rowIndex)!] ? { breakBefore: true } : {}),
@@ -3989,7 +4104,7 @@ function* buildSteps(
                 };
             }),
             tooltip: { displayName: cumulativeLineKeys.has(def.key) ? `${def.name}（累計）` : def.name, format: def.format, values: def.values },
-            ...(lineLabelShown(def) ? { labels: lineLabelOf(def) } : {}),
+            ...(lineLabelShown(def) ? { labels: lineLabelOf(def, lineOnSecondary[lineIndex]) } : {}),
         };
     });
     const lineTargets: LineTarget[] = lines.map((line, j) => ({
@@ -4019,6 +4134,8 @@ function* buildSteps(
         scaleWithWidth: line.scaleWithWidth,
         transparency: line.transparency,
         marker: line.marker ?? settings.markers.values(),
+        ...(lineAxisSelectable ? { axis: lineAxisChoices[j], horizontal } : {}),
+        seriesLabel: line.seriesLabel,
     }));
     // データ ラベルの「設定の適用先」に線も並べる（棒の系列のあと。標準と同じ）。線のラベルも、標準と同じく既定でオン。
     // 「このシリーズに表示」は線に保存した値をそのまま出す（カードの表示がオフでも。カードの表示を混ぜると、
@@ -4087,9 +4204,9 @@ function* buildSteps(
         ...v2TickFont,
         labelColor: v2TickColor,
         titleShow: v2.titleShow.value ?? true,
-        // 自動のタイトルは折れ線の名前（標準と同じ。複数なら「および」でつなぐ）
+        // 自動のタイトルは第 2 Y 軸に載る折れ線の名前（標準と同じ。複数なら「および」でつなぐ）
         titleText: styledTitle(
-            v2.titleText.value?.trim() || (paretoOn ? "累積比" : lines.map((l) => l.name).join(" および ")),
+            v2.titleText.value?.trim() || (paretoOn ? "累積比" : lines.filter((_, j) => lineOnSecondary[j]).map((l) => l.name).join(" および ")),
             v2TitleStyle,
             v2ComposedUnit
         ),
@@ -4283,6 +4400,7 @@ function* buildSteps(
         legend: legendInfo,
         legendEntries,
         totalLabels: totalLabelsSettings,
+        plotArea: (host.colorPalette as powerbi.extensibility.ISandboxExtendedColorPalette | undefined)?.isHighContrast ? null : plotAreaFillOf(settings.plotArea),
         valueAxisRoom,
         roundsByLength,
         ...(roundsByLength && roundCount !== undefined ? { roundCount } : {}),
@@ -4302,6 +4420,7 @@ function* buildSteps(
             : {}),
         lines,
         lineTargets,
+        seriesLabels: seriesLabelsOf(settings, horizontal),
         lineBlanks: String(settings.lines.blanks.value?.value ?? LINE_BLANKS.break),
         ...(lineWarning ? { lineWarning } : {}),
         markers: mk.values(),
@@ -4329,7 +4448,7 @@ function* buildSteps(
             ...(seriesMode
                 ? {
                     series: slots.map((slot) => ({
-                        legendName: legendSource?.displayName ?? null,
+                        legendName: slot.whole ? null : (legendSource?.displayName ?? null),
                         seriesName: slot.name,
                         ...measureTooltipOf(slot),
                         extras: [...paretoTooltipColumns, ...slot.tooltips.map(tooltipColumnOf)],
@@ -4445,4 +4564,23 @@ function lineFormatOf(def: LineDef, card: LinesCardSettings): string {
     if (mode === LINE_FORMAT_MODES.percent) return LINE_PERCENT_FORMAT;
     if (mode === LINE_FORMAT_MODES.custom && custom) return custom;
     return def.ratio ? LINE_PERCENT_FORMAT : def.format;
+}
+
+/** 系列ラベルの共通の書式。横棒では描かない（線はマーカーだけなので、線の端に名前を置かない） */
+function seriesLabelsOf(settings: VisualFormattingSettingsModel, horizontal: boolean): SeriesLabelsInfo {
+    const card = settings.seriesLabels;
+    const percent = (v: number | undefined, fallback: number) => Math.max(0, Math.min(100, typeof v === "number" ? v : fallback)) / 100;
+    const widthText = (card.width.value ?? "").trim();
+    const widthNumber = widthText === "" ? NaN : Number(widthText);
+    return {
+        show: (card.show.value ?? false) && !horizontal,
+        position: String(card.position.value?.value ?? SERIES_LABEL_POSITIONS.right) === SERIES_LABEL_POSITIONS.left ? "left" : "right",
+        width: Number.isFinite(widthNumber) && widthNumber > 0 ? Math.min(50, widthNumber) / 100 : null,
+        leaderShow: card.leaderShow.value ?? true,
+        leaderMaxOffset: percent(card.leaderMaxOffset.value, 10),
+        leaderColor: card.leaderColor.value?.value || "#A0A0A0",
+        leaderTransparency: percent(card.leaderTransparency.value, 0) * 100,
+        leaderLineStyle: String(card.leaderLineStyle.value?.value ?? "solid"),
+        leaderWidth: Math.max(1, Math.min(10, card.leaderWidth.value ?? 1)),
+    };
 }

@@ -405,6 +405,18 @@
                             }
                         }
                     }
+                },
+                "stackOnto": {
+                    "displayName": "積む柱",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "stackLossToFirst": {
+                    "displayName": "マイナスは最初の柱に積む",
+                    "type": {
+                        "bool": true
+                    }
                 }
             }
         },
@@ -759,6 +771,12 @@
                     "displayName": "カスタム書式",
                     "type": {
                         "text": true
+                    }
+                },
+                "axis": {
+                    "displayName": "軸",
+                    "type": {
+                        "enumeration": []
                     }
                 }
             }
@@ -1947,6 +1965,165 @@
                 }
             }
         },
+        "seriesLabels": {
+            "displayName": "系列ラベル",
+            "properties": {
+                "show": {
+                    "displayName": "系列ラベル",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "width": {
+                    "displayName": "幅 (%)",
+                    "type": {
+                        "text": true
+                    }
+                },
+                "position": {
+                    "displayName": "位置",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "seriesShow": {
+                    "displayName": "このシリーズに表示",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "fontFamily": {
+                    "displayName": "フォント",
+                    "type": {
+                        "formatting": {
+                            "fontFamily": true
+                        }
+                    }
+                },
+                "fontSize": {
+                    "displayName": "文字サイズ",
+                    "type": {
+                        "formatting": {
+                            "fontSize": true
+                        }
+                    }
+                },
+                "bold": {
+                    "displayName": "太字",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "italic": {
+                    "displayName": "斜体",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "underline": {
+                    "displayName": "下線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "matchSeriesColor": {
+                    "displayName": "データ系列の色を一致させる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "color": {
+                    "displayName": "カラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "transparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "wrap": {
+                    "displayName": "右端での折り返し",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "backgroundShow": {
+                    "displayName": "背景",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "backgroundMatchSeriesColor": {
+                    "displayName": "背景をデータ系列の色に一致させる",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "backgroundColor": {
+                    "displayName": "背景のカラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "backgroundTransparency": {
+                    "displayName": "背景の透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "leaderShow": {
+                    "displayName": "引き出し線",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "leaderMaxOffset": {
+                    "displayName": "最大オフセット (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "leaderColor": {
+                    "displayName": "引き出し線のカラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "leaderTransparency": {
+                    "displayName": "引き出し線の透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "leaderLineStyle": {
+                    "displayName": "引き出し線のスタイル",
+                    "type": {
+                        "enumeration": []
+                    }
+                },
+                "leaderWidth": {
+                    "displayName": "引き出し線の幅 (px)",
+                    "type": {
+                        "numeric": true
+                    }
+                }
+            }
+        },
         "totalLabels": {
             "displayName": "合計ラベル",
             "properties": {
@@ -2036,6 +2213,28 @@
                 },
                 "backgroundTransparency": {
                     "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
+                    }
+                },
+                "haloShow": {
+                    "displayName": "文字の縁",
+                    "type": {
+                        "bool": true
+                    }
+                },
+                "haloColor": {
+                    "displayName": "文字の縁のカラー",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "haloWidth": {
+                    "displayName": "文字の縁の幅 (px)",
                     "type": {
                         "numeric": true
                     }
@@ -2770,6 +2969,27 @@
                 "levelSubtotalEnabled": {
                     "type": {
                         "bool": true
+                    }
+                }
+            }
+        },
+        "plotArea": {
+            "displayName": "プロットエリアの背景",
+            "properties": {
+                "backgroundColor": {
+                    "displayName": "背景色",
+                    "type": {
+                        "fill": {
+                            "solid": {
+                                "color": true
+                            }
+                        }
+                    }
+                },
+                "backgroundColorTransparency": {
+                    "displayName": "透過性 (%)",
+                    "type": {
+                        "numeric": true
                     }
                 }
             }

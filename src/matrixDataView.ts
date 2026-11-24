@@ -43,7 +43,17 @@ interface MatrixLevels {
     rows: DataViewHierarchyLevel[];
     columns: DataViewHierarchyLevel[];
 }
-type MatrixCategorical = DataViewCategorical & { [MATRIX_LEVELS]?: MatrixLevels };
+/** 凡例があるときの、「値」のメジャーの凡例をまとめた全体の値（列の小計）。メジャーの queryName ごと */
+const WHOLE_MEASURES = Symbol("wholeMeasures");
+type MatrixCategorical = DataViewCategorical & { [MATRIX_LEVELS]?: MatrixLevels; [WHOLE_MEASURES]?: Map<string, PrimitiveValue[]> };
+
+/**
+ * 凡例があるときの、メジャー key の凡例をまとめた全体の値（行ごと。列の小計）。matrix で届かなかったら undefined。
+ * 凡例で分けずに 1 つの棒として積むときに使う（凡例ごとの値を足すと、凡例で絞らないメジャーでは凡例の数だけ重なる）
+ */
+export function wholeMeasureValuesOf(categorical: DataViewCategorical | undefined, key: string): PrimitiveValue[] | undefined {
+    return (categorical as MatrixCategorical | undefined)?.[WHOLE_MEASURES]?.get(key);
+}
 type MatrixGroup = DataViewValueColumnGroup & { [MATRIX_NODE]?: DataViewMatrixNode };
 
 /** 凡例をまとめた全体の値（列の小計）で受ける役割 */
@@ -230,7 +240,18 @@ export function categoricalOf(dataView: DataView | undefined): DataView | undefi
         };
     });
 
-    const categorical: MatrixCategorical = { categories, values, [MATRIX_LEVELS]: { rows: rowLevels, columns: columnLevels } };
+    const wholeMeasures = new Map<string, PrimitiveValue[]>();
+    if (hasSeries) {
+        for (const { leaf, k } of leafList) {
+            if (leaf.subtotal && sourceOf(leaf.measure).roles?.measure) wholeMeasures.set(keyOf(sourceOf(leaf.measure)), columnOf(k, sourceOf(leaf.measure)).values);
+        }
+    }
+    const categorical: MatrixCategorical = {
+        categories,
+        values,
+        [MATRIX_LEVELS]: { rows: rowLevels, columns: columnLevels },
+        ...(wholeMeasures.size ? { [WHOLE_MEASURES]: wholeMeasures } : {}),
+    };
     return { ...dataView, categorical };
 }
 

@@ -212,6 +212,17 @@ export function shiftIntoSpan(from: number, to: number, lo: number, hi: number):
     return 0;
 }
 
+/**
+ * 棒の外に置いたデータ ラベルを、値の向き（縦棒は上下、横棒は左右）に描く範囲 [lo, hi] へ収める量。from・to は描くもの
+ * （背景か文字。縁は入れない）の端。0.5px までのはみ出しは座標の丸めの分として 0 にする（自動の端は、ラベルの分の余白を取って
+ * 字の端をちょうど描く範囲の端に付けることがある）。最小値・最大値を決めた端は余白を取らないので、ラベルが端を越えて、
+ * カテゴリ名・目盛り・凡例に掛かる。呼ぶ側は、集合の「自動」なら棒の中へ移し、「外側上」ならこの量だけ寄せて端で止める
+ */
+export function valueEdgeShift(from: number, to: number, lo: number, hi: number): number {
+    const shift = shiftIntoSpan(from, to, lo, hi);
+    return Math.abs(shift) > 0.5 ? shift : 0;
+}
+
 /** 描くものの枠（寄せる量を測る枠）。背景を描くなら背景（と、はみ出す文字の縁）、描かないなら文字の四角と縁。hitBoxOf の 1px の余白は入れない */
 export function inkBoxOf(text: LabelBox, background: LabelBox | null, halo = 0): LabelBox {
     if (background) return hitBoxOf(text, background, halo);

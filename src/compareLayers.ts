@@ -8,9 +8,23 @@ import DataViewMetadataColumn = powerbi.DataViewMetadataColumn;
 import DataViewMatrixNode = powerbi.DataViewMatrixNode;
 import IVisualHost = powerbi.extensibility.visual.IVisualHost;
 
-import { COMPARE_DIRECTIONS, COMPARE_ORDERS, MAX_COMPARE_LAYERS, VisualFormattingSettingsModel } from "./settings";
-import { categoricalOf } from "./matrixDataView";
-import { CalculationRuntime, CompareSettings, DataPoint, LegendItemInfo, LabelRoom, ValueExtent, ViewModel, readTransform, transform, tooltipStackOf, unionLabelRoom } from "./viewModel";
+import { CALCULATION_MODES, COMPARE_DIRECTIONS, COMPARE_ORDERS, MAX_COMPARE_LAYERS, STACK_OWN, VisualFormattingSettingsModel } from "./settings";
+import { categoricalOf, wholeMeasureValuesOf } from "./matrixDataView";
+import {
+    CalculationRuntime,
+    CompareSettings,
+    DataPoint,
+    LegendItemInfo,
+    LabelRoom,
+    STACK_WHOLE_ROLE,
+    StackWholeColumn,
+    ValueExtent,
+    ViewModel,
+    readTransform,
+    transform,
+    tooltipStackOf,
+    unionLabelRoom,
+} from "./viewModel";
 import { tooltipItemsOf } from "./tooltip";
 import { labelLayersOf, layerOpacity } from "./layout";
 import { formatOfColumn, nameTextOf } from "./shared/dataValue";
@@ -49,20 +63,28 @@ export function transformWithLayers(
 ): ViewModel {
     const split = splitByCompareBy(dataView, settings);
     const whole = categoricalOf(split ? split.layers[0].view : dataView);
+    // 「積む柱」を選んだメジャーがあれば、柱ごとに 1 枚のレイヤーにして、重ねずに隣り合わせに並べる
+    const pillars = split ? null : pillarPlanOf(whole, settings);
     // 凡例があり「値」にメジャーが 2 つ以上なら、メジャーごとに 1 枚のレイヤーにして、重ねずに隣り合わせに並べる
-    const measures = split ? [] : groupedMeasuresOf(whole);
-    const grouped = measures.length > 1;
+    const measures = split || pillars ? [] : groupedMeasuresOf(whole);
+    const grouped = measures.length > 1 || !!pillars;
+    const pillarLayers: LayerSource[] | null = pillars
+        ? pillars.roots.map((root) => ({ name: root.displayName ?? "", view: pillarViewOf(whole!, pillars, root) }))
+        : null;
     const compare = grouped ? GROUPED_LAYOUT : compareSettingsOf(settings);
-    const view = grouped ? measureViewOf(whole!, keyOf(measures[0])) : whole;
+    const view = pillarLayers ? pillarLayers[0].view : grouped ? measureViewOf(whole!, keyOf(measures[0])) : whole;
     const sources = split || grouped ? [] : compareSourcesOf(view);
     const show = grouped || (settings.compare.show.value ?? true);
     const layers: LayerSource[] = split
         ? split.layers
-        : grouped
-            ? measures.map((source) => ({ name: source.displayName ?? "", view: measureViewOf(whole!, keyOf(source)) }))
-            : [{ name: frontNameOf(view), view: view! }, ...sources.map((source) => ({ name: source.displayName ?? "", view: layerViewOf(view!, source) }))];
+        : pillarLayers
+            ? pillarLayers
+            : grouped
+                ? measures.map((source) => ({ name: source.displayName ?? "", view: measureViewOf(whole!, keyOf(source)) }))
+                : [{ name: frontNameOf(view), view: view! }, ...sources.map((source) => ({ name: source.displayName ?? "", view: layerViewOf(view!, source) }))];
+    const pillarBasis = pillars ? { pillar: true } : {};
     // 手前のレイヤーの行を読む。重ねないなら、このレイヤーの範囲のまま続きを組んで返す
-    const frontRead = readTransform(view, host, settings, runtime);
+    const frontRead = readTransform(view, host, settings, runtime, pillarBasis);
     const alone = (): ViewModel => {
         const pending = frontRead.resume({});
         return pending.finish(pending.labelRoom);
@@ -89,9 +111,10 @@ export function transformWithLayers(
         seriesOrder: frontBasis.seriesOrder,
     };
     // 奥のレイヤーの行を読んで範囲を集め、すべてのレイヤーの範囲の軸でどのレイヤーも続きを組む（行は読み直さない）
-    const backReads = backViews.map((v) => readTransform(v, host, settings, runtime, order));
+    const backReads = backViews.map((v) => readTransform(v, host, settings, runtime, { ...order, ...pillarBasis }));
     const extent = unionOf([frontBasis.extent, ...backReads.map((read) => read.basis.extent)]);
-    const pendingFront = frontRead.resume({ extent, ...(grouped ? { valueTitleNames: layers.map((l) => l.name) } : {}) });
+    const titleNames = pillars ? pillars.measures.map((m) => m.displayName ?? "") : layers.map((l) => l.name);
+    const pendingFront = frontRead.resume({ extent, ...(grouped ? { valueTitleNames: titleNames } : {}) });
     const pendingBacks = backReads.map((read) => read.resume({ extent }));
     // 値の軸の余白は、データ ラベルを描くすべてのレイヤー（メジャーを並べるなら描くすべて、重ねるなら描くうちのいちばん手前。
     // 凡例で隠したレイヤーは除く）のラベルで取り、どのレイヤーも同じ範囲で組む
@@ -275,6 +298,134 @@ function groupedMeasuresOf(view: DataView | undefined): DataViewMetadataColumn[]
     const position = (source: DataViewMetadataColumn) =>
         (source as DataViewMetadataColumn & { rolesIndex?: Record<string, number[]> }).rolesIndex?.measure?.[0] ?? 0;
     return [...found.values()].sort((a, b) => position(a) - position(b));
+}
+
+/** 「積む柱」で柱を並べるときの組み方。柱の根のメジャー（入れた順）と、ほかの柱に積むメジャー */
+export interface PillarPlan {
+    /** 「値」のメジャー（入れた順） */
+    measures: DataViewMetadataColumn[];
+    /** 柱ごとのいちばん下のメジャー（入れた順）。最初の柱が左（横棒は上） */
+    roots: DataViewMetadataColumn[];
+    /** ほかの柱に積むメジャー（入れた順）と、積む先の柱の根の key */
+    stacked: Array<{ source: DataViewMetadataColumn; root: string }>;
+    /** 積むメジャーの負の値を最初の柱の上に積む（オフなら積む柱の 0 の下へ） */
+    lossToFirst: boolean;
+}
+
+/** 「値」に入れたメジャー（入れた順）。凡例があると凡例の値ごとに複製されて届くので、1 つにまとめる */
+function measuresOf(view: DataView | undefined): DataViewMetadataColumn[] {
+    const found = new Map<string, DataViewMetadataColumn>();
+    for (const column of view?.categorical?.values ?? []) {
+        const source = column.source;
+        if (source?.roles?.measure && !found.has(keyOf(source))) found.set(keyOf(source), source);
+    }
+    const position = (source: DataViewMetadataColumn) =>
+        (source as DataViewMetadataColumn & { rolesIndex?: Record<string, number[]> }).rolesIndex?.measure?.[0] ?? 0;
+    return [...found.values()].sort((a, b) => position(a) - position(b));
+}
+
+/** メジャーに保存した「積む柱」（積む先のメジャーの queryName）。自分の柱なら空 */
+function stackOntoOf(source: DataViewMetadataColumn): string {
+    const value = source.objects?.columns?.stackOnto;
+    return typeof value === "string" && value !== STACK_OWN ? value : "";
+}
+
+/**
+ * 「積む柱」の組み方。どのメジャーもほかの柱に積まないなら null（今までどおり）。
+ * 積む先は、自分の柱に立つメジャー（それ自身がほかの柱に積まないもの）だけ。積む先が見つからない・それ自身もほかに積むなら自分の柱。
+ * パレートは柱を並べない（累積比はカテゴリの合計で引くので、柱を分けても意味が変わらない）
+ */
+export function pillarPlanOf(view: DataView | undefined, settings: VisualFormattingSettingsModel): PillarPlan | null {
+    const mode = String(settings.calculation.mode.value?.value ?? CALCULATION_MODES.none);
+    if (mode === CALCULATION_MODES.pareto) return null;
+    const measures = measuresOf(view);
+    if (measures.length < 2) return null;
+    const byKey = new Map(measures.map((m) => [keyOf(m), m]));
+    const targetOf = (m: DataViewMetadataColumn): string => {
+        const target = stackOntoOf(m);
+        if (!target || target === keyOf(m) || !byKey.has(target)) return "";
+        return stackOntoOf(byKey.get(target)!) && byKey.has(stackOntoOf(byKey.get(target)!)) ? "" : target;
+    };
+    const stacked = measures.filter((m) => targetOf(m)).map((source) => ({ source, root: targetOf(source) }));
+    if (!stacked.length) return null;
+    return { measures, roots: measures.filter((m) => !targetOf(m)), stacked, lossToFirst: settings.columns.stackLossToFirst.value ?? true };
+}
+
+/** 数として読める値（空白・数でない値は null） */
+const numberOf = (value: unknown): number | null => (typeof value === "number" && Number.isFinite(value) ? value : null);
+
+/**
+ * 柱 1 本ぶんを読む DataView。凡例があれば、柱の根のメジャーを凡例ごとに積み、ほかの柱に積むメジャーは凡例で分けずに
+ * 全体の値（列の小計）で 1 つの系列として積む。凡例が無ければ、柱の根のメジャーを系列にし、ほかの柱の根は値の無い系列として残す
+ * （どの柱も系列の並びをそろえ、色・凡例・書式の対象を柱をまたいで同じにする）。
+ * ほかの柱に積むメジャーは、どの柱にも 1 つの系列として置き、積む柱にだけ正の値を入れる。負の値（赤字）は、
+ * 最初の柱の上に絶対値で積み、ラベルとツールヒントは元の負の値で出す（PL の比例縮尺図で、損失を収益の側に置くのと同じ）
+ */
+function pillarViewOf(view: DataView, plan: PillarPlan, root: DataViewMetadataColumn): DataView {
+    const categorical = view.categorical!;
+    const values = categorical.values!;
+    const legend = !!values.source;
+    const rootKey = keyOf(root);
+    const firstKey = keyOf(plan.roots[0]);
+    const rootKeys = new Set(plan.roots.map(keyOf));
+    const stackedKeys = new Set(plan.stacked.map((s) => keyOf(s.source)));
+    const columnMap = new Map<DataViewValueColumn, DataViewValueColumn | null>();
+    const swap = (column: DataViewValueColumn): DataViewValueColumn | null => {
+        if (columnMap.has(column)) return columnMap.get(column)!;
+        const roles = { ...(column.source?.roles ?? {}) };
+        const key = column.source ? keyOf(column.source) : "";
+        let next: DataViewValueColumn | null = column;
+        if (roles.measure && key !== rootKey) {
+            if (!legend && rootKeys.has(key)) {
+                // 凡例なし：ほかの柱の根は、値の無い系列として残す（ハイライトも空）
+                const { highlights: _highlights, ...rest } = column;
+                next = { ...rest, values: column.values.map((): null => null) };
+            } else {
+                delete roles.measure;
+                next = Object.keys(roles).length ? { ...column, source: { ...column.source, roles } } : null;
+            }
+        }
+        columnMap.set(column, next);
+        return next;
+    };
+    const keep = (column: DataViewValueColumn | null): column is DataViewValueColumn => column !== null;
+    const groups: DataViewValueColumnGroup[] = values.grouped?.() ?? [];
+    const newGroups = groups.map((group) => ({ ...group, values: group.values.map(swap).filter(keep) }));
+
+    const rowCount = categorical.categories?.[0]?.values.length ?? values[0]?.values.length ?? 0;
+    // 積むメジャーの全体の値。凡例があれば列の小計、届かなければ凡例ごとの値を足す
+    const wholeOf = (source: DataViewMetadataColumn): Array<number | null> => {
+        const key = keyOf(source);
+        const subtotal = legend ? wholeMeasureValuesOf(categorical, key) : undefined;
+        if (subtotal) return subtotal.map(numberOf);
+        const columns = values.filter((c) => c.source && keyOf(c.source) === key && c.source.roles?.measure);
+        if (!legend) return (columns[0]?.values ?? []).map(numberOf);
+        return Array.from({ length: rowCount }, (_, i) => {
+            const nums = columns.map((c) => numberOf(c.values[i])).filter((v): v is number => v !== null);
+            return nums.length ? nums.reduce((a, b) => a + b, 0) : null;
+        });
+    };
+    const wholeColumns = plan.stacked.filter((s) => stackedKeys.has(keyOf(s.source))).map(({ source, root: target }): StackWholeColumn => {
+        const amounts = wholeOf(source);
+        const own = target === rootKey;
+        // 最初の柱に積むメジャーは、負の値もそのまま（ほかの積み上げと同じく 0 の下へ）
+        const lossHere = plan.lossToFirst && rootKey === firstKey && target !== firstKey;
+        const roles = { [STACK_WHOLE_ROLE]: true };
+        const cells = amounts.map((v) => (v === null ? null : own && (v > 0 || target === firstKey || !plan.lossToFirst) ? v : lossHere && v < 0 ? -v : null));
+        return {
+            source: { ...source, roles, groupName: undefined } as DataViewMetadataColumn,
+            values: cells,
+            ...(lossHere ? { signed: { source: { ...source, roles }, values: amounts } } : {}),
+        };
+    });
+    if (newGroups.length) newGroups[0] = { ...newGroups[0], values: [...newGroups[0].values, ...wholeColumns] };
+    else newGroups.push({ values: wholeColumns } as DataViewValueColumnGroup);
+    const newValues = Object.assign(newGroups.flatMap((group) => group.values), {
+        grouped: () => newGroups,
+        ...(values.source ? { source: values.source } : {}),
+        ...(values.identityFields ? { identityFields: values.identityFields } : {}),
+    }) as powerbi.DataViewValueColumns;
+    return { ...view, categorical: { ...categorical, values: newValues } };
 }
 
 /**

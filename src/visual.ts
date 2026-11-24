@@ -15,7 +15,7 @@ import { syncToneColors } from "./shared/formatCards";
 import "./../style/visual.less";
 import { App } from "./App";
 import { hasBrowserMenu } from "./shared/copyImage";
-import { VisualFormattingSettingsModel, CALCULATION_MODES } from "./settings";
+import { VisualFormattingSettingsModel, CALCULATION_MODES, STACK_OWN, StackTarget } from "./settings";
 import {
     VisualState,
     EMPTY_VISUAL_STATE,
@@ -172,6 +172,7 @@ export class Visual implements IVisual {
             labelTargets: viewModel.labelTargets,
             lineTargets: viewModel.lineTargets,
         });
+        this.formattingSettings.columns.applyStackTargets(stackTargetsOf(options.dataViews?.[0]));
         this.formattingSettings.applySingleSeriesFill(viewModel.seriesMode, viewModel.columns.fill, options.dataViews?.[0]?.metadata?.objects);
         // 単位ラベルの文字サイズ・カラーは、保存していなければ目盛りと同じものを書式ペインにも出す（保存はしない）
         this.formattingSettings.showUnitDefaults();
@@ -364,6 +365,7 @@ export class Visual implements IVisual {
     public getFormattingModel(): powerbi.visuals.FormattingModel {
         // 使わない符号の色は出さない（触っても何も起きない）
         syncToneColors(this.formattingSettings.dataLabels);
+        this.formattingSettings.plotArea.syncVisibility();
         return this.formattingSettings.formattingModel(this.formattingSettingsService);
     }
 
@@ -380,4 +382,23 @@ function hasRole(dataView: powerbi.DataView | undefined, role: string): boolean 
 /** レポートを編集中か。viewMode が View（0）なら閲覧中。渡されなければ編集中として扱う（今までと同じく案内を出す） */
 function isEditing(options: VisualUpdateOptions): boolean {
     return options.viewMode === undefined || options.viewMode !== 0;
+}
+
+/**
+ * 「積む柱」の欄に並べるメジャー（「値」に入れた順）と、保存された積む先。「比較の列」のときとパレートでは出さない
+ * （柱を並べないので）
+ */
+function stackTargetsOf(dataView: powerbi.DataView | undefined): StackTarget[] {
+    if (hasRole(dataView, "compareBy")) return [];
+    if (String(dataView?.metadata?.objects?.calculation?.mode ?? "") === CALCULATION_MODES.pareto) return [];
+    const found = new Map<string, StackTarget & { position: number }>();
+    for (const column of dataView?.metadata?.columns ?? []) {
+        if (!column.roles?.measure) continue;
+        const key = column.queryName ?? column.displayName;
+        if (found.has(key)) continue;
+        const saved = column.objects?.columns?.stackOnto;
+        const position = (column as powerbi.DataViewMetadataColumn & { rolesIndex?: Record<string, number[]> }).rolesIndex?.measure?.[0] ?? found.size;
+        found.set(key, { key, name: column.displayName, stackOnto: typeof saved === "string" ? saved : STACK_OWN, position });
+    }
+    return [...found.values()].sort((a, b) => a.position - b.position).map(({ key, name, stackOnto }) => ({ key, name, stackOnto }));
 }
